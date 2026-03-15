@@ -47,7 +47,7 @@ simlab env up my-env --daytona
 
 # Run a task
 simlab tasks run --env my-env \
-  --task ar-100-schedule-phone-screen \
+  --task 100_weaver_schedule_phone_screen \
   --agent-model gpt-5.2 \
   --agent-api-key "$OPENAI_API_KEY"
 
