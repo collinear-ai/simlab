@@ -1,0 +1,27 @@
+name: coding
+display_name: Coding Environment
+description: Sandboxed filesystem and bash shell via OpenHands — run code, edit files, execute commands.
+category: development
+tool_server_port: 8020
+
+exposed_ports: []
+
+services:
+  openhands-agent-server:
+    image: collinear/openhands-agent-server:latest
+    ports:
+      - "8000"
+    environment:
+      SESSION_API_KEY: dev-session-key
+
+  coding-env:
+    image: collinear/coding-env:latest
+    ports:
+      - "8020"
+    environment:
+      OPENHANDS_AGENT_SERVER_URL: http://openhands-agent-server:8000
+      OPENHANDS_SESSION_API_KEY: dev-session-key
+      OPENHANDS_WORKING_DIR: /workspace
+    depends_on:
+      openhands-agent-server:
+        condition: service_healthy

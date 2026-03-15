@@ -1,0 +1,41 @@
+name: email
+display_name: Email (MailHog)
+description: Email sending and inbox management via MailHog SMTP server.
+category: communication
+tool_server_port: 8040
+
+exposed_ports:
+  - port: 8025
+    description: MailHog web UI
+
+services:
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports:
+      - "8025"
+      - "1025"
+    environment: {}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8025/api/v2/messages || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  email-env:
+    image: collinear/email-env:latest
+    ports:
+      - "8040"
+    environment:
+      MAILHOG_BASE_URL: http://mailhog:8025
+      MAILHOG_SMTP_HOST: mailhog
+      MAILHOG_SMTP_PORT: "1025"
+    depends_on:
+      mailhog:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8040/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s

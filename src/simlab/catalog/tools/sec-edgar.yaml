@@ -1,0 +1,20 @@
+name: sec-edgar
+display_name: SEC EDGAR
+description: Search and retrieve SEC filings, company data, and financial documents.
+category: finance
+tool_server_port: 8070
+
+exposed_ports: []
+
+services:
+  sec-edgar-env:
+    image: collinear/sec-edgar-env:latest
+    ports:
+      - "8070"
+    environment: {}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8070/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s

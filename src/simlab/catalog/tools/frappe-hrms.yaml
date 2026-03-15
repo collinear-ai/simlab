@@ -1,0 +1,75 @@
+name: frappe-hrms
+display_name: Frappe HRMS
+description: Full HR management system with employee records, leave, attendance, and payroll.
+category: enterprise
+tool_server_port: 8030
+
+exposed_ports:
+  - port: 8000
+    description: Frappe HRMS web UI (Administrator / admin)
+
+services:
+  frappe-hrms-mariadb:
+    image: collinear/frappe-hrms-mariadb:latest
+    ports:
+      - "3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MARIADB_ROOT_PASSWORD: admin
+
+  frappe-hrms-redis:
+    image: collinear/frappe-hrms-redis:latest
+    ports:
+      - "6379"
+    environment: {}
+
+  frappe-hrms:
+    image: collinear/frappe-hrms:latest
+    ports:
+      - "8000"
+    environment:
+      FRAPPE_SITE_NAME: hrms.localhost
+      FRAPPE_ADMIN_PASSWORD: admin
+      FRAPPE_DB_HOST: frappe-hrms-mariadb
+      FRAPPE_DB_PORT: "3306"
+      FRAPPE_DB_ROOT_PASSWORD: admin
+      FRAPPE_REDIS_HOST: frappe-hrms-redis
+      FRAPPE_REDIS_PORT: "6379"
+      FRAPPE_SOCKETIO_PORT: "9000"
+      FRAPPE_DEVELOPER_MODE: "1"
+      FRAPPE_ENABLE_SCHEDULER: "1"
+      FRAPPE_INSTALL_APPS: hrms,collinear_hrms_seed
+      FRAPPE_DEPENDENCY_TIMEOUT: "180"
+    depends_on:
+      frappe-hrms-mariadb:
+        condition: service_healthy
+      frappe-hrms-redis:
+        condition: service_healthy
+
+  frappe-hrms-env:
+    image: collinear/frappe-hrms-env:latest
+    ports:
+      - "8030"
+    environment:
+      FRAPPE_BASE_URL: http://frappe-hrms:8000
+      FRAPPE_SITE_NAME: hrms.localhost
+      FRAPPE_ADMIN_USERNAME: Administrator
+      FRAPPE_ADMIN_PASSWORD: admin
+    depends_on:
+      frappe-hrms:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8030/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 120
+      start_period: 60s
+
+seed_services:
+  frappe-hrms-seed:
+    image: collinear/frappe-hrms-seed:latest
+    environment:
+      FRAPPE_TOOL_SERVER_URL: http://frappe-hrms-env:8030
+    depends_on:
+      frappe-hrms-env:
+        condition: service_healthy

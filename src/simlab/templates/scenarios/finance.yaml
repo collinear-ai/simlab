@@ -1,0 +1,7 @@
+name: finance
+display_name: Finance
+description: Financial analysis environment with SEC filings, market data, and Google Workspace.
+tools:
+  - sec-edgar
+  - twelve-data
+  - google-workspace

@@ -1,0 +1,24 @@
+name: twelve-data
+display_name: Twelve Data
+description: Real-time and historical market data — stocks, forex, crypto, and technical indicators.
+category: finance
+tool_server_port: 8080
+
+exposed_ports: []
+
+required_env_vars:
+  - TWELVE_DATA_API_KEY
+
+services:
+  twelve-data-env:
+    image: collinear/twelve-data-env:latest
+    ports:
+      - "8080"
+    environment:
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s

@@ -1,0 +1,10 @@
+*-env
+my-env.yaml
+email-calendar.yaml
+generated-tasks
+output/
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+.claude/

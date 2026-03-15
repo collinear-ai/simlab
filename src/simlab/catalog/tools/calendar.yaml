@@ -1,0 +1,89 @@
+name: calendar
+display_name: Calendar (Baikal)
+description: CalDAV calendar management — create, list, and manage events and calendars.
+category: productivity
+tool_server_port: 8050
+
+exposed_ports:
+  - port: 80
+    description: Baikal CalDAV web UI (admin / admin)
+
+services:
+  baikal:
+    image: ckulka/baikal:0.10.1-nginx
+    ports:
+      - "80"
+    environment: {}
+    volumes:
+      - baikal-config:/var/www/baikal/config
+      - baikal-specific:/var/www/baikal/Specific
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/ > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  chronos-mcp:
+    image: collinear/chronos-mcp:latest
+    ports:
+      - "8040"
+    environment:
+      CALDAV_BASE_URL: http://baikal:80/dav.php
+      CALDAV_USERNAME: chronos
+      CALDAV_PASSWORD: admin
+    depends_on:
+      baikal:
+        condition: service_healthy
+
+  chronos-server:
+    image: collinear/chronos-server:latest
+    ports:
+      - "8050"
+    environment:
+      CHRONOS_MCP_URL: http://chronos-mcp:8040/mcp
+      CALDAV_BASE_URL: http://baikal:80/dav.php
+      CALDAV_USERNAME: chronos
+      CALDAV_PASSWORD: admin
+    depends_on:
+      chronos-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8050/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+preseed_services:
+  baikal-preseed:
+    image: collinear/baikal-seed:latest
+    environment:
+      BAIKAL_ADMIN_PASSWORD: admin
+      BAIKAL_DAV_AUTH_TYPE: Digest
+      CALDAV_USERNAME: chronos
+      CALDAV_PASSWORD: admin
+    volumes:
+      - baikal-config:/var/www/baikal/config
+      - baikal-specific:/var/www/baikal/Specific
+    command: ["preseed"]
+
+seed_services:
+  baikal-seed:
+    image: collinear/baikal-seed:latest
+    environment:
+      BAIKAL_URL: http://baikal:80
+      BAIKAL_DAV_AUTH_TYPE: Digest
+      CALDAV_USERNAME: chronos
+      CALDAV_PASSWORD: admin
+    depends_on:
+      baikal:
+        condition: service_healthy
+    volumes:
+      - baikal-config:/var/www/baikal/config
+      - baikal-specific:/var/www/baikal/Specific
+    command: ["seed"]
+
+volumes:
+  baikal-config: {}
+  baikal-specific: {}

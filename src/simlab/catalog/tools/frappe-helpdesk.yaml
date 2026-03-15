@@ -1,0 +1,77 @@
+name: frappe-helpdesk
+display_name: Frappe Helpdesk
+description: Customer support helpdesk with ticket management, KB articles, and SLA tracking.
+category: enterprise
+tool_server_port: 8030
+
+exposed_ports:
+  - port: 8000
+    description: Frappe Helpdesk web UI (Administrator / admin)
+
+services:
+  frappe-helpdesk-mariadb:
+    image: collinear/frappe-helpdesk-mariadb:latest
+    ports:
+      - "3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MARIADB_ROOT_PASSWORD: admin
+
+  frappe-helpdesk-redis:
+    image: collinear/frappe-helpdesk-redis:latest
+    ports:
+      - "6379"
+    environment: {}
+
+  frappe-helpdesk:
+    image: collinear/frappe-helpdesk:latest
+    ports:
+      - "8000"
+    environment:
+      FRAPPE_SITE_NAME: helpdesk.localhost
+      FRAPPE_ADMIN_PASSWORD: admin
+      FRAPPE_DB_HOST: frappe-helpdesk-mariadb
+      FRAPPE_DB_PORT: "3306"
+      FRAPPE_DB_ROOT_PASSWORD: admin
+      FRAPPE_REDIS_HOST: frappe-helpdesk-redis
+      FRAPPE_REDIS_PORT: "6379"
+      FRAPPE_SOCKETIO_PORT: "9000"
+      FRAPPE_DEVELOPER_MODE: "1"
+      FRAPPE_ENABLE_SCHEDULER: "1"
+      FRAPPE_INSTALL_APPS: telephony,helpdesk
+      FRAPPE_DEPENDENCY_TIMEOUT: "180"
+    depends_on:
+      frappe-helpdesk-mariadb:
+        condition: service_healthy
+      frappe-helpdesk-redis:
+        condition: service_healthy
+
+  frappe-helpdesk-env:
+    image: collinear/frappe-helpdesk-env:latest
+    ports:
+      - "8030"
+    environment:
+      FRAPPE_BASE_URL: http://frappe-helpdesk:8000
+      FRAPPE_SITE_NAME: helpdesk.localhost
+      FRAPPE_ADMIN_USERNAME: Administrator
+      FRAPPE_ADMIN_PASSWORD: admin
+    depends_on:
+      frappe-helpdesk:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8030/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 120
+      start_period: 60s
+
+seed_services:
+  frappe-helpdesk-seed:
+    image: collinear/frappe-helpdesk-seed:latest
+    environment:
+      FRAPPE_TOOL_SERVER_URL: http://frappe-helpdesk-env:8030
+      FRAPPE_AUTO_GENERATE_API_KEYS: "0"
+      HELPDESK_SEED_DATA_DIR: /app/src/collinear/scenarios/customer_service/helpdesk_seed
+    depends_on:
+      frappe-helpdesk-env:
+        condition: service_healthy

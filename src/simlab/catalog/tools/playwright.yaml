@@ -1,0 +1,24 @@
+name: playwright
+display_name: Playwright Browser
+description: Browser automation tools via Playwright MCP — navigate, click, type, screenshot.
+category: browser
+tool_server_port: 8010
+
+exposed_ports: []
+
+services:
+  playwright-mcp-server:
+    image: collinear/playwright-mcp-server:latest
+    ports:
+      - "7999"
+    environment: {}
+
+  playwright-mcp:
+    image: collinear/playwright-env:latest
+    ports:
+      - "8010"
+    environment:
+      PLAYWRIGHT_MCP_BASE_URL: http://playwright-mcp-server:7999/mcp
+    depends_on:
+      playwright-mcp-server:
+        condition: service_healthy

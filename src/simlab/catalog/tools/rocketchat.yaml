@@ -1,0 +1,99 @@
+name: rocketchat
+display_name: Rocket.Chat
+description: Team messaging platform with channels, DMs, and bot integrations.
+category: communication
+tool_server_port: 8060
+
+required_env_vars:
+  - OPENAI_API_KEY
+
+exposed_ports:
+  - port: 3000
+    description: Rocket.Chat web UI (admin / admin123)
+
+services:
+  rocketchat-mongodb:
+    image: collinear/rocketchat-mongodb:6-preseeded
+    ports:
+      - "27017"
+    environment: {}
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --eval 'rs.status()' --quiet || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  rocketchat:
+    image: collinear/rocketchat:7.6.0
+    ports:
+      - "3000"
+    environment:
+      MONGO_URL: mongodb://rocketchat-mongodb:27017/rocketchat?replicaSet=rs0
+      MONGO_OPLOG_URL: mongodb://rocketchat-mongodb:27017/local?replicaSet=rs0
+      ROOT_URL: http://rocketchat:3000
+      PORT: "3000"
+      DEPLOY_METHOD: docker
+      ADMIN_USERNAME: admin
+      ADMIN_PASS: admin123
+      ADMIN_EMAIL: admin@example.com
+    depends_on:
+      rocketchat-mongodb:
+        condition: service_healthy
+
+  rocketchat-env:
+    image: collinear/rocketchat-env:latest
+    ports:
+      - "8060"
+    environment:
+      ROCKETCHAT_HOSTNAME: rocketchat
+      ROCKETCHAT_PORT: "3000"
+      ROCKETCHAT_AGENT_USERNAME: admin
+      ROCKETCHAT_AGENT_PASSWORD: admin123
+    depends_on:
+      rocketchat:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8060/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  rocketchat-seed:
+    image: collinear/rocketchat-seed:latest
+    ports: []
+    environment:
+      ROCKETCHAT_HOSTNAME: rocketchat
+      ROCKETCHAT_PORT: "3000"
+      ROCKETCHAT_ADMIN_CONFIG__USERNAME: admin
+      ROCKETCHAT_ADMIN_CONFIG__PASSWORD: admin123
+      ROCKETCHAT_AGENT_CONFIG__USERNAME: admin
+      ROCKETCHAT_AGENT_CONFIG__PASSWORD: admin123
+    depends_on:
+      rocketchat:
+        condition: service_healthy
+
+  sotopia-runtime:
+    image: collinear/sotopia-runtime:latest
+    ports: []
+    environment:
+      SOTOPIA_STORAGE_BACKEND: local
+      SOTOPIA_NPC_MODEL_NAME: gpt-4o-mini
+      SOTOPIA_ENV_MODEL_NAME: gpt-4o-mini
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ROCKETCHAT_HOSTNAME: rocketchat
+      ROCKETCHAT_PORT: "3000"
+      ROCKETCHAT_ADMIN_CONFIG__USERNAME: admin
+      ROCKETCHAT_ADMIN_CONFIG__PASSWORD: admin123
+      ROCKETCHAT_AGENT_CONFIG__USERNAME: admin
+      ROCKETCHAT_AGENT_CONFIG__PASSWORD: admin123
+    depends_on:
+      rocketchat:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 /healthcheck.py"]
+      interval: 10s
+      timeout: 5s
+      retries: 36
+      start_period: 180s

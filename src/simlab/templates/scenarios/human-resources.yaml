@@ -1,0 +1,8 @@
+name: human-resources
+display_name: Human Resources
+description: HR workflow environment with HRMS, team chat, email, and calendar.
+tools:
+  - frappe-hrms
+  - rocketchat
+  - email
+  - calendar
