@@ -26,32 +26,47 @@ SimLab lets you spin up isolated sandboxes, run AI agents against realistic task
 
 ## Quickstart
 
+Install
 ```bash
-pip install simulationlab
+git clone https://github.com/collinear-ai/simlab.git && cd simlab && uv sync
 ```
 
 Get your API keys and export them:
-
 ```bash
 export SIMLAB_COLLINEAR_API_KEY="col_..."   # from platform.collinear.ai (Developers > API Keys)
 export DAYTONA_API_KEY="dtn_..."            # from app.daytona.io
 export OPENAI_API_KEY="sk-..."              # from platform.openai.com/api-keys
+export SIMLAB_VERIFIER_MODEL="gpt-5.2"      # judge model (tasks also come with a programmatic verifier so can skip this)
+export SIMLAB_VERIFIER_PROVIDER="openai"    # litellm compatible provider name
+export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY" # corresponding key
 ```
 
-Then create an environment and run a task:
-
+Create an environment:
 ```bash
 # Create and start an environment on Daytona
-simlab env init my-env --template hr_recruiting
-simlab env up my-env --daytona
+uv run simlab env init my-env --template hr_recruiting
+uv run simlab env up my-env --daytona
+```
 
-# Run a task
-simlab tasks run --env my-env \
-  --task 100_weaver_schedule_phone_screen \
+Create and lists tasks in directory `./generated-tasks`
+```bash
+uv run simlab tasks-gen init --presets recruiting # Can go to the config.toml to setup number of tasks etc.
+uv run simlab tasks-gen list --tasks-dir ./generated-tasks # takes 5-10 mins with the default setting, choose haiku and 2 tasks for a faster generation.
+```
+
+
+Run a task with task id `task_id`.
+
+```bash
+uv run simlab tasks run --env my-env \
+  --task task_id \
+  --tasks-dir  ./generated-tasks
   --agent-model gpt-5.2 \
   --agent-api-key "$OPENAI_API_KEY"
+```
 
-# Tear down
+Tear down
+```bash
 simlab env down my-env --daytona
 ```
 
