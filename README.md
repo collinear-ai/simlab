@@ -12,6 +12,7 @@
   <a href="https://collinear.ai"><img src="https://img.shields.io/badge/Website-collinear.ai-orange?style=flat-square" alt="Website"></a>
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"></a>
+  <a href="https://discord.gg/FfHVP6Yc"><img src="https://img.shields.io/discord/discord-server?style=flat-square&logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord"></a>
 </p>
 
 ---
