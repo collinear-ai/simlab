@@ -16,12 +16,12 @@
 
 ---
 
-SimLab lets you spin up isolated sandboxes, run AI agents against realistic tasks, and evaluate their performance with automated verifiers. Browse pre-built scenario templates or compose your own from a catalog of tool servers.
+SimLab is the data layer for adaptively composing RL simulations and evaluating and refining agents. SimLab is toolset, agent harness and sandbox agnostic. Browse pre-built scenario templates or bring your own CLI/MCP toolset.
 
 - **Browse & compose** environments from a catalog of tool servers and scenario templates
 - **Run agents** against tasks using any LLM provider (OpenAI, Fireworks, custom endpoints)
 - **Generate custom tasks** with built-in task generation pipelines
-- **Evaluate automatically** with verifiers and LLM-as-a-judge scoring
+- **Evaluate automatically** with verifiers and reward model scoring
 - **Scale to the cloud** with Daytona for remote sandbox execution
 
 ## Quickstart
@@ -36,7 +36,7 @@ Get your API keys and export them:
 export SIMLAB_COLLINEAR_API_KEY="col_..."   # from platform.collinear.ai (Developers > API Keys)
 export DAYTONA_API_KEY="dtn_..."            # from app.daytona.io
 export OPENAI_API_KEY="sk-..."              # from platform.openai.com/api-keys
-export SIMLAB_VERIFIER_MODEL="gpt-5.2"      # judge model (tasks also come with a programmatic verifier so can skip this)
+export SIMLAB_VERIFIER_MODEL="gpt-5.2"      # reward model (tasks also come with a programmatic verifier so can skip this)
 export SIMLAB_VERIFIER_PROVIDER="openai"    # litellm compatible provider name
 export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY" # corresponding key
 ```
