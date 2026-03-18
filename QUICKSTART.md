@@ -138,7 +138,7 @@ simlab tasks list --tasks-dir ./generated-tasks   # or a local bundle
 ### A) Use a template
 
 ```bash
-simlab env init my-env --template hr_recruiting
+simlab env init my-env --template hr
 simlab env up my-env
 ```
 
@@ -148,7 +148,7 @@ simlab env up my-env
 If you already have guidance in a markdown file, you can import it at init time:
 
 ```bash
-simlab env init my-env --template hr_recruiting --scenario-guidance-file ./guidance.md
+simlab env init my-env --template hr --scenario-guidance-file ./guidance.md
 ```
 
 The file is read once and stored in `env.yaml` as `scenario_guidance_md`. Simlab does not keep a
@@ -225,7 +225,7 @@ If you generated a local task bundle, browse that bundle directly:
 simlab tasks list --tasks-dir ./generated-tasks
 ```
 
-Then run a specific task by ID. For `hr_recruiting`, an available task is `100_weaver_schedule_phone_screen`:
+Then run a specific task by ID. For `hr`, an available task is `100_weaver_schedule_phone_screen`:
 
 ```bash
 simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
@@ -327,7 +327,7 @@ When a task JSON includes a `verifiers` (or `evaluators`) list with `func: pytho
 simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
-Available tasks with verifiers include `100_weaver_schedule_phone_screen` under the `hr_recruiting` template and `0_flag_biased_compensation_adjustment_request` under the `hr_people_management` template.
+Available tasks with verifiers include `100_weaver_schedule_phone_screen` under the `hr` template and `0_flag_biased_compensation_adjustment_request` under the `hr_people_management` template.
 
 Verifiers run **locally**. You must configure the credentials for the LLM-as-a-judge when a verifier uses one. Configure judge settings via the `[verifier]` section in global config or via env variables:
 
@@ -366,7 +366,7 @@ Uses default `https://rl-gym-api.collinear.ai`. No Scenario Manager or monorepo 
 
 ```bash
 cd cli/simlab
-simlab env init my-env --template hr_recruiting
+simlab env init my-env --template hr
 simlab tools list
 simlab templates list
 simlab tasks list --env my-env
