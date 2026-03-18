@@ -1,0 +1,805 @@
+"""Parallel rollout orchestrator for Daytona sandboxes."""
+
+from __future__ import annotations
+
+import atexit
+import contextlib
+import json
+import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+from dataclasses import dataclass
+from dataclasses import field
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+from typing import Any
+
+import click
+
+from simlab.cli.tasks import _CALENDAR_DEFAULT_USERNAME
+from simlab.cli.tasks import _apply_verifier_env_overrides
+from simlab.cli.tasks import _build_services_available_section
+from simlab.cli.tasks import _build_skills_guidance_section
+from simlab.cli.tasks import _collect_task_calendar_accounts
+from simlab.cli.tasks import _effective_tool_servers
+from simlab.cli.tasks import _ensure_task_calendar_accounts
+from simlab.cli.tasks import _get_local_verifier_file_path
+from simlab.cli.tasks import _load_skills_markdown
+from simlab.cli.tasks import _maybe_run_rubric_judge
+from simlab.cli.tasks import _restore_env
+from simlab.cli.tasks import _rewrite_tool_server_urls
+from simlab.cli.tasks import _require_reachable_endpoints
+from simlab.cli.tasks import _seed_task_data
+from simlab.cli.tasks import _task_uses_calendar
+from simlab.cli.tasks import get_agent_runtime_helpers
+from simlab.cli.tasks import get_env_runtime_helpers
+from simlab.cli.tasks import get_verifier_runtime_helpers
+from simlab.runtime.daytona_runner import _SNAPSHOT_NAME
+from simlab.runtime.daytona_runner import CreateSandboxFromSnapshotParams
+from simlab.runtime.daytona_runner import _get_daytona
+from simlab.runtime.daytona_runner import _run_profiled_services_in_sandbox
+from simlab.runtime.daytona_runner import setup_sandbox_environment
+from simlab.runtime.daytona_runner import teardown_sandbox
+
+# ---------------------------------------------------------------------------
+# Result dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RolloutResult:
+    """Outcome of a single parallel rollout."""
+
+    rollout_idx: int
+    sandbox_id: str = ""
+    reward: float | None = None
+    verification_passed: bool | None = None
+    error: str | None = None
+    steps_taken: int = 0
+    duration_seconds: float = 0.0
+    artifacts_path: Path | None = None
+
+
+@dataclass
+class ParallelRunSummary:
+    """Aggregated results across all parallel rollouts."""
+
+    task_id: str
+    rollout_count: int
+    results: list[RolloutResult] = field(default_factory=list)
+    total_duration_seconds: float = 0.0
+    output_dir: Path | None = None
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+class ParallelDaytonaOrchestrator:
+    """Run N rollouts of the same task across isolated Daytona sandboxes."""
+
+    def __init__(  # noqa: D107
+        self,
+        rollout_count: int,
+        max_parallel: int,
+        daytona_api_key: str | None = None,
+    ) -> None:
+        self._rollout_count = rollout_count
+        self._max_parallel = max_parallel
+        self._daytona_api_key = daytona_api_key
+
+        # Thread-safe tracking of active sandboxes for cleanup.
+        self._lock = threading.Lock()
+        self._active_sandboxes: dict[int, tuple[Any, Any]] = {}  # idx -> (client, sandbox)
+
+        # Durable state file tracking sandbox IDs for crash recovery.
+        self._state_file: Path | None = None
+
+        # Serialize verifier env overrides (os.environ is process-wide).
+        self._verifier_env_lock = threading.Lock()
+
+        self._cleanup_registered = False
+
+        # Cancellation event — set on Ctrl+C so in-flight workers exit early.
+        self._cancel = threading.Event()
+
+    # -- durable sandbox state -----------------------------------------------
+
+    def _persist_sandbox(self, sandbox_id: str) -> None:
+        """Record a sandbox ID on disk so it can be cleaned up after a crash."""
+        if self._state_file is None:
+            return
+        with self._lock:
+            state = self._read_state_file()
+            state[sandbox_id] = sandbox_id
+            self._write_state_file(state)
+
+    def _unpersist_sandbox(self, sandbox_id: str) -> None:
+        """Remove a sandbox ID from the durable state after successful teardown."""
+        if self._state_file is None:
+            return
+        with self._lock:
+            state = self._read_state_file()
+            state.pop(sandbox_id, None)
+            self._write_state_file(state)
+
+    def _read_state_file(self) -> dict[str, str]:
+        if self._state_file is None or not self._state_file.exists():
+            return {}
+        with contextlib.suppress(json.JSONDecodeError, OSError):
+            return json.loads(self._state_file.read_text())
+        return {}
+
+    def _write_state_file(self, state: dict[str, str]) -> None:
+        if self._state_file is None:
+            return
+        if state:
+            self._state_file.write_text(json.dumps(state, indent=2))
+        else:
+            self._state_file.unlink(missing_ok=True)
+
+    @staticmethod
+    def cleanup_orphaned_sandboxes(
+        state_file: Path,
+        daytona_api_key: str | None = None,
+    ) -> int:
+        """Clean up sandboxes leaked by a crashed parallel run.
+
+        Reads *state_file* (``parallel-sandboxes.json``) and attempts to
+        delete every sandbox listed.  Successfully deleted entries are removed
+        from the file.  Returns the number of sandboxes deleted.
+        """
+        if not state_file.exists():
+            return 0
+
+        state: dict[str, str] = {}
+        with contextlib.suppress(json.JSONDecodeError, OSError):
+            state = json.loads(state_file.read_text())
+        if not state:
+            return 0
+
+        daytona = _get_daytona(daytona_api_key)
+        deleted = 0
+        failed: dict[str, str] = {}
+
+        for sandbox_id in list(state.values()):
+            try:
+                sandbox = daytona.get(sandbox_id)
+                daytona.delete(sandbox)
+                click.echo(f"  Deleted orphaned sandbox {sandbox_id}")
+                deleted += 1
+            except Exception as exc:
+                click.echo(
+                    click.style(
+                        f"  Failed to delete sandbox {sandbox_id}: {exc}",
+                        fg="yellow",
+                    ),
+                    err=True,
+                )
+                failed[sandbox_id] = sandbox_id
+
+        if failed:
+            state_file.write_text(json.dumps(failed, indent=2))
+        else:
+            state_file.unlink(missing_ok=True)
+
+        return deleted
+
+    # -- public API ----------------------------------------------------------
+
+    def execute(
+        self,
+        *,
+        task_id: str,
+        task_data: dict[str, Any],
+        profiles: dict[str, dict[str, Any]],
+        compose_dir: Path,
+        tool_ports: dict[str, int],
+        extra_tool_urls: dict[str, str] | None = None,
+        preseed_svc_names: list[str] | None = None,
+        seed_svc_names: list[str] | None = None,
+        config: Any,  # noqa: ANN401
+        config_path: str,
+        model: str,
+        provider: str,
+        api_key: str | None,
+        base_url: str | None,
+        max_steps: int,
+        agent_import_path: str | None,
+        agent_timeout_seconds: float,
+        no_seed: bool,
+        bundle_dir: Path | None,
+        global_cfg: Any,  # noqa: ANN401
+        backend_id: str | None,
+        base_url_api: str,
+        scenario_manager_api_key: str | None,
+    ) -> ParallelRunSummary:
+        """Execute all rollouts and return aggregated summary."""
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        run_dir = Path("output") / f"parallel_run_{task_id}_{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        self._state_file = compose_dir / "parallel-sandboxes.json"
+
+        # Register cleanup once.
+        if not self._cleanup_registered:
+            atexit.register(self._cleanup_all)
+            self._cleanup_registered = True
+
+        summary = ParallelRunSummary(
+            task_id=task_id,
+            rollout_count=self._rollout_count,
+            output_dir=run_dir,
+        )
+
+        click.echo(
+            click.style(
+                f"\nStarting {self._rollout_count} parallel rollout(s) "
+                f"(max {self._max_parallel} concurrent)\n",
+                bold=True,
+            )
+        )
+        start = time.monotonic()
+
+        kwargs = {
+            "task_data": task_data,
+            "profiles": profiles,
+            "compose_dir": compose_dir,
+            "tool_ports": tool_ports,
+            "extra_tool_urls": extra_tool_urls or {},
+            "preseed_svc_names": preseed_svc_names,
+            "seed_svc_names": seed_svc_names,
+            "config": config,
+            "config_path": config_path,
+            "model": model,
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": base_url,
+            "max_steps": max_steps,
+            "agent_import_path": agent_import_path,
+            "agent_timeout_seconds": agent_timeout_seconds,
+            "no_seed": no_seed,
+            "bundle_dir": bundle_dir,
+            "global_cfg": global_cfg,
+            "backend_id": backend_id,
+            "base_url_api": base_url_api,
+            "scenario_manager_api_key": scenario_manager_api_key,
+            "run_dir": run_dir,
+        }
+
+        executor = ThreadPoolExecutor(max_workers=self._max_parallel)
+        futures = {
+            executor.submit(self._run_single_rollout, idx, **kwargs): idx
+            for idx in range(self._rollout_count)
+        }
+
+        try:
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    result = future.result()
+                except (Exception, SystemExit) as exc:
+                    result = RolloutResult(
+                        rollout_idx=idx,
+                        error=str(exc),
+                    )
+                summary.results.append(result)
+        except KeyboardInterrupt:
+            click.echo(
+                click.style(
+                    "\nInterrupted — cancelling pending rollouts and cleaning up...",
+                    fg="yellow",
+                )
+            )
+            # Signal in-flight workers to exit at their next checkpoint.
+            self._cancel.set()
+            # Cancel queued (not-yet-started) futures.
+            for fut in futures:
+                fut.cancel()
+            # Don't block on long-running Daytona/agent calls — shut down
+            # immediately and let _cleanup_all tear down any active sandboxes.
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._cleanup_all()
+            raise
+        else:
+            executor.shutdown(wait=True)
+
+        summary.results.sort(key=lambda r: r.rollout_idx)
+        summary.total_duration_seconds = time.monotonic() - start
+
+        # Write summary.json
+        self._write_summary(summary, run_dir)
+
+        return summary
+
+    def _check_cancelled(self, tag: str) -> None:
+        """Raise if cancellation was requested (Ctrl+C)."""
+        if self._cancel.is_set():
+            raise RuntimeError(f"{tag} Cancelled")
+
+    # -- single rollout lifecycle --------------------------------------------
+
+    def _run_single_rollout(
+        self,
+        rollout_idx: int,
+        *,
+        task_data: dict[str, Any],
+        profiles: dict[str, dict[str, Any]],
+        compose_dir: Path,
+        tool_ports: dict[str, int],
+        extra_tool_urls: dict[str, str],
+        preseed_svc_names: list[str] | None,
+        seed_svc_names: list[str] | None,
+        config: Any,  # noqa: ANN401
+        config_path: str,
+        model: str,
+        provider: str,
+        api_key: str | None,
+        base_url: str | None,
+        max_steps: int,
+        agent_import_path: str | None,
+        agent_timeout_seconds: float,
+        no_seed: bool,
+        bundle_dir: Path | None,
+        global_cfg: Any,  # noqa: ANN401
+        backend_id: str | None,
+        base_url_api: str,
+        scenario_manager_api_key: str | None,
+        run_dir: Path,
+    ) -> RolloutResult:
+        """Full lifecycle for one rollout: create -> setup -> seed -> run -> verify -> teardown."""
+        tag = f"[rollout {rollout_idx + 1}/{self._rollout_count}]"
+        result = RolloutResult(rollout_idx=rollout_idx)
+        rollout_start = time.monotonic()
+
+        daytona_client = _get_daytona(self._daytona_api_key)
+        sandbox = None
+
+        try:
+            # 1. Create sandbox
+            self._check_cancelled(tag)
+            click.echo(f"{tag} Creating Daytona sandbox...")
+            sandbox = daytona_client.create(
+                CreateSandboxFromSnapshotParams(
+                    snapshot=_SNAPSHOT_NAME,
+                    public=True,
+                ),
+            )
+            result.sandbox_id = sandbox.id
+
+            with self._lock:
+                self._active_sandboxes[rollout_idx] = (daytona_client, sandbox)
+            self._persist_sandbox(sandbox.id)
+
+            # 2. Setup environment
+            self._check_cancelled(tag)
+            endpoints = setup_sandbox_environment(
+                sandbox,
+                compose_dir,
+                tool_ports,
+                preseed_svc_names,
+                log_prefix=tag,
+            )
+
+            # Include external URL-backed tools in endpoints.
+            if extra_tool_urls:
+                endpoints.update(extra_tool_urls)
+
+            # Wait for all tool servers to become reachable (up to 120s).
+            click.echo(f"{tag} Waiting for tool servers...")
+            _require_reachable_endpoints(
+                endpoints=endpoints,
+                action="tool server readiness",
+                using_daytona=True,
+                wait=True,
+                timeout=120,
+                poll_interval=5,
+                log_prefix=tag,
+            )
+
+            # 2b. Run env-level seed services (after services are healthy).
+            self._check_cancelled(tag)
+            if seed_svc_names:
+                click.echo(f"{tag} Running environment seed services...")
+                _run_profiled_services_in_sandbox(
+                    sandbox,
+                    seed_svc_names,
+                    profile="seed",
+                    log_prefix=tag,
+                )
+
+            # 3. Provision calendar accounts (unconditional) + seed task data
+            self._check_cancelled(tag)
+            self._provision_calendar_accounts(
+                tag,
+                sandbox,
+                task_data,
+                profiles,
+                endpoints,
+                config,
+                config_path,
+            )
+            if not no_seed:
+                self._seed_rollout(tag, task_data, profiles, endpoints)
+
+            # 4. Build environment + run agent
+            self._check_cancelled(tag)
+            rewritten = _rewrite_tool_server_urls(task_data, endpoints)
+            tool_servers = _effective_tool_servers(rewritten, endpoints)
+            if not tool_servers:
+                raise RuntimeError(  # noqa: TRY301
+                    "Task has no valid tool_servers after URL resolution"
+                )
+
+            http_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
+            environment = http_tool_env_cls(tool_servers=tool_servers)
+
+            instruction = rewritten.get("task", "")
+            skills_section = _build_skills_guidance_section(
+                _load_skills_markdown(config=config, bundle_dir=bundle_dir)
+            )
+            if skills_section:
+                instruction = f"{instruction}\n\n{skills_section}"
+            services_section = _build_services_available_section(
+                config,
+                daytona=True,
+                config_path=config_path,
+                endpoints=endpoints,
+            )
+            if services_section:
+                instruction = f"{instruction}\n\n{services_section}"
+
+            meta = task_data.get("meta", {})
+            click.echo(f"{tag} Running agent ({model} via {provider})...")
+
+            artifacts = run_with_agent_contract(
+                task_id=meta.get("task_id", ""),
+                instruction=instruction,
+                model=model,
+                provider=provider,
+                max_steps=max_steps,
+                environment=environment,
+                agent_import_path=agent_import_path,
+                timeout_seconds=agent_timeout_seconds,
+                api_key=api_key,
+                base_url=base_url,
+                stop_event=self._cancel,
+            )
+            result.steps_taken = artifacts.steps_taken
+
+            # 5. Save artifacts
+            rollout_dir = run_dir / f"rollout_{rollout_idx}"
+            rollout_dir.mkdir(parents=True, exist_ok=True)
+            output_path = rollout_dir / "artifacts.json"
+            artifacts.dump(output_path)
+            result.artifacts_path = output_path
+
+            if artifacts.error:
+                click.echo(click.style(f"{tag} Agent error: {artifacts.error}", fg="yellow"))
+
+            # 6. Run verifiers
+            self._check_cancelled(tag)
+            result.reward, result.verification_passed = self._run_verifiers(
+                tag=tag,
+                task_data=task_data,
+                artifacts=artifacts,
+                tool_servers=tool_servers,
+                rollout_dir=rollout_dir,
+                bundle_dir=bundle_dir,
+                global_cfg=global_cfg,
+                backend_id=backend_id,
+                base_url_api=base_url_api,
+                scenario_manager_api_key=scenario_manager_api_key,
+                env_dir=Path(config_path).parent,
+            )
+
+            # Match single-rollout behavior: agent error + no verifiers = failure.
+            if artifacts.error and result.verification_passed is None:
+                result.error = f"Agent error (no verifiers): {artifacts.error}"
+
+            status = "passed" if result.verification_passed else "failed"
+            if result.verification_passed is None:
+                status = "no verifiers"
+            click.echo(
+                click.style(
+                    f"{tag} Completed — reward={result.reward}, "
+                    f"steps={result.steps_taken}, {status}",
+                    fg="green" if result.verification_passed else "yellow",
+                )
+            )
+
+        except (Exception, SystemExit) as exc:
+            result.error = str(exc)
+            click.echo(click.style(f"{tag} Failed: {exc}", fg="red"), err=True)
+
+        finally:
+            # 7. Teardown sandbox
+            if sandbox is not None:
+                click.echo(f"{tag} Tearing down sandbox...")
+                deleted = teardown_sandbox(daytona_client, sandbox, log_prefix=tag)
+                if deleted:
+                    with self._lock:
+                        self._active_sandboxes.pop(rollout_idx, None)
+                    self._unpersist_sandbox(sandbox.id)
+                else:
+                    click.echo(
+                        click.style(
+                            f"{tag} Sandbox delete failed; will retry in cleanup.",
+                            fg="yellow",
+                        ),
+                        err=True,
+                    )
+
+            result.duration_seconds = time.monotonic() - rollout_start
+
+        return result
+
+    # -- helpers -------------------------------------------------------------
+
+    def _provision_calendar_accounts(
+        self,
+        tag: str,
+        sandbox: Any,  # noqa: ANN401
+        task_data: dict[str, Any],
+        profiles: dict[str, dict[str, Any]],
+        endpoints: dict[str, str],
+        config: Any,  # noqa: ANN401
+        config_path: str,
+    ) -> None:
+        """Provision CalDAV users and register calendar accounts in ephemeral sandbox."""
+        if not _task_uses_calendar(task_data):
+            return
+
+        accounts = [
+            a
+            for a in _collect_task_calendar_accounts(task_data)
+            if a and a != _CALENDAR_DEFAULT_USERNAME
+        ]
+        if not accounts:
+            return
+
+        click.echo(f"{tag} Provisioning calendar users: {', '.join(accounts)}")
+
+        get_profiled_service_names, _ = get_env_runtime_helpers()
+        config_file = Path(config_path)
+
+        preseed_svc_names = get_profiled_service_names(
+            config,
+            profile="preseed",
+            config_path=config_file,
+            tool_names=["calendar"],
+        )
+        seed_svc_names = get_profiled_service_names(
+            config,
+            profile="seed",
+            config_path=config_file,
+            tool_names=["calendar"],
+        )
+
+        env_overrides = {"CALDAV_USERS": ",".join(accounts)}
+        if preseed_svc_names:
+            _run_profiled_services_in_sandbox(
+                sandbox,
+                preseed_svc_names,
+                profile="preseed",
+                env_overrides=env_overrides,
+                log_prefix=tag,
+            )
+        if seed_svc_names:
+            _run_profiled_services_in_sandbox(
+                sandbox,
+                seed_svc_names,
+                profile="seed",
+                env_overrides=env_overrides,
+                log_prefix=tag,
+            )
+
+        # Register accounts with the calendar tool server
+        _ensure_task_calendar_accounts(task_data, profiles, endpoints, config)
+
+    def _seed_rollout(
+        self,
+        tag: str,
+        task_data: dict[str, Any],
+        profiles: dict[str, dict[str, Any]],
+        endpoints: dict[str, str],
+    ) -> None:
+        """Seed emails and calendar events for a single rollout."""
+        emails = task_data.get("seed_emails", [])
+        cal_events = task_data.get("seed_calendar_events", [])
+        if not emails and not cal_events:
+            return
+
+        click.echo(f"{tag} Seeding task data...")
+        ok, fail = _seed_task_data(task_data, profiles, endpoints)
+        if fail:
+            click.echo(click.style(f"{tag} Seeding had {fail} failure(s).", fg="yellow"))
+        else:
+            click.echo(click.style(f"{tag} {ok} item(s) seeded.", fg="green"))
+
+    def _run_verifiers(
+        self,
+        *,
+        tag: str,
+        task_data: dict[str, Any],
+        artifacts: Any,  # noqa: ANN401
+        tool_servers: dict[str, str],
+        rollout_dir: Path,
+        bundle_dir: Path | None,
+        global_cfg: Any,  # noqa: ANN401
+        backend_id: str | None,
+        base_url_api: str,
+        scenario_manager_api_key: str | None,
+        env_dir: Path,
+    ) -> tuple[float | None, bool | None]:
+        """Run verifiers and return ``(reward, passed)``."""
+        evaluators = task_data.get("verifiers") or task_data.get("evaluators")
+        if not evaluators:
+            return None, None
+
+        build_verifier_artifacts, infer_scenario_from_evaluator, run_verifier = (
+            get_verifier_runtime_helpers()
+        )
+        verifier_scenario = infer_scenario_from_evaluator(evaluators[0]) or backend_id or ""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump(task_data, f, indent=2)
+            task_file = Path(f.name)
+
+        try:
+            adapter = build_verifier_artifacts(artifacts, task_file, tool_servers)
+            verifier_results: list[dict[str, Any]] = []
+            click.echo(f"{tag} Running verifiers...")
+            with self._verifier_env_lock:
+                original_env, applied_env = _apply_verifier_env_overrides(global_cfg)
+                try:
+                    for _i, ev in enumerate(evaluators, 1):
+                        if ev.get("func") != "python_module" or not ev.get("module"):
+                            continue
+                        mod_path = ev["module"]
+                        v_result = run_verifier(
+                            mod_path,
+                            adapter,
+                            verifier_scenario,
+                            scenario_manager_base_url=base_url_api,
+                            scenario_manager_api_key=scenario_manager_api_key,
+                            local_verifier_path=(
+                                _get_local_verifier_file_path(bundle_dir, mod_path)
+                                if bundle_dir is not None
+                                else None
+                            ),
+                            verifier_cache_root=env_dir / "verifiers",
+                        )
+                        verifier_results.append(
+                            {
+                                "module": mod_path,
+                                "success": v_result.success,
+                                "message": v_result.message or "",
+                                "output": v_result.output or "",
+                            }
+                        )
+                finally:
+                    _restore_env(original_env, applied_env)
+
+            all_passed = all(r["success"] for r in verifier_results)
+            reward = 1.0 if all_passed else 0.0
+
+            # Rubric judge (optional)
+            rubric_result_dict = _maybe_run_rubric_judge(
+                task_data=task_data,
+                bundle_dir=bundle_dir,
+                messages=list(artifacts.messages),
+                global_cfg=global_cfg,
+            )
+
+            # Write verifier output files
+            verifier_dir = rollout_dir / "verifier"
+            verifier_dir.mkdir(parents=True, exist_ok=True)
+            (verifier_dir / "reward.txt").write_text(
+                "1" if all_passed else "0",
+                encoding="utf-8",
+            )
+            reward_payload: dict[str, Any] = {
+                "reward": reward,
+                "verifier_results": verifier_results,
+            }
+            if rubric_result_dict is not None:
+                reward_payload["rubric_result"] = rubric_result_dict
+            (verifier_dir / "reward.json").write_text(
+                json.dumps(reward_payload, indent=2),
+                encoding="utf-8",
+            )
+
+            return reward, all_passed
+
+        finally:
+            task_file.unlink(missing_ok=True)
+
+    def _cleanup_all(self) -> None:
+        """Tear down any sandboxes still running (called via atexit)."""
+        with self._lock:
+            remaining = dict(self._active_sandboxes)
+
+        if not remaining:
+            return
+
+        click.echo(
+            click.style(
+                f"\nCleaning up {len(remaining)} sandbox(es)...",
+                fg="yellow",
+            )
+        )
+        for idx, (client, sandbox) in remaining.items():
+            try:
+                deleted = teardown_sandbox(client, sandbox, log_prefix=f"[cleanup rollout {idx}]")
+            except Exception:
+                deleted = False
+            if not deleted:
+                # Teardown failed — keep in state file for manual recovery.
+                click.echo(
+                    click.style(
+                        f"  [cleanup rollout {idx}] Teardown failed; sandbox {sandbox.id} "
+                        f"preserved in state file for manual cleanup.",
+                        fg="yellow",
+                    ),
+                    err=True,
+                )
+                continue
+            # Only remove from tracking after successful deletion.
+            with self._lock:
+                self._active_sandboxes.pop(idx, None)
+            self._unpersist_sandbox(sandbox.id)
+
+    @staticmethod
+    def _write_summary(summary: ParallelRunSummary, run_dir: Path) -> None:
+        """Write summary.json to the output directory."""
+        # A rollout is "passed" only when it has no error AND verification
+        # did not explicitly fail.  This matches the CLI exit-code logic
+        # which treats ``verification_passed is False`` as a failure.
+        passed = [
+            r
+            for r in summary.results
+            if r.error is None and r.verification_passed is not False
+        ]
+        failed = [
+            r
+            for r in summary.results
+            if r.error is not None or r.verification_passed is False
+        ]
+        # Include all rewards (even 0.0 from failed verifications) so the
+        # average reflects actual agent performance, not just the successes.
+        rewards = [r.reward for r in summary.results if r.reward is not None]
+
+        payload = {
+            "task_id": summary.task_id,
+            "rollout_count": summary.rollout_count,
+            "passed": len(passed),
+            "failed": len(failed),
+            "avg_reward": (sum(rewards) / len(rewards)) if rewards else None,
+            "avg_steps": (
+                sum(r.steps_taken for r in passed) / len(passed) if passed else None
+            ),
+            "total_duration_seconds": round(summary.total_duration_seconds, 1),
+            "results": [
+                {
+                    "rollout_idx": r.rollout_idx,
+                    "sandbox_id": r.sandbox_id,
+                    "reward": r.reward,
+                    "verification_passed": r.verification_passed,
+                    "steps": r.steps_taken,
+                    "duration": round(r.duration_seconds, 1),
+                    "error": r.error,
+                }
+                for r in summary.results
+            ],
+        }
+        (run_dir / "summary.json").write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )

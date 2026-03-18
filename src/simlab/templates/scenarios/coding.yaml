@@ -1,0 +1,7 @@
+name: coding
+display_name: Coding
+description: Software development environment with sandboxed workspace, browser automation, and team chat.
+tools:
+  - coding
+  - playwright
+  - rocketchat

@@ -16,7 +16,9 @@ from typing import Any
 import click
 import yaml
 
+from simlab.cli.progress import DefaultReporter
 from simlab.config import resolve_daytona_api_key
+from simlab.runtime.compose_ps import parse_ps_output
 
 _daytona_not_found_error: type[Exception]
 
@@ -45,9 +47,6 @@ else:
     _daytona_not_found_error = DaytonaSdkNotFoundError
 
 DaytonaNotFoundError = _daytona_not_found_error
-
-from simlab.cli.progress import DefaultReporter
-from simlab.runtime.compose_ps import parse_ps_output
 
 _STATE_FILE = "daytona-state.json"
 _SNAPSHOT_NAME = "docker-dind"

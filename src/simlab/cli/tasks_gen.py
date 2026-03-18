@@ -28,6 +28,8 @@ from simlab.telemetry import emit_cli_event
 from simlab.telemetry import resolve_scenario_manager_capture_config
 from simlab.telemetry import with_command_telemetry
 
+from simlab.cli.tasks_gen_presets import PRESETS
+
 _POLL_INTERVAL_SECONDS = 3
 
 # Step names reported by the pipeline, in expected order.
@@ -45,9 +47,6 @@ _STEP_NAMES = [
     "Step 9: Generate verifiers",
     "Step 10: Refine rubrics",
 ]
-
-
-from simlab.cli.tasks_gen_presets import PRESETS
 
 _AVAILABLE_PRESETS = list(PRESETS.keys())
 

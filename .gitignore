@@ -13,5 +13,5 @@ my-env.yaml
 email-calendar.yaml
 generated-tasks
 environments
-simlab
+/simlab
 daytona-state.json
