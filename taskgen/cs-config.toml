@@ -1,0 +1,294 @@
+preset = "customer_support"
+project_root = ""
+
+[agent]
+role = "Customer support agent"
+description = "Handles end-to-end customer support workflows: triaging incoming tickets, resolving issues using the knowledge base and saved replies, managing multi-turn customer conversations across chat and email, escalating technical issues to engineering and exception requests to the support manager, enforcing SLA compliance, and coordinating cross-channel resolution for enterprise/VIP accounts."
+
+[[toolset]]
+name = "Helpdesk"
+description = "Frappe-based helpdesk for ticket lifecycle management, knowledge base, and saved replies"
+operations = [
+    "create_ticket",
+    "get_ticket",
+    "update_ticket",
+    "list_tickets",
+    "search_tickets",
+    "assign_ticket",
+    "send_ticket_email",
+    "send_internal_email",
+    "search_kb",
+    "get_kb_article",
+    "list_saved_replies",
+    "render_saved_reply",
+    "create_ticket_from_chat",
+    "link_chat_to_ticket",
+    "get_sla",
+    "check_sla_status",
+    "get_assignment_rules",
+]
+
+[[toolset]]
+name = "Chat"
+description = "Rocket.Chat for real-time customer conversations and internal coordination"
+operations = [
+    "send",
+    "read",
+]
+
+[[toolset]]
+name = "Email"
+description = "Send and read customer-facing and internal emails"
+operations = [
+    "send",
+    "read",
+]
+
+[[toolset]]
+name = "Browser"
+description = "Playwright-based browser for verifying helpdesk UI state"
+operations = [
+    "navigate",
+    "click",
+    "fill",
+    "screenshot",
+]
+
+[scenario]
+name = "customer_support"
+role_label = "Customer support professional"
+conventions = "- Always search the knowledge base before escalating to engineering\n- Use saved replies for greeting and acknowledgment to ensure consistency\n- Follow SLA response-time requirements (Critical <1h, High <4h, Medium <8h)\n- Document all customer interactions as ticket comments or internal notes\n- Link Rocket.Chat conversations to tickets for audit trail\n- Escalate technical issues to engineering with full reproduction context\n- Route exception/approval requests to support manager, not engineering\n- Use empathetic, professional language — acknowledge frustration before solving\n- VIP/Enterprise customers get priority queue; always check customer tier first\n- Never share internal escalation notes or engineering threads with customers\n"
+policies = [
+    "Critical-priority tickets require first response within 1 hour",
+    "High-priority tickets require first response within 4 hours",
+    "Billing adjustments or refunds over $500 require support manager approval",
+    "Data access or deletion requests require identity verification and compliance review",
+    "VIP and Enterprise customers have priority queue access and dedicated SLA",
+    "Technical escalations must include: steps to reproduce, customer tier, and SLA status",
+    "Ticket reassignment must include a handoff comment explaining context",
+    "Resolved tickets must have a customer-facing resolution email sent before closing",
+]
+
+[workspace]
+email_domain = "weaverenterprises.com"
+agent_email = "support@weaverenterprises.com"
+environment_dynamics_file = ""
+constraint_rules_file = ""
+
+[[workflows]]
+name = "Triage and resolve incoming ticket"
+steps = [
+    "Read ticket details and identify customer tier",
+    "Check SLA status and priority",
+    "Search knowledge base for known solution",
+    "Apply saved reply for acknowledgment",
+    "Resolve with KB article or custom response",
+    "Update ticket status to Resolved",
+    "Send resolution email to customer",
+]
+
+[[workflows]]
+name = "Chat-to-ticket conversion"
+steps = [
+    "Read customer message on Rocket.Chat",
+    "Create ticket from chat conversation",
+    "Link chat room to the new ticket",
+    "Acknowledge customer in chat",
+    "Continue resolution via ticket workflow",
+]
+
+[[workflows]]
+name = "Escalate to engineering"
+steps = [
+    "Confirm issue is not in knowledge base",
+    "Gather reproduction steps from customer conversation",
+    "Check SLA status for urgency context",
+    "Send internal message on ticket tagging engineering lead",
+    "Notify engineering lead on Rocket.Chat with ticket link",
+    "Update ticket status to Escalated",
+    "Inform customer of escalation with expected timeline",
+]
+
+[[workflows]]
+name = "Manager approval for exception"
+steps = [
+    "Document the exception request on the ticket",
+    "Message support manager on Rocket.Chat with context",
+    "Wait for manager approval or denial",
+    "Update ticket with manager decision",
+    "Communicate outcome to customer via email",
+]
+
+[[workflows]]
+name = "Multi-turn customer conversation"
+steps = [
+    "Greet customer using appropriate saved reply",
+    "Gather details about the issue",
+    "Ask clarifying questions if needed",
+    "Provide solution or escalate",
+    "Confirm resolution with customer",
+    "Close ticket with summary comment",
+]
+
+[[workflows]]
+name = "Handle VIP/Enterprise priority issue"
+steps = [
+    "Identify customer as VIP/Enterprise from contact tier",
+    "Check dedicated SLA terms",
+    "Prioritize ticket as High or Critical",
+    "Assign to senior support agent if needed",
+    "Provide frequent status updates to customer",
+    "Escalate proactively if SLA is at risk",
+    "Send personalized resolution email",
+]
+
+[[npcs]]
+role = "Regular Customer"
+typical_asks = "Issue resolution, password resets, feature questions, billing inquiries, status updates on open tickets"
+
+[[npcs]]
+role = "Frustrated Customer"
+typical_asks = "Repeated issue follow-ups, complaints about response time, demands for escalation, requests to speak with manager"
+
+[[npcs]]
+role = "VIP/Enterprise Customer"
+typical_asks = "Performance issues affecting teams, urgent production outages, dedicated SLA enforcement, account-level concerns"
+
+[[npcs]]
+role = "Support Manager"
+typical_asks = "Exception approvals (refunds, SLA overrides), process guidance, escalation decisions, staffing and queue management"
+
+[[npcs]]
+role = "Engineering Lead"
+typical_asks = "Bug triage and investigation, technical escalation review, feature feasibility assessment, deployment-related incident support"
+
+[[categories]]
+id = "ticket_triage"
+label = "Triage and route incoming tickets"
+
+[[categories]]
+id = "ticket_resolution"
+label = "Resolve tickets using KB and standard procedures"
+
+[[categories]]
+id = "chat_to_ticket"
+label = "Convert chat conversations to tickets"
+
+[[categories]]
+id = "billing_inquiry"
+label = "Handle billing questions and refund requests"
+
+[[categories]]
+id = "technical_escalation"
+label = "Escalate technical issues to engineering"
+
+[[categories]]
+id = "manager_escalation"
+label = "Route exception requests to support manager"
+
+[[categories]]
+id = "multi_turn_conversation"
+label = "Manage multi-turn customer conversations"
+
+[[categories]]
+id = "vip_enterprise_support"
+label = "Handle VIP and enterprise priority issues"
+
+[[categories]]
+id = "sla_compliance"
+label = "Monitor and enforce SLA compliance"
+
+[[categories]]
+id = "knowledge_base_lookup"
+label = "Search and apply knowledge base solutions"
+
+[[categories]]
+id = "account_management"
+label = "Account updates, access requests, and verification"
+
+[[categories]]
+id = "cross_channel_coordination"
+label = "Coordinate resolution across chat, email, and helpdesk"
+
+[generation]
+num_tasks = 2
+deduplicate = false
+filter = false
+
+[generation.complexity]
+easy = 0.3
+medium = 0.5
+hard = 0.2
+
+[generation.diversity]
+scenarios = [
+    "straightforward",
+    "escalation_to_engineering",
+    "escalation_to_manager",
+    "multi_channel_coordination",
+    "sla_pressure",
+    "angry_customer_deescalation",
+    "vip_priority_handling",
+    "knowledge_gap",
+    "handoff_between_agents",
+    "multi_turn_clarification",
+]
+
+[[generation.diversity.dimensions]]
+urgency = [
+    "routine",
+    "time-sensitive",
+    "urgent",
+    "critical",
+]
+
+[[generation.diversity.dimensions]]
+customer_tier = [
+    "individual_smb",
+    "enterprise",
+    "vip",
+    "trial",
+]
+
+[[generation.diversity.dimensions]]
+emotional_tone = [
+    "neutral",
+    "frustrated",
+    "angry",
+    "anxious",
+    "appreciative",
+]
+
+[[generation.diversity.dimensions]]
+issue_type = [
+    "technical_bug",
+    "billing",
+    "account_access",
+    "feature_request",
+    "performance",
+    "compliance",
+]
+
+[evaluation.task_verifier]
+completeness = true
+correctness = true
+
+[evaluation.rubric]
+constraint_satisfaction = true
+format_compliance = true
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+fast_model = "claude-haiku-4-5-20251001"
+temperature = 1.0
+seed = 42
+max_workers = 10
+
+[seed_data]
+dir = "src/collinear/scenarios/customer_service"
+npc_profiles = "npcs/profiles.json"
+document_dirs = ["seed_data", "helpdesk_seed"]
+tool_list_dir = "src/task_generator/tool_list"
+
+[output]
+dir = "./output"

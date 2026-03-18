@@ -189,7 +189,7 @@ RECRUITING: PresetConfig = {
         "complexity": {"easy": 0.3, "medium": 0.5, "hard": 0.2},
     },
     "pipeline": {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-haiku-4-5",
     },
 }
 
@@ -301,7 +301,7 @@ PEOPLE_MGMT: PresetConfig = {
         "complexity": {"easy": 0.3, "medium": 0.5, "hard": 0.2},
     },
     "pipeline": {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-haiku-4-5",
     },
 }
 
@@ -426,7 +426,7 @@ CODING: PresetConfig = {
         "complexity": {"easy": 0.2, "medium": 0.5, "hard": 0.3},
     },
     "pipeline": {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-haiku-4-5",
     },
 }
 
@@ -556,12 +556,152 @@ CUSTOMER_SUPPORT: PresetConfig = {
         "complexity": {"easy": 0.3, "medium": 0.5, "hard": 0.2},
     },
     "pipeline": {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-haiku-4-5",
+    },
+}
+
+
+HR: PresetConfig = {
+    "agent": {
+        "role": "HR coordinator",
+        "description": (
+            "Handles end-to-end HR workflows spanning recruiting and people management: "
+            "scheduling interviews, managing candidate pipelines, coordinating offers, "
+            "onboarding, performance management, compensation, employee relations, "
+            "and communicating with hiring managers, candidates, and employees."
+        ),
+    },
+    "toolset": [
+        {
+            "name": "HRIS",
+            "description": (
+                "Query/update employee records, job requisitions, candidate profiles, "
+                "enrollment records, HR policies"
+            ),
+            "operations": ["search", "read", "create", "update"],
+        },
+        {
+            "name": "Email",
+            "description": "Send and read emails",
+            "operations": ["send", "read"],
+        },
+        {
+            "name": "Calendar",
+            "description": "View and manage calendar events",
+            "operations": ["list", "create", "update", "delete"],
+        },
+        {
+            "name": "Chat",
+            "description": "Send messages in Rocket.Chat channels and DMs",
+            "operations": ["send", "read"],
+        },
+    ],
+    "scenario": {
+        "name": "hr",
+        "role_label": "HR professional",
+        "conventions": (
+            "- Always verify employee/candidate data in HRIS before taking action\n"
+            "- Check all participants' calendars before scheduling\n"
+            "- Never share compensation details in group channels\n"
+            "- Document all interactions in HRIS\n"
+            "- Get manager approval before extending offers or adjusting compensation\n"
+            "- Follow escalation paths for disciplinary actions\n"
+        ),
+        "policies": [
+            "Interviews must include at least one diverse panel member",
+            "Offers require VP approval for >$200k total comp",
+            "Candidate data must not be shared outside recruiting team",
+            "PIPs require HR review and manager sign-off",
+            "Compensation adjustments over 15% require VP approval",
+            "Offboarding must include IT access revocation checklist",
+        ],
+    },
+    "workspace": {
+        "email_domain": "weaverenterprises.com",
+        "agent_email": "hr@weaverenterprises.com",
+    },
+    "workflows": [
+        {
+            "name": "Schedule panel interview",
+            "steps": [
+                "Check interviewer availability on calendar",
+                "Create calendar event with all panelists",
+                "Send confirmation email to candidate",
+                "Update candidate status in HRIS",
+            ],
+        },
+        {
+            "name": "Process offer",
+            "steps": [
+                "Get manager approval via chat",
+                "Create offer letter from template",
+                "Send offer email to candidate",
+                "Update candidate status in HRIS",
+            ],
+        },
+        {
+            "name": "New employee onboarding",
+            "steps": [
+                "Create employee record in HRIS",
+                "Schedule orientation meetings on calendar",
+                "Send welcome email with first-week agenda",
+                "Notify team via chat channel",
+            ],
+        },
+        {
+            "name": "Process compensation adjustment",
+            "steps": [
+                "Review current compensation in HRIS",
+                "Get manager approval via chat",
+                "Update compensation in HRIS",
+                "Send confirmation email to employee",
+            ],
+        },
+    ],
+    "npcs": [
+        {
+            "role": "Hiring Manager",
+            "typical_asks": "Scheduling preferences, candidate feedback, offer approvals",
+        },
+        {
+            "role": "Candidate",
+            "typical_asks": "Interview logistics, offer details, timeline questions",
+        },
+        {
+            "role": "Direct Manager",
+            "typical_asks": "Performance feedback, team updates, approval requests",
+        },
+        {
+            "role": "Employee",
+            "typical_asks": "Benefits questions, policy clarifications, accommodations",
+        },
+        {
+            "role": "HR Business Partner",
+            "typical_asks": "Compliance checks, escalations, workforce planning",
+        },
+    ],
+    "categories": [
+        {"id": "schedule_interviews", "label": "Schedule interviews"},
+        {"id": "send_offers_or_rejections", "label": "Send offers or rejections"},
+        {"id": "employee_onboarding", "label": "Employee onboarding"},
+        {"id": "performance_management", "label": "Performance management"},
+        {"id": "compensation_and_benefits", "label": "Compensation & benefits"},
+        {"id": "employee_relations", "label": "Employee relations"},
+        {"id": "offboarding", "label": "Offboarding"},
+        {"id": "hr_compliance_and_policy", "label": "HR compliance & policy"},
+    ],
+    "generation": {
+        "num_tasks": 10,
+        "complexity": {"easy": 0.3, "medium": 0.5, "hard": 0.2},
+    },
+    "pipeline": {
+        "model": "claude-haiku-4-5",
     },
 }
 
 
 PRESETS: dict[str, PresetConfig] = {
+    "hr": HR,
     "recruiting": RECRUITING,
     "people_mgmt": PEOPLE_MGMT,
     "coding": CODING,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import click
 import requests
@@ -65,8 +64,7 @@ def login(ctx: click.Context) -> None:
         root = root.parent
     config_file_override = (root.params or {}).get("config_file")
     config_path = _config_file_path(override=config_file_override, must_exist=False)
-    if config_path is None:
-        config_path = Path.home() / ".config" / "simlab" / "config.toml"
+    assert config_path is not None  # must_exist=False always returns a Path
 
     # Validate key against the server before saving.
     api_url = resolve_scenario_manager_api_url(base_url=None)
@@ -111,6 +109,7 @@ def status(ctx: click.Context) -> None:
         root = root.parent
     config_file_override = (root.params or {}).get("config_file")
     config_path = _config_file_path(override=config_file_override, must_exist=False)
+    assert config_path is not None  # must_exist=False always returns a Path
 
     click.echo()
 
@@ -129,7 +128,7 @@ def status(ctx: click.Context) -> None:
             break
 
     file_key = ""
-    if config_path and config_path.is_file():
+    if config_path.is_file():
         file_data = _read_toml(config_path)
         raw = file_data.get("collinear_api_key")
         file_key = (raw or "").strip() if isinstance(raw, str) else ""

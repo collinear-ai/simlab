@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 from typing import ClassVar
 
@@ -18,12 +19,39 @@ from simlab.composer.npc_config import inject_npc_env_vars
 DEFAULT_IMAGE_REGISTRY = "ghcr.io/collinear-ai"
 
 
+class CodingMount(BaseModel):
+    """A local file or directory mounted into the coding runtime."""
+
+    source: str
+    target: str
+    read_only: bool = True
+
+
+class CodingConfig(BaseModel):
+    """Additional customization for the coding toolset."""
+
+    setup_scripts: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    mounts: list[CodingMount] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class BundledAsset(BaseModel):
+    """A local file or directory copied into the generated compose bundle."""
+
+    source: str
+    destination: str
+    is_directory: bool = False
+
+
 class EnvConfig(BaseModel):
     """User's environment configuration (written to simlab-env.yaml)."""
 
     name: str = "simlab-env"
     tools: list[str] = Field(default_factory=list)
     overrides: dict[str, dict[str, str]] = Field(default_factory=dict)
+    coding: CodingConfig | None = None
+    scenario_guidance_path: str | None = None
     scenario_guidance_md: str | None = None
     registry: str | None = DEFAULT_IMAGE_REGISTRY
     scenario_manager_api_url: str | None = None
@@ -38,6 +66,7 @@ class ComposeOutput(BaseModel):
     tool_endpoints: dict[str, str]
     seed_services: list[str] = Field(default_factory=list)
     has_build_contexts: bool = False
+    bundled_assets: list[BundledAsset] = Field(default_factory=list)
     scenario_guidance_md: str | None = None
 
 
@@ -51,8 +80,9 @@ class ComposeEngine:
         """Store the tool registry for lookups."""
         self._registry = registry
 
-    def compose(self, config: EnvConfig) -> ComposeOutput:
+    def compose(self, config: EnvConfig, config_dir: Path | None = None) -> ComposeOutput:
         """Build compose output for the given config."""
+        resolved_config_dir = config_dir or Path.cwd()
         tools = self._registry.get_tools(config.tools)
 
         services: dict[str, dict] = {}
@@ -62,6 +92,7 @@ class ComposeEngine:
         tool_endpoints: dict[str, str] = {}
         preseed_service_names: list[str] = []
         seed_service_names: list[str] = []
+        bundled_assets: list[BundledAsset] = []
 
         for tool in tools:
             if tool.is_external:
@@ -93,6 +124,15 @@ class ComposeEngine:
         if "rocketchat" in config.tools:
             inject_npc_env_vars(services)
 
+        if "coding" in config.tools and config.coding is not None:
+            bundled_assets.extend(
+                self._apply_coding_config(
+                    services=services,
+                    config=config,
+                    config_dir=resolved_config_dir,
+                )
+            )
+
         compose = {
             "services": services,
             "networks": {self.NETWORK_NAME: {"driver": "bridge"}},
@@ -102,7 +142,7 @@ class ComposeEngine:
 
         compose_yaml = yaml.dump(compose, default_flow_style=False, sort_keys=False, width=10000)
         env_file = self._generate_env_file(env_vars)
-        scenario_guidance_md = self._resolve_scenario_guidance(config)
+        scenario_guidance_md = self._resolve_scenario_guidance(config, resolved_config_dir)
 
         # Detect whether any service has a build context
         has_builds = any("build" in svc for svc in services.values())
@@ -113,6 +153,7 @@ class ComposeEngine:
             tool_endpoints=tool_endpoints,
             seed_services=seed_service_names,
             has_build_contexts=has_builds,
+            bundled_assets=bundled_assets,
             scenario_guidance_md=scenario_guidance_md,
         )
 
@@ -244,10 +285,126 @@ class ComposeEngine:
             services[svc_name] = svc
             profiled_service_names.append(svc_name)
 
-    def _resolve_scenario_guidance(self, config: EnvConfig) -> str | None:
-        """Resolve scenario guidance text from inline config."""
+    def _apply_coding_config(
+        self,
+        *,
+        services: dict[str, dict],
+        config: EnvConfig,
+        config_dir: Path,
+    ) -> list[BundledAsset]:
+        """Augment the coding runtime with startup hooks, skills, and mounts."""
+        coding_cfg = config.coding
+        if coding_cfg is None:
+            return []
+
+        agent_service = services.get("openhands-agent-server")
+        if not isinstance(agent_service, dict):
+            return []
+
+        volumes = list(agent_service.get("volumes", []))
+        environment = dict(agent_service.get("environment", {}))
+
+        if coding_cfg.setup_scripts:
+            for idx, raw_path in enumerate(coding_cfg.setup_scripts, start=1):
+                source_path = self._resolve_local_path(raw_path, config_dir)
+                if source_path.is_dir():
+                    raise ValueError(f"Setup script must be a file, not a directory: {source_path}")
+                volumes.append(
+                    f"{self._compose_source_for(source_path, config_dir)}:"
+                    f"/app/setup/{idx:02d}-{source_path.name}:ro"
+                )
+
+        if coding_cfg.skills:
+            for raw_path in coding_cfg.skills:
+                source_path = self._resolve_local_path(raw_path, config_dir)
+                volumes.append(
+                    f"{self._compose_source_for(source_path, config_dir)}:"
+                    f"{self._skill_mount_target_for(source_path)}:ro"
+                )
+
+        if coding_cfg.mounts:
+            for mount in coding_cfg.mounts:
+                source_path = self._resolve_local_path(mount.source, config_dir)
+                suffix = ":ro" if mount.read_only else ""
+                volumes.append(
+                    f"{self._compose_source_for(source_path, config_dir)}:{mount.target}{suffix}"
+                )
+
+        if coding_cfg.env:
+            environment.update(coding_cfg.env)
+
+        if volumes:
+            agent_service["volumes"] = volumes
+        if environment:
+            agent_service["environment"] = environment
+
+        return []
+
+    @staticmethod
+    def _resolve_local_path(raw_path: str, config_dir: Path) -> Path:
+        """Resolve a config-authored path relative to the env config directory."""
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = config_dir / path
+        resolved = path.resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Referenced coding asset does not exist: {resolved}")
+        return resolved
+
+    @staticmethod
+    def _skill_mount_target_for(source_path: Path) -> str:
+        """Map a skill file or directory into the OpenHands project skills path."""
+        base = Path("/workspace/.openhands/skills")
+        if source_path.name == "skills":
+            return base.as_posix()
+        if source_path.is_dir():
+            return (base / source_path.name).as_posix()
+        if source_path.name == "SKILL.md" and source_path.parent.name:
+            return (base / source_path.parent.name / source_path.name).as_posix()
+        return (base / source_path.name).as_posix()
+
+    @staticmethod
+    def _compose_source_for(source_path: Path, config_dir: Path) -> str:
+        """Return the host-side compose volume source for a resolved local path."""
+        try:
+            relative = source_path.relative_to(config_dir)
+        except ValueError:
+            return source_path.as_posix()
+        return f"./{relative.as_posix()}"
+
+    @classmethod
+    def get_external_coding_asset_paths(cls, config: EnvConfig, config_dir: Path) -> list[Path]:
+        """Return coding asset paths that live outside the env config directory."""
+        coding_cfg = config.coding
+        if coding_cfg is None:
+            return []
+
+        external_paths: list[Path] = []
+        raw_paths = [
+            *coding_cfg.setup_scripts,
+            *coding_cfg.skills,
+            *(mount.source for mount in coding_cfg.mounts),
+        ]
+        for raw_path in raw_paths:
+            resolved = cls._resolve_local_path(raw_path, config_dir)
+            try:
+                resolved.relative_to(config_dir)
+            except ValueError:
+                external_paths.append(resolved)
+        return external_paths
+
+    def _resolve_scenario_guidance(self, config: EnvConfig, config_dir: Path) -> str | None:
+        """Resolve scenario guidance text from inline config or a local file."""
         if config.scenario_guidance_md:
             content = config.scenario_guidance_md.strip()
+            return content or None
+        if config.scenario_guidance_path:
+            source_path = self._resolve_local_path(config.scenario_guidance_path, config_dir)
+            if source_path.is_dir():
+                raise ValueError(
+                    f"Scenario guidance path must be a file, not a directory: {source_path}"
+                )
+            content = source_path.read_text(encoding="utf-8").strip()
             return content or None
         return None
 
@@ -301,3 +458,11 @@ def write_output(output: ComposeOutput, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "docker-compose.yml").write_text(output.compose_yaml)
     (output_dir / ".env").write_text(output.env_file)
+    for asset in output.bundled_assets:
+        src = Path(asset.source)
+        dest = output_dir / asset.destination
+        if asset.is_directory:
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)

@@ -1,0 +1,27 @@
+services:
+  openhands-agent-server:
+    image: ghcr.io/collinear-ai/collinear/openhands-agent-server:latest
+    networks:
+    - simlab
+    environment:
+      SESSION_API_KEY: dev-session-key
+    volumes:
+    - ./coding/setup/install-tools.sh:/app/setup/01-install-tools.sh:ro
+    - ./coding/skills:/workspace/.openhands/skills:ro
+    - ./coding/fixtures:/workspace/fixtures:ro
+  coding-env:
+    image: ghcr.io/collinear-ai/collinear/coding-env:latest
+    networks:
+    - simlab
+    ports:
+    - 8020:8020
+    environment:
+      OPENHANDS_AGENT_SERVER_URL: http://openhands-agent-server:8000
+      OPENHANDS_SESSION_API_KEY: dev-session-key
+      OPENHANDS_WORKING_DIR: /workspace
+    depends_on:
+      openhands-agent-server:
+        condition: service_healthy
+networks:
+  simlab:
+    driver: bridge

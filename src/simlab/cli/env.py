@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 import click
@@ -21,15 +22,10 @@ from simlab.api.client import ScenarioManagerApiError
 from simlab.api.client import ScenarioManagerClient
 from simlab.api.client import resolve_scenario_manager_api_url
 from simlab.api.schemas import ScenarioSummary
-
-try:
-    import questionary as _questionary
-except ImportError:
-    questionary: Any | None = None
-else:
-    questionary = _questionary
-
 from simlab.catalog.registry import ToolRegistry
+from simlab.cli.progress import StepContext
+from simlab.cli.progress import StepProgress
+from simlab.cli.progress import StepProgressReporter
 from simlab.composer.engine import DEFAULT_IMAGE_REGISTRY
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
@@ -45,6 +41,178 @@ from simlab.telemetry import emit_cli_event
 from simlab.telemetry import normalize_config_path
 from simlab.telemetry import resolve_scenario_manager_capture_config
 from simlab.telemetry import with_command_telemetry
+
+try:
+    import questionary as _questionary
+except ImportError:
+    questionary: Any | None = None
+else:
+    questionary = _questionary
+
+
+_CODING_SETUP_SCRIPT = dedent(
+    """\
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Install any extra CLI tools needed by this environment.
+    # Examples:
+    #   apt-get update -qq && apt-get install -y -qq jq poppler-utils
+    #   uv pip install --quiet --system xlsx2csv
+    #   npm install -g @googleworkspace/cli
+    """
+)
+
+_CODING_SKILL_STUB = dedent(
+    """\
+    # Example Coding Skill
+
+    Use this directory for reusable workflow notes that the coding agent can discover.
+
+    ## When to use this skill
+
+    - When a task requires a specialized CLI workflow
+    - When the environment includes tools with non-obvious flags or output formats
+
+    ## Notes
+
+    - Prefer installed CLI tools before writing custom parsers
+    - Keep the skill short and operational
+    """
+)
+
+_DEFAULT_CODING_SCENARIO_GUIDANCE = dedent(
+    """\
+    # Coding Scenario Guidance
+
+    This guidance applies to tasks that run against this Simlab coding environment.
+
+    ## Expectations
+
+    - Use mounted fixtures under `/workspace/fixtures` when tasks reference local files
+    - Prefer available CLI tools before writing one-off parsers
+    - If coding skills are available, consult them before guessing uncommon commands
+    """
+)
+
+_CODING_TASK_BUNDLE_README = dedent(
+    """\
+    # Custom Coding Tasks
+
+    This directory is a local task bundle for the coding environment.
+
+    ## Layout
+
+    - `tasks/*.json`: task definitions
+    - `verifiers/*.py`: verifier modules referenced by task JSON
+
+    ## Running a task
+
+    If this environment lives under your configured Simlab environments directory:
+
+    ```bash
+    simlab env up <env-name>
+
+    simlab tasks run \
+      --env <env-name> \
+      --tasks-dir ./task-bundle \
+      --task example_task \
+      --agent-model <model>
+    ```
+
+    If the environment lives outside your default environments directory, add
+    `--environments-dir <parent-dir>` to the command.
+    """
+)
+
+_CODING_SAMPLE_TASKS = [
+    {
+        "filename": "example_task.json",
+        "content": dedent(
+            """\
+            {
+              "name": "Example Custom Coding Task",
+              "category": "task",
+              "apps": ["coding"],
+              "meta": {
+                "task_id": "example_task",
+                "display_name": "Example Custom Coding Task",
+                "difficulty": "easy"
+              },
+              "task": "Summarize available tools in `workspace_summary.md`.",
+              "tool_servers": [
+                {
+                  "name": "coding-env",
+                  "tool_server_url": "http://localhost:8020"
+                }
+              ],
+              "verifiers": [
+                {
+                  "func": "python_module",
+                  "module": "simlab.verifiers.custom_coding"
+                }
+              ]
+            }
+            """
+        ),
+    },
+    {
+        "filename": "build_cli_task.json",
+        "content": dedent(
+            """\
+        {
+          "name": "Build a Word Count CLI",
+          "category": "task",
+          "apps": ["coding"],
+          "meta": {
+            "task_id": "build_cli_task",
+            "display_name": "Build a Word Count CLI",
+            "difficulty": "medium"
+          },
+          "task": "Build `wordcount.py`: count words, lines, and chars in a file.",
+          "tool_servers": [
+            {
+              "name": "coding-env",
+              "tool_server_url": "http://localhost:8020"
+            }
+          ],
+          "verifiers": []
+        }
+        """
+        ),
+    },
+    {
+        "filename": "parse_csv_task.json",
+        "content": dedent(
+            """\
+        {
+          "name": "Parse and Summarize CSV Data",
+          "category": "task",
+          "apps": ["coding"],
+          "meta": {
+            "task_id": "parse_csv_task",
+            "display_name": "Parse and Summarize CSV Data",
+            "difficulty": "hard"
+          },
+          "task": "Write `summarize_csv.py`: read CSV from fixtures, compute stats.",
+          "tool_servers": [
+            {
+              "name": "coding-env",
+              "tool_server_url": "http://localhost:8020"
+            }
+          ],
+          "verifiers": []
+        }
+        """
+        ),
+    },
+]
+
+_CODING_VERIFIERS_INIT = dedent(
+    """\
+    \"\"\"Verifier modules for local custom coding tasks.\"\"\"
+    """
+)
 
 
 def _get_registry() -> ToolRegistry:
@@ -277,11 +445,23 @@ def init(
             raise SystemExit(0)
 
     env_dir.mkdir(parents=True, exist_ok=True)
+    if scenario_guidance_file is None and template_name and scenario:
+        scenario_guidance_md = scenario.scenario_guidance_md
     if env_yaml.exists() and force:
         # Regenerate docker-compose and .env from existing env.yaml; do not overwrite env.yaml
         data = yaml.safe_load(env_yaml.read_text()) or {}
         config = EnvConfig(**data)
         updates: dict[str, object] = {"name": env_name}
+        if (
+            "coding" in config.tools
+            and not config.scenario_guidance_md
+            and config.scenario_guidance_path
+        ):
+            guidance_path = Path(config.scenario_guidance_path).expanduser()
+            if not guidance_path.is_absolute():
+                guidance_path = env_yaml.parent / guidance_path
+            updates["scenario_guidance_md"] = guidance_path.read_text(encoding="utf-8").strip()
+            updates["scenario_guidance_path"] = None
         if scenario_guidance_file is not None:
             updates["scenario_guidance_md"] = scenario_guidance_md
         config = config.model_copy(update=updates)
@@ -289,27 +469,45 @@ def init(
             config_data = {k: v for k, v in config.model_dump().items() if v is not None}
             env_yaml.write_text(yaml.dump(config_data, default_flow_style=False, sort_keys=False))
         click.echo(click.style(f"\nRegenerating from existing {env_yaml}", fg="green"))
+        if "coding" in config.tools:
+            _scaffold_coding_environment(env_dir, env_name)
     else:
-        config = EnvConfig(
-            name=env_name,
-            tools=selected_tools,
-            registry=image_registry,
-            template=template_name,
-            scenario_guidance_md=(
-                scenario_guidance_md
-                if scenario_guidance_file is not None
-                else (scenario.scenario_guidance_md if template_name and scenario else None)
-            ),
-        )
+        config_kwargs: dict[str, Any] = {
+            "name": env_name,
+            "tools": selected_tools,
+            "registry": image_registry,
+            "template": template_name,
+        }
+        if "coding" in selected_tools:
+            config_kwargs["coding"] = {
+                "setup_scripts": ["./coding/setup/install-tools.sh"],
+                "skills": ["./coding/skills"],
+                "mounts": [
+                    {
+                        "source": "./coding/fixtures",
+                        "target": "/workspace/fixtures",
+                        "read_only": True,
+                    }
+                ],
+            }
+            config_kwargs["scenario_guidance_md"] = (
+                scenario_guidance_md or _DEFAULT_CODING_SCENARIO_GUIDANCE
+            ).strip()
+        elif scenario_guidance_md:
+            config_kwargs["scenario_guidance_md"] = scenario_guidance_md
+
+        config = EnvConfig(**config_kwargs)
         config_data = {k: v for k, v in config.model_dump().items() if v is not None}
         env_yaml.write_text(yaml.dump(config_data, default_flow_style=False, sort_keys=False))
         click.echo(click.style(f"\nConfig written to {env_yaml}", fg="green"))
+        if "coding" in selected_tools:
+            _scaffold_coding_environment(env_dir, env_name)
 
     # Generate docker-compose.yml and .env.
     engine = ComposeEngine(registry)
     try:
-        compose_output = engine.compose(config)
-    except KeyError as e:
+        compose_output = engine.compose(config, config_dir=env_yaml.parent)
+    except (KeyError, FileNotFoundError, ValueError) as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
 
@@ -319,6 +517,12 @@ def init(
     click.echo("  env.yaml")
     click.echo("  docker-compose.yml")
     click.echo("  .env")
+    if "coding" in config.tools:
+        click.echo("  README.md")
+        click.echo("  coding/setup/install-tools.sh")
+        click.echo("  coding/fixtures/")
+        click.echo("  coding/skills/")
+        click.echo("  task-bundle/")
     click.echo()
 
     click.echo(click.style("Tool endpoints:", bold=True))
@@ -328,6 +532,17 @@ def init(
     if compose_output.env_file.strip() != "# No environment variables required":
         click.echo()
         click.echo(click.style("Fill in required env vars in .env before starting.", fg="yellow"))
+    if "coding" in config.tools:
+        install_tools_path = env_dir / "coding" / "setup" / "install-tools.sh"
+        fixtures_path = env_dir / "coding" / "fixtures"
+        skills_path = env_dir / "coding" / "skills"
+        task_bundle_path = env_dir / "task-bundle"
+        click.echo()
+        click.echo(click.style("Next edits for this coding environment:", bold=True))
+        click.echo(f"  1. Edit {install_tools_path} to install custom tools")
+        click.echo(f"  2. Drop sample files into {fixtures_path}")
+        click.echo(f"  3. Add reusable skills under {skills_path}")
+        click.echo(f"  4. Edit tasks and verifiers under {task_bundle_path}")
     click.echo()
     click.echo(f"Next: simlab env up {env_name}")
     emit_cli_event(
@@ -365,6 +580,107 @@ def _interactive_select(registry: ToolRegistry) -> list[str]:
     ).ask()
 
     return selected or []
+
+
+def _write_text_if_missing(path: Path, content: str, *, executable: bool = False) -> None:
+    """Create a file only when missing so user edits survive regeneration."""
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    if executable:
+        path.chmod(path.stat().st_mode | 0o111)
+
+
+def _ensure_placeholder_dir(path: Path) -> None:
+    """Create a directory and keep it visible in git-friendly trees."""
+    path.mkdir(parents=True, exist_ok=True)
+    _write_text_if_missing(path / ".gitkeep", "")
+
+
+def _generate_coding_env_readme(env_name: str) -> str:
+    """Return the generated README for coding-enabled environments."""
+    return dedent(
+        f"""\
+        # {env_name}
+
+        This environment includes the coding toolset and a local custom task bundle.
+
+        ## Files You Edit
+
+        - `coding/setup/install-tools.sh`: install additional CLI tools for the coding runtime
+        - `coding/fixtures/`: files mounted into `/workspace/fixtures`
+        - `coding/skills/`: reusable coding skills exposed as project skills
+        - `task-bundle/tasks/`: local custom task definitions
+        - `task-bundle/verifiers/`: verifier modules for local tasks
+
+        ## Common Commands
+
+        If this environment lives under your configured Simlab environments directory:
+
+        ```bash
+        simlab env up {env_name}
+
+        simlab tasks run \\
+          --env {env_name} \\
+          --tasks-dir ./task-bundle \\
+          --task example_task \\
+          --agent-model <model>
+
+        simlab env down {env_name}
+        ```
+
+        If the environment lives outside your default environments directory, add
+        `--environments-dir <parent-dir>` to the command.
+        """
+    )
+
+
+def _scaffold_coding_environment(env_dir: Path, env_name: str) -> None:
+    """Create user-owned coding files for a newly initialized coding environment."""
+    _write_text_if_missing(
+        env_dir / "coding" / "setup" / "install-tools.sh",
+        _CODING_SETUP_SCRIPT,
+        executable=True,
+    )
+    _ensure_placeholder_dir(env_dir / "coding" / "fixtures")
+    _write_text_if_missing(
+        env_dir / "coding" / "skills" / "example-skill" / "SKILL.md",
+        _CODING_SKILL_STUB,
+    )
+    _write_text_if_missing(
+        env_dir / "task-bundle" / "README.md",
+        _CODING_TASK_BUNDLE_README.format(env_name=env_name),
+    )
+    for sample in _CODING_SAMPLE_TASKS:
+        _write_text_if_missing(
+            env_dir / "task-bundle" / "tasks" / sample["filename"],
+            sample["content"],
+        )
+    _write_text_if_missing(
+        env_dir / "task-bundle" / "verifiers" / "__init__.py",
+        _CODING_VERIFIERS_INIT,
+    )
+    _write_text_if_missing(env_dir / "README.md", _generate_coding_env_readme(env_name))
+
+
+def _validate_daytona_coding_assets(config: EnvConfig, config_dir: Path) -> None:
+    """Fail early when Daytona-backed coding envs reference files outside the env dir."""
+    external_asset_paths = ComposeEngine.get_external_coding_asset_paths(config, config_dir)
+    if not external_asset_paths:
+        return
+
+    click.echo(
+        click.style(
+            "Daytona mode only supports coding assets located inside the environment "
+            f"directory ({config_dir}).",
+            fg="red",
+        ),
+        err=True,
+    )
+    for path in external_asset_paths:
+        click.echo(f"  - {path}", err=True)
+    raise SystemExit(1)
 
 
 def _interactive_add_more(registry: ToolRegistry, remaining: list[str]) -> list[str]:
@@ -412,9 +728,10 @@ def _compose_has_build_contexts(compose_file: Path) -> bool:
 @click.option(
     "--daytona", is_flag=True, help="Run on Daytona (remote sandbox) instead of local Docker."
 )
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed output for each step.")
 @click.pass_context
 @with_command_telemetry("env up", resolver=env_command_capture_config)
-def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool) -> None:
+def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool, verbose: bool) -> None:
     """Start the environment."""
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_file = env_dir / "env.yaml"
@@ -445,7 +762,13 @@ def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool) -> None:
                 runner.down(env_dir)
             else:
                 click.echo("No Daytona state found; starting fresh.")
-        _up_daytona(config, config_file, env_dir, daytona_api_key=global_cfg.daytona_api_key)
+        _up_daytona(
+            config,
+            config_file,
+            env_dir,
+            daytona_api_key=global_cfg.daytona_api_key,
+            verbose=verbose,
+        )
     else:
         if rebuild:
             click.echo("Tearing down existing containers...")
@@ -459,7 +782,7 @@ def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool) -> None:
                 click.echo(click.style("Failed to stop services:", fg="red"), err=True)
                 click.echo(result.stderr, err=True)
                 raise SystemExit(1)
-        _up_local(compose_file, env_dir, config, config_file, has_builds)
+        _up_local(compose_file, env_dir, config, config_file, has_builds, verbose=verbose)
     emit_cli_event(
         "env_up_completed",
         {
@@ -479,39 +802,49 @@ def _up_local(
     config: EnvConfig,
     config_path: Path | None = None,
     has_builds: bool = False,
+    verbose: bool = False,
 ) -> None:
     """Start services locally via docker compose."""
+    progress = StepProgress(verbose=verbose)
+    t0 = time.time()
+
     preseed_svc_names = _get_preseed_service_names(config, config_path)
     if preseed_svc_names:
-        click.echo("Preseeding environment...")
-        _run_profiled_services_local(out_dir, preseed_svc_names, profile="preseed")
+        with progress.step("Environment preseeded") as ctx:
+            _run_profiled_services_local(
+                out_dir, preseed_svc_names, profile="preseed", quiet=True, step_ctx=ctx
+            )
 
-    click.echo("\nStarting services...")
-    up_cmd = ["docker", "compose", "-f", str(compose_file), "up", "-d"]
-    if has_builds:
-        up_cmd.append("--build")
-    result = subprocess.run(
-        up_cmd,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(click.style("Failed to start services:", fg="red"), err=True)
-        click.echo(result.stderr, err=True)
-        raise SystemExit(1)
+    with progress.step("Services started") as ctx:
+        up_cmd = ["docker", "compose", "-f", str(compose_file), "up", "-d"]
+        if has_builds:
+            up_cmd.append("--build")
+        result = subprocess.run(up_cmd, capture_output=True, text=True)
+        if result.stdout:
+            ctx.detail(result.stdout.strip())
+        if result.returncode != 0:
+            ctx.detail(result.stderr.strip() if result.stderr else "")
+            raise SystemExit(1)
 
-    # Poll health with status spinner
+    # Health polling has its own animated display — run it outside step()
     click.echo()
-    _poll_health(_local_health_fetcher(compose_file), timeout=180)
+    _poll_health(
+        _local_health_fetcher(compose_file),
+        timeout=180,
+    )
 
     # Auto-seed if tools have seed services
     seed_svc_names = _get_seed_service_names(config, config_path)
     if seed_svc_names:
-        click.echo("Seeding environment...")
-        _run_profiled_services_local(out_dir, seed_svc_names, profile="seed")
+        with progress.step("Environment seeded") as ctx:
+            _run_profiled_services_local(
+                out_dir, seed_svc_names, profile="seed", quiet=True, step_ctx=ctx
+            )
         _verify_seed_local(config, config_path)
 
-    click.echo(click.style("Environment ready.", fg="green", bold=True))
+    tool_ports = _get_tool_ports(config, config_path)
+    endpoints = {name: f"http://localhost:{port}" for name, port in tool_ports.items()}
+    progress.finish(time.time() - t0, endpoints=endpoints or None)
 
 
 def _get_daytona_runner(daytona_api_key: str | None = None):  # noqa: ANN202
@@ -522,7 +855,7 @@ def _get_daytona_runner(daytona_api_key: str | None = None):  # noqa: ANN202
         click.echo(
             click.style(
                 "Daytona support is unavailable in this installation. "
-                "Install optional Daytona dependencies or run without --daytona.",
+                "Install simulationlab[daytona] or run without --daytona.",
                 fg="red",
             ),
             err=True,
@@ -571,27 +904,36 @@ def _up_daytona(
     config_path: Path,
     out_dir: Path,
     daytona_api_key: str | None = None,
+    verbose: bool = False,
 ) -> None:
     """Start services on a remote Daytona sandbox."""
+    _validate_daytona_coding_assets(config, config_path.parent)
+    progress = StepProgress(verbose=verbose)
+    reporter = StepProgressReporter(progress)
+    t0 = time.time()
+
     runner = _get_daytona_runner(daytona_api_key=daytona_api_key)
     tool_ports = _get_tool_ports(config, config_path)
     preseed_svc_names = _get_preseed_service_names(config, config_path)
-    endpoints = runner.up(out_dir, tool_ports, preseed_svc_names=preseed_svc_names)
+    endpoints = runner.up(
+        out_dir, tool_ports, preseed_svc_names=preseed_svc_names, reporter=reporter
+    )
 
-    click.echo("\n=== Tool endpoints (Daytona) ===\n")
-    for tool_name, endpoint in endpoints.items():
-        click.echo(f"  {tool_name}: {endpoint}")
+    # Health polling has its own animated display
     click.echo()
-
-    _poll_health(lambda: runner.get_health(out_dir), timeout=180)
+    _poll_health(
+        lambda: runner.get_health(out_dir),
+        timeout=180,
+    )
 
     seed_svc_names = _get_seed_service_names(config, config_path)
     if seed_svc_names:
-        click.echo("Seeding environment...")
-        runner.seed(out_dir, seed_svc_names)
+        with progress.step("Environment seeded") as ctx:
+            runner.seed(out_dir, seed_svc_names)
+            _ = ctx  # available for future detail messages
         _verify_seed_daytona(config, endpoints, config_path)
 
-    click.echo(click.style("Environment ready.", fg="green", bold=True))
+    progress.finish(time.time() - t0, endpoints=endpoints or None)
 
 
 @env.command()
@@ -732,8 +1074,14 @@ def _run_profiled_services_local(
     svc_names: list[str],
     profile: str,
     env_overrides: dict[str, str] | None = None,
+    quiet: bool = False,
+    step_ctx: object | None = None,
 ) -> None:
-    """Run profiled containers locally via docker compose."""
+    """Run profiled containers locally via docker compose.
+
+    When *quiet* is True, output is routed to *step_ctx* (if provided) instead
+    of being printed directly via ``click.echo``.
+    """
     compose_file = out_dir / "docker-compose.yml"
     if not compose_file.exists():
         click.echo(
@@ -743,9 +1091,16 @@ def _run_profiled_services_local(
         raise SystemExit(1)
 
     phase_label = "Preseeding" if profile == "preseed" else "Seeding"
+    ctx: StepContext | None = step_ctx if isinstance(step_ctx, StepContext) else None
+
+    def _echo(msg: str) -> None:
+        if quiet and ctx is not None:
+            ctx.detail(msg)
+        elif not quiet:
+            click.echo(msg)
 
     for svc_name in svc_names:
-        click.echo(f"\n{phase_label}: {svc_name}...")
+        _echo(f"{phase_label}: {svc_name}...")
         override_args: list[str] = []
         for key, value in (env_overrides or {}).items():
             override_args.extend(["-e", f"{key}={value}"])
@@ -762,19 +1117,25 @@ def _run_profiled_services_local(
                 *override_args,
                 svc_name,
             ],
-            capture_output=False,
+            capture_output=quiet,
+            text=True,
         )
         if result.returncode != 0:
             msg = f"{phase_label[:-3]} service '{svc_name}' failed (exit {result.returncode})."
+            if quiet and result.stderr:
+                _echo(result.stderr.strip())
             click.echo(click.style(msg, fg="red"), err=True)
             raise SystemExit(1)
+        if quiet and result.stdout:
+            _echo(result.stdout.strip())
         if env_overrides:
             rendered = " ".join(
                 f"{key}={shlex.quote(value)}" for key, value in env_overrides.items()
             )
-            click.echo(f"  Applied overrides: {rendered}")
+            _echo(f"  Applied overrides: {rendered}")
 
-    click.echo(click.style(f"\n{phase_label} complete.", fg="green"))
+    if not quiet:
+        click.echo(click.style(f"\n{phase_label} complete.", fg="green"))
 
 
 def _query_tool_server(
@@ -1058,12 +1419,12 @@ def _render_status_line(
     elapsed: float,
 ) -> str:
     """Render a single status line with spinner, message, and service counts."""
-    healthy = sum(1 for s in services.values() if s == "healthy")
+    ready = sum(1 for status in services.values() if status in ("healthy", "running"))
     total = len(services)
-    failed = sum(1 for s in services.values() if s in ("exited", "unhealthy"))
+    failed = sum(1 for status in services.values() if status in ("exited", "unhealthy"))
 
     bar_width = 20
-    filled = int(bar_width * healthy / total) if total > 0 else 0
+    filled = int(bar_width * ready / total) if total > 0 else 0
     bar = "█" * filled + "░" * (bar_width - filled)
 
     elapsed_str = f"{int(elapsed)}s"
@@ -1076,7 +1437,7 @@ def _render_status_line(
         click.style(bar[:filled], fg="green"),
         click.style(bar[filled:], fg="bright_black"),
         click.style("]", fg="white"),
-        click.style(f" {healthy}/{total}", fg="green" if healthy == total else "yellow"),
+        click.style(f" {ready}/{total}", fg="green" if ready == total else "yellow"),
         click.style(f"  {elapsed_str}", fg="bright_black"),
     ]
     if failed:
@@ -1085,7 +1446,9 @@ def _render_status_line(
     return "".join(parts)
 
 
-def _render_service_detail(services: dict[str, str]) -> list[str]:
+def _render_service_detail(
+    services: dict[str, str],
+) -> list[str]:
     """Render per-service status lines."""
     lines = []
     icons = {
@@ -1145,7 +1508,12 @@ def _poll_health(
             _clear_lines(lines_printed)
 
         frame = next(spinner)
-        status_line = _render_status_line(services, frame, current_message, elapsed)
+        status_line = _render_status_line(
+            services,
+            frame,
+            current_message,
+            elapsed,
+        )
         detail_lines = _render_service_detail(services)
 
         output_lines = [status_line, "", *detail_lines, ""]
@@ -1154,22 +1522,30 @@ def _poll_health(
         lines_printed = len(output_lines)
 
         if services:
-            healthy_or_running = sum(1 for s in services.values() if s in ("healthy", "running"))
-            failed = sum(1 for s in services.values() if s == "exited")
+            healthy_or_running = sum(
+                1 for status in services.values() if status in ("healthy", "running")
+            )
+            failed = sum(1 for status in services.values() if status in ("exited", "unhealthy"))
             total = len(services)
 
-            if healthy_or_running + failed == total and healthy_or_running > 0:
+            if failed:
                 _clear_lines(lines_printed)
-                if failed == 0:
-                    click.echo(click.style(" ✓ All services are healthy!", fg="green", bold=True))
-                else:
-                    click.echo(
-                        click.style(
-                            f" ✓ {healthy_or_running} services up, {failed} failed",
-                            fg="yellow",
-                            bold=True,
-                        )
+                click.echo(
+                    click.style(
+                        " ✗ One or more services failed during startup.",
+                        fg="red",
+                        bold=True,
                     )
+                )
+                click.echo()
+                for line in _render_service_detail(services):
+                    click.echo(line)
+                click.echo()
+                raise SystemExit(1)
+
+            if healthy_or_running == total and total > 0:
+                _clear_lines(lines_printed)
+                click.echo(click.style(" ✓ All services are healthy!", fg="green", bold=True))
                 click.echo()
                 for line in _render_service_detail(services):
                     click.echo(line)
@@ -1179,9 +1555,12 @@ def _poll_health(
         time.sleep(poll_interval)
 
     click.echo()
-    click.echo(click.style(" ⏱ Timed out waiting for services.", fg="yellow", bold=True))
+    click.echo(
+        click.style(" ✗ Timed out waiting for services to become healthy.", fg="red", bold=True)
+    )
     click.echo()
     services = health_fetcher()
     for line in _render_service_detail(services):
         click.echo(line)
     click.echo()
+    raise SystemExit(1)

@@ -4,6 +4,7 @@ from importlib import import_module
 
 import click
 
+from simlab import __version__
 from simlab.cli.auth import _verify_key_with_server
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_scenario_manager_api_url
@@ -88,7 +89,10 @@ class SimlabGroup(click.Group):
     "--collinear-api-key",
     "collinear_api_key",
     default=None,
-    help=("Collinear API key for rl-gym-api (overrides config file and SIMLAB_COLLINEAR_API_KEY)."),
+    help=(
+        "Collinear API key for the Scenario Manager API "
+        "(overrides config file and SIMLAB_COLLINEAR_API_KEY)."
+    ),
 )
 @click.option(
     "--scenario-manager-api-url",
@@ -110,7 +114,7 @@ class SimlabGroup(click.Group):
     type=click.Path(path_type=str, exists=False),
     help="Root directory for environments (default: <cwd>/environments).",
 )
-@click.version_option(package_name="simlab")
+@click.version_option(version=__version__)
 @click.pass_context
 def cli(
     ctx: click.Context,

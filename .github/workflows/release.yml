@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch main branch
+        run: git fetch origin main --no-tags
+      - name: Validate tag points to the current main HEAD
+        run: |
+          main_sha="$(git rev-parse origin/main)"
+          if [ "$GITHUB_SHA" != "$main_sha" ]; then
+              echo "Release tags must point to the current origin/main HEAD." >&2
+              echo "Tag commit:  $GITHUB_SHA" >&2
+              echo "Main commit: $main_sha" >&2
+              exit 1
+          fi
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - name: Validate tag matches project version
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          version = project["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected_tag = f"v{version}"
+          if tag != expected_tag:
+              raise SystemExit(
+                  f"Release tag {tag!r} does not match pyproject version {version!r}. "
+                  f"Expected {expected_tag!r}."
+              )
+          PY
+      - name: Build distribution
+        run: uvx --from build pyproject-build
+      - name: Twine check
+        run: uvx twine check dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

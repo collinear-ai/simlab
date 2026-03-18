@@ -141,9 +141,10 @@ def _load_tasks(scenario_dir: Path) -> list[dict[str, Any]]:
             tasks.append(json.loads(p.read_text()))
         except json.JSONDecodeError as exc:
             click.echo(
-                click.style(f"Invalid JSON in {p.name}: {exc}", fg="yellow"),
+                click.style(f"Invalid JSON in {p}: {exc}", fg="red"),
                 err=True,
             )
+            raise SystemExit(1) from exc
     return tasks
 
 
@@ -163,9 +164,10 @@ def _find_task_entry(
             task_entries.append((json.loads(path.read_text()), path))
         except json.JSONDecodeError as exc:
             click.echo(
-                click.style(f"Invalid JSON in {path.name}: {exc}", fg="yellow"),
+                click.style(f"Invalid JSON in {path}: {exc}", fg="red"),
                 err=True,
             )
+            raise SystemExit(1) from exc
 
     for task, path in task_entries:
         current_id = task.get("meta", {}).get("task_id", "")
@@ -279,7 +281,7 @@ def _local_task_rows(
 
 def _print_task_table(title: str, rows: list[dict[str, str]]) -> None:
     """Render a fixed-width task table for API or local bundle sources."""
-    id_w = 45
+    id_w = 100
     name_w = 50
     difficulty_w = 10
     apps_w = 48
@@ -1148,13 +1150,16 @@ def _endpoint_has_tools(base_url: str) -> bool:
     return isinstance(payload, dict) and isinstance(payload.get("tools"), list)
 
 
-def _any_endpoint_reachable(endpoints: dict[str, str]) -> bool:
-    return any(_endpoint_has_tools(url) for url in endpoints.values())
-
-
 def _reachable_endpoints(endpoints: dict[str, str]) -> dict[str, bool]:
     """Return per-endpoint reachability map via /tools."""
     return {name: _endpoint_has_tools(url) for name, url in endpoints.items()}
+
+
+def _daytona_state_file_for_config(config_path: str | None) -> Path | None:
+    """Return the Daytona state file path for an env config, if applicable."""
+    if not config_path:
+        return None
+    return Path(config_path).parent / "daytona-state.json"
 
 
 def _require_reachable_endpoints(
@@ -1162,12 +1167,46 @@ def _require_reachable_endpoints(
     endpoints: dict[str, str],
     action: str,
     using_daytona: bool,
+    config_path: str | None = None,
+    wait: bool = False,
+    timeout: int = 120,
+    poll_interval: int = 5,
+    log_prefix: str = "",
 ) -> None:
-    """Fail fast when endpoints are not reachable before seed/run."""
+    """Fail fast when endpoints are not reachable before seed/run.
+
+    When *wait* is ``True``, poll until all endpoints respond or *timeout*
+    seconds elapse (useful after ``docker compose up -d`` in a fresh sandbox).
+    After polling (or immediately when ``wait=False``), raise ``SystemExit(1)``
+    if **zero** endpoints are reachable.
+    """
     if not endpoints:
         click.echo(click.style(f"No endpoints resolved for {action}.", fg="red"), err=True)
         raise SystemExit(1)
-    reachability = _reachable_endpoints(endpoints)
+
+    prefix = f"{log_prefix} " if log_prefix else ""
+
+    if wait:
+        deadline = time.monotonic() + timeout
+        while True:
+            reachability = _reachable_endpoints(endpoints)
+            if all(reachability.values()):
+                return
+            remaining = [n for n, ok in reachability.items() if not ok]
+            if time.monotonic() >= deadline:
+                click.echo(
+                    click.style(
+                        f"{prefix}Timed out waiting for endpoints: {', '.join(remaining)}",
+                        fg="yellow",
+                    ),
+                    err=True,
+                )
+                break  # fall through to fail-fast check below
+            click.echo(f"{prefix}Waiting for: {', '.join(remaining)}...")
+            time.sleep(poll_interval)
+    else:
+        reachability = _reachable_endpoints(endpoints)
+
     if any(reachability.values()):
         return
 
@@ -1200,6 +1239,17 @@ def _require_reachable_endpoints(
             ),
             err=True,
         )
+        state_file = _daytona_state_file_for_config(config_path)
+        if state_file is not None and state_file.exists():
+            click.echo(
+                click.style(
+                    "A Daytona state file exists for this environment at "
+                    f"{state_file}. If you intended to use the remote sandbox, "
+                    "rerun with --daytona.",
+                    fg="yellow",
+                ),
+                err=True,
+            )
     raise SystemExit(1)
 
 
@@ -1310,6 +1360,7 @@ def list_tasks(
         )
         return
 
+    assert env_name is not None  # guaranteed by early exit above
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_path = str(env_dir / "env.yaml")
     global_cfg = get_global_config_from_ctx(ctx)
@@ -1617,6 +1668,7 @@ def info(
         )
         return
 
+    assert env_name is not None  # guaranteed by early exit above
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_path = str(env_dir / "env.yaml")
     global_cfg = get_global_config_from_ctx(ctx)
@@ -1752,6 +1804,7 @@ def seed(
         endpoints=needed_seed_endpoints or endpoints,
         action="task seeding",
         using_daytona=using_daytona,
+        config_path=config_path,
     )
     if using_daytona:
         click.echo(click.style("Using Daytona tool endpoints.", fg="cyan"))
@@ -1787,6 +1840,58 @@ def seed(
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
+
+
+def _print_parallel_summary(summary: Any) -> None:
+    """Display a table summarizing parallel rollout results."""
+    click.echo(click.style("\n=== Parallel Rollout Summary ===\n", bold=True))
+    click.echo(f"  Task:      {summary.task_id}")
+    click.echo(f"  Rollouts:  {summary.rollout_count}")
+    click.echo(f"  Duration:  {summary.total_duration_seconds:.1f}s")
+    click.echo()
+
+    passed = [
+        r
+        for r in summary.results
+        if r.error is None and r.verification_passed is not False
+    ]
+    failed = [
+        r
+        for r in summary.results
+        if r.error is not None or r.verification_passed is False
+    ]
+    rewards = [r.reward for r in summary.results if r.reward is not None]
+
+    for r in summary.results:
+        status = (
+            click.style("PASS", fg="green")
+            if r.verification_passed
+            else (
+                click.style("FAIL", fg="red")
+                if r.verification_passed is False
+                else click.style("ERR ", fg="red")
+                if r.error
+                else click.style("N/A ", fg="yellow")
+            )
+        )
+        reward_str = f"{r.reward:.1f}" if r.reward is not None else "-"
+        err_str = f"  error={r.error}" if r.error else ""
+        click.echo(
+            f"  rollout {r.rollout_idx}: {status}  "
+            f"reward={reward_str}  steps={r.steps_taken}  "
+            f"time={r.duration_seconds:.0f}s{err_str}"
+        )
+
+    click.echo()
+    click.echo(f"  Passed:    {len(passed)}/{summary.rollout_count}")
+    if failed:
+        click.echo(click.style(f"  Failed:    {len(failed)}", fg="red"))
+    if rewards:
+        avg = sum(rewards) / len(rewards)
+        click.echo(f"  Avg reward: {avg:.2f}")
+    if summary.output_dir:
+        click.echo(f"  Output:    {summary.output_dir}")
+    click.echo()
 
 
 @tasks.command()
@@ -1849,6 +1954,20 @@ def seed(
 @click.option(
     "--daytona", is_flag=True, help="Run against a Daytona sandbox instead of local Docker."
 )
+@click.option(
+    "--rollout-count",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of parallel rollouts to execute (requires --daytona).",
+)
+@click.option(
+    "--max-parallel",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Maximum concurrent Daytona sandboxes for parallel rollouts.",
+)
 @click.pass_context
 @with_command_telemetry("tasks run", resolver=scenario_manager_task_capture_config)
 def run(
@@ -1867,6 +1986,8 @@ def run(
     no_seed: bool,
     verbose: bool,
     daytona: bool,
+    rollout_count: int,
+    max_parallel: int,
 ) -> None:
     """Seed task data and run external agent contract.
 
@@ -1919,6 +2040,114 @@ def run(
         )
         raise SystemExit(1)
 
+    # --- Parallel rollouts branch ---
+    if rollout_count < 1:
+        click.echo(
+            click.style("--rollout-count must be at least 1.", fg="red"),
+            err=True,
+        )
+        raise SystemExit(1)
+    if rollout_count > 1:
+        if not daytona:
+            click.echo(
+                click.style(
+                    "--rollout-count > 1 requires --daytona for isolated sandboxes.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
+        if max_parallel < 1:
+            click.echo(
+                click.style(
+                    "--max-parallel must be at least 1.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
+        if not agent_import_path and not api_key:
+            click.echo(
+                click.style(
+                    "Reference agent requires --agent-api-key or SIMLAB_AGENT_API_KEY "
+                    "(or OPENAI_API_KEY for OpenAI). "
+                    "Custom agents (--agent-import-path) use their own credentials.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
+
+        from simlab.cli.env import _validate_daytona_coding_assets
+        from simlab.runtime.parallel_daytona import ParallelDaytonaOrchestrator
+
+        _validate_daytona_coding_assets(config, env_dir)
+
+        # Clean up any sandboxes leaked by a previous crashed parallel run.
+        parallel_state = env_dir / "parallel-sandboxes.json"
+        if parallel_state.exists():
+            cleaned = ParallelDaytonaOrchestrator.cleanup_orphaned_sandboxes(
+                parallel_state, daytona_api_key=global_cfg.daytona_api_key
+            )
+            if cleaned:
+                click.echo(
+                    click.style(f"Cleaned up {cleaned} orphaned sandbox(es) from a previous run.", fg="yellow"),
+                    err=True,
+                )
+
+        registry = ToolRegistry()
+        registry.load_all()
+        tool_ports: dict[str, int] = {}
+        extra_tool_urls: dict[str, str] = {}
+        for tool_name in config.tools:
+            tool = registry.get_tool(tool_name)
+            if tool is None:
+                continue
+            if tool.tool_server_port is not None:
+                tool_ports[tool_name] = tool.tool_server_port
+            elif tool.tool_server_url:
+                extra_tool_urls[tool_name] = tool.tool_server_url
+
+        get_profiled_service_names, _ = get_env_runtime_helpers()
+        preseed_svc_names = get_profiled_service_names(config, profile="preseed")
+        seed_svc_names = get_profiled_service_names(config, profile="seed")
+
+        orchestrator = ParallelDaytonaOrchestrator(
+            rollout_count=rollout_count,
+            max_parallel=max_parallel,
+            daytona_api_key=global_cfg.daytona_api_key,
+        )
+        summary = orchestrator.execute(
+            task_id=task_data.get("meta", {}).get("task_id", task_id),
+            task_data=task_data,
+            profiles=profiles,
+            compose_dir=env_dir,
+            tool_ports=tool_ports,
+            extra_tool_urls=extra_tool_urls,
+            preseed_svc_names=preseed_svc_names,
+            seed_svc_names=seed_svc_names,
+            config=config,
+            config_path=config_path,
+            model=model,
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            max_steps=max_steps,
+            agent_import_path=agent_import_path,
+            agent_timeout_seconds=agent_timeout_seconds,
+            no_seed=no_seed,
+            bundle_dir=bundle_dir,
+            global_cfg=global_cfg,
+            backend_id=backend_id,
+            base_url_api=base_url_api,
+            scenario_manager_api_key=scenario_manager_api_key,
+        )
+        _print_parallel_summary(summary)
+        has_failures = any(r.error is not None or r.verification_passed is False for r in summary.results)
+        if has_failures:
+            raise SystemExit(1)
+        return
+
     meta = task_data.get("meta", {})
     display = meta.get("display_name", meta.get("task_id", task_id))
 
@@ -1933,6 +2162,7 @@ def run(
         endpoints=endpoints,
         action="task run",
         using_daytona=using_daytona,
+        config_path=config_path,
     )
     _provision_task_calendar_users(
         task_data,

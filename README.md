@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/simlab-banner.png" alt="SimLab" width="700">
+  <img src="https://raw.githubusercontent.com/collinear-ai/simlab/main/assets/simlab-banner.png" alt="SimLab" width="700">
 </p>
 
 <p align="center">
@@ -7,17 +7,12 @@
 </p>
 
 <p align="center">
-<a href="https://docs.collinear.ai"><img src="assets/docs.png" width="137"></a>
-<a href="https://collinear.ai"><img src="assets/collinear_ai.png" width="137"></a>
-<a href="https://discord.gg/FfHVP6Yc"><img src="assets/discord.png" width="137"></a>
-</p>
-
-<p align="center">
-  <a href="https://pypi.org/project/simulationlab/"><img src="https://img.shields.io/pypi/v/simulationlab?style=curve-square" alt="PyPI"></a>
-  <!-- <a href="https://docs.collinear.ai"><img src="https://img.shields.io/badge/Docs-docs.collinear.ai-blue?style=flat-square" alt="Docs"></a> -->
-  <!-- <a href="https://collinear.ai"><img src="https://img.shields.io/badge/Website-collinear.ai-orange?style=flat-square" alt="Website"></a> -->
-  <img src="https://img.shields.io/badge/python-3.11+-blue?style=curve-square&logo=python&logoColor=white" alt="Python 3.11+">
-  <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=curve-square" alt="License"></a>
+  <a href="https://pypi.org/project/simulationlab/"><img src="https://img.shields.io/pypi/v/simulationlab?style=flat-square" alt="PyPI"></a>
+  <a href="https://docs.collinear.ai"><img src="https://img.shields.io/badge/Docs-docs.collinear.ai-blue?style=flat-square" alt="Docs"></a>
+  <a href="https://collinear.ai"><img src="https://img.shields.io/badge/Website-collinear.ai-orange?style=flat-square" alt="Website"></a>
+  <img src="https://img.shields.io/badge/python-3.13-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.13">
+  <a href="https://github.com/collinear-ai/simlab/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"></a>
+  <a href="https://discord.gg/FfHVP6Yc"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 ---
@@ -34,10 +29,18 @@ SimLab is the data layer for adaptively composing RL simulations and evaluating 
 
 ### Install
 ```bash
-git clone https://github.com/collinear-ai/simlab.git && cd simlab && uv sync
+uv tool install simulationlab
+# or, if you want Daytona support:
+uv tool install "simulationlab[daytona]"
+
+# pipx works too:
+pipx install simulationlab
 ```
 
-### Get your API keys and export them:
+The PyPI package is named `simulationlab`. The installed CLI command is `simlab`.
+SimLab currently supports Python 3.13.
+
+Get your API keys and export them:
 ```bash
 export SIMLAB_COLLINEAR_API_KEY="col_..."   # from platform.collinear.ai (Developers > API Keys)
 export DAYTONA_API_KEY="dtn_..."            # from app.daytona.io
@@ -49,25 +52,25 @@ export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY" # corresponding key
 
 ### Create an environment:
 ```bash
-# Create and start an environment on Daytona for hr_recruiting
-uv run simlab env init my-env --template hr_recruiting
-uv run simlab env up my-env --daytona
+# Create and start an environment on Daytona
+simlab env init my-env --template hr_recruiting
+simlab env up my-env --daytona
 ```
-> To list templates run `uv run simlab templates`
+> To list templates run `simlab templates list`
 
-### Create and lists tasks in directory `./generated-tasks`
+Create and list tasks in directory `./generated-tasks`
 ```bash
-uv run simlab tasks-gen init --presets recruiting # Can go to the config.toml to setup number of tasks etc.
-uv run simlab tasks-gen list --tasks-dir ./generated-tasks # takes 5-10 mins with the default setting, choose haiku and 2 tasks for a faster generation.
+simlab tasks-gen init --preset recruiting # Can go to the config.toml to setup number of tasks etc.
+simlab tasks list --tasks-dir ./generated-tasks # takes 5-10 mins with the default setting, choose haiku and 2 tasks for a faster generation.
 ```
 
 
 ### Run a task with task id `task_id`.
 
 ```bash
-uv run simlab tasks run --env my-env \
+simlab tasks run --env my-env \
   --task task_id \
-  --tasks-dir  ./generated-tasks
+  --tasks-dir ./generated-tasks \
   --agent-model gpt-5.2 \
   --agent-api-key "$OPENAI_API_KEY"
 ```
@@ -92,7 +95,7 @@ No `DAYTONA_API_KEY` required. First run may take several minutes while images a
 
 </details>
 
-For the full walkthrough — configuration, custom agents, task generation, verifiers, and more — see the **[Quickstart Guide](./QUICKSTART.md)**.
+For the full walkthrough — configuration, custom agents, task generation, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md)**.
 
 ## API Keys
 
@@ -161,13 +164,13 @@ Run `simlab --help` for full usage details.
 
 ## Documentation
 
-- [Quickstart Guide](./QUICKSTART.md) — full setup and usage walkthrough
+- [Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md) — full setup and usage walkthrough
 - [Docs](https://docs.collinear.ai) — complete documentation
 - [Collinear Platform](https://platform.collinear.ai) — get your API key
 
 ## License
 
-This project is licensed under the [Apache 2.0 License](./LICENSE).
+This project is licensed under the [Apache 2.0 License](https://github.com/collinear-ai/simlab/blob/main/LICENSE).
 
 ## Contact
 

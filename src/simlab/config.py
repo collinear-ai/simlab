@@ -384,8 +384,21 @@ def resolve_agent_api_key(
         resolved_provider = _normalize_string(getattr(config, "agent_provider", None))
     if resolved_provider is None and global_cfg is not None:
         resolved_provider = _normalize_string(global_cfg.agent_provider)
-    if (resolved_provider or "openai") == "openai":
-        return _normalize_string(os.environ.get("OPENAI_API_KEY"))
+    provider_env_vars: dict[str, str] = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "together_ai": "TOGETHERAI_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
+        "cohere": "COHERE_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }
+    effective_provider = resolved_provider or "openai"
+    env_var = provider_env_vars.get(effective_provider)
+    if env_var:
+        return _normalize_string(os.environ.get(env_var))
 
     return None
 
@@ -454,8 +467,7 @@ def telemetry_state_path(
     if raw_path:
         return Path(raw_path)
 
-    default = Path.cwd() / "simlab" / "simlab.json"
-    default.parent.mkdir(parents=True, exist_ok=True)
+    default = _DEFAULT_CONFIG_DIR / "simlab.json"
     return default
 
 

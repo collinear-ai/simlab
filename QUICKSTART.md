@@ -1,8 +1,24 @@
 # Simlab CLI — Quickstart (v0.1 Design)
 
+## Install
+
+Install the published package:
+
+```bash
+uv tool install simulationlab
+```
+
+If you want Daytona support from the packaged CLI:
+
+```bash
+uv tool install "simulationlab[daytona]"
+```
+
+The PyPI package is named `simulationlab`. The installed CLI command is `simlab`.
+
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.13
 - Docker + Docker Compose
 - Collinear API key for SimLab commands
 - `OPENAI_API_KEY` set in your environment
@@ -209,10 +225,10 @@ If you generated a local task bundle, browse that bundle directly:
 simlab tasks list --tasks-dir ./generated-tasks
 ```
 
-Then run a specific task by ID. For `hr_recruiting`, one confirmed task is `ar-100-schedule-phone-screen`:
+Then run a specific task by ID. For `hr_recruiting`, an available task is `100_weaver_schedule_phone_screen`:
 
 ```bash
-simlab tasks run --env my-env --task ar-100-schedule-phone-screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
 (You can also set `[agent].model` / `[agent].api_key` in `config.toml`, or use `SIMLAB_AGENT_MODEL`, `SIMLAB_AGENT_API_KEY`, and `OPENAI_API_KEY` for the OpenAI fallback.)
@@ -232,22 +248,39 @@ The **reference agent** (used by default) uses [LiteLLM](https://docs.litellm.ai
 ### A) Built‑in/reference agent (default)
 
 ```bash
-simlab tasks run --env my-env --task ar-100-schedule-phone-screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
 ### B) With Daytona
 
 ```bash
-simlab tasks run --env my-env --task ar-100-schedule-phone-screen --daytona --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --daytona --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
 Use `--daytona` when the environment is up with Daytona; omit it for local Docker.
 The Daytona API key is resolved from `--daytona-api-key`, `[daytona].api_key` in `config.toml`, `SIMLAB_DAYTONA_API_KEY`, then `DAYTONA_API_KEY`.
 
-### C) Custom agent
+### C) Parallel rollouts (Daytona only)
+
+Run the same task multiple times in parallel to collect diverse agent trajectories for training or evaluation:
 
 ```bash
-simlab tasks run --env my-env --task ar-100-schedule-phone-screen --agent-import-path path.to.agent:MyAgent
+simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --daytona \
+  --rollout-count 5 --max-parallel 3 \
+  --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+```
+
+- `--rollout-count N` — total number of rollouts to execute (default: 1).
+- `--max-parallel M` — max concurrent Daytona sandboxes (default: 3).
+
+Each rollout creates its own ephemeral sandbox (no `env up` needed), runs the full lifecycle (setup → seed → agent → verify → teardown), then destroys the sandbox. One rollout failing does not cancel others.
+
+Results are saved to `output/parallel_run_{task_id}_{timestamp}/` with per-rollout artifacts and an aggregated `summary.json` (see **Run output layout** below).
+
+### D) Custom agent
+
+```bash
+simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-import-path path.to.agent:MyAgent
 ```
 
 (Custom agents use their own credentials; `--agent-model` and `--agent-api-key` do not apply.)
@@ -258,7 +291,7 @@ If `--agent-import-path` is omitted, the CLI uses the baked‑in reference agent
 
 ### Run output layout
 
-Each run writes to a namespaced directory under `output/`:
+**Single rollout** (default) writes to a namespaced directory under `output/`:
 
 - `output/agent_run_<task_id>_<timestamp>/artifacts.json` — run artifacts (messages, tool calls, etc.).
 - If the task defines **verifiers**, the CLI runs them after the agent and writes Harbor-style reward files in the same run directory:
@@ -266,6 +299,21 @@ Each run writes to a namespaced directory under `output/`:
   - `output/agent_run_<task_id>_<timestamp>/verifier/reward.json` — e.g. `{"reward": 1.0}`.
 
 Tasks that have no `verifiers` (or `evaluators`) in their JSON only produce `artifacts.json`; there is no verifier step and no reward files.
+
+**Parallel rollouts** (`--rollout-count > 1`) write to:
+
+```
+output/parallel_run_<task_id>_<timestamp>/
+  rollout_0/
+    artifacts.json
+    verifier/reward.txt
+    verifier/reward.json
+  rollout_1/
+    ...
+  summary.json
+```
+
+`summary.json` includes completed/failed counts, average reward, average steps, and per-rollout details.
 
 ---
 
@@ -276,10 +324,10 @@ When a task JSON includes a `verifiers` (or `evaluators`) list with `func: pytho
 **When using the API** (default or `scenario_manager_api_url` in env): the CLI downloads the verifier bundle from the Scenario Manager API on first use and caches it under `environments/<env-name>/verifiers/` (e.g. `environments/my-env/verifiers/`).
 
 ```bash
-simlab tasks run --env my-env --task ar-100-schedule-phone-screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
-Confirmed tasks with verifiers include `ar-100-schedule-phone-screen` under the `hr_recruiting` template and `0_flag_biased_compensation_adjustment_request` under the `hr_people_management` template.
+Available tasks with verifiers include `100_weaver_schedule_phone_screen` under the `hr_recruiting` template and `0_flag_biased_compensation_adjustment_request` under the `hr_people_management` template.
 
 Verifiers run **locally**. You must configure the credentials for the LLM-as-a-judge when a verifier uses one. Configure judge settings via the `[verifier]` section in global config or via env variables:
 
@@ -323,7 +371,7 @@ simlab tools list
 simlab templates list
 simlab tasks list --env my-env
 # Run a task (env must be up: simlab env up my-env, or use --daytona)
-uv run simlab tasks run --env my-env --task ar-100-schedule-phone-screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+uv run simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
 Verifiers are downloaded from the API on first run and cached under `environments/my-env/verifiers/`.
@@ -344,7 +392,7 @@ simlab tasks list --env my-env
 To run a task you still need an environment with tool servers: `simlab env up my-env` (local Docker) or `simlab env up my-env --daytona`. Then:
 
 ```bash
-uv run simlab tasks run --env my-env --task ar-100-schedule-phone-screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+uv run simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
 The API serves verifier bundles via `GET /scenarios/{scenario_id}/verifiers/bundle`; it needs the monorepo `src/` (mounted in Docker) to read scenario verifier files.

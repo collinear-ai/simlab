@@ -60,20 +60,6 @@ services:
       retries: 30
       start_period: 30s
 
-  rocketchat-seed:
-    image: collinear/rocketchat-seed:latest
-    ports: []
-    environment:
-      ROCKETCHAT_HOSTNAME: rocketchat
-      ROCKETCHAT_PORT: "3000"
-      ROCKETCHAT_ADMIN_CONFIG__USERNAME: admin
-      ROCKETCHAT_ADMIN_CONFIG__PASSWORD: admin123
-      ROCKETCHAT_AGENT_CONFIG__USERNAME: admin
-      ROCKETCHAT_AGENT_CONFIG__PASSWORD: admin123
-    depends_on:
-      rocketchat:
-        condition: service_healthy
-
   sotopia-runtime:
     image: collinear/sotopia-runtime:latest
     ports: []
@@ -97,3 +83,18 @@ services:
       timeout: 5s
       retries: 36
       start_period: 180s
+
+seed_services:
+  rocketchat-seed:
+    image: collinear/rocketchat-seed:latest
+    ports: []
+    environment:
+      ROCKETCHAT_HOSTNAME: rocketchat
+      ROCKETCHAT_PORT: "3000"
+      ROCKETCHAT_ADMIN_CONFIG__USERNAME: admin
+      ROCKETCHAT_ADMIN_CONFIG__PASSWORD: admin123
+      ROCKETCHAT_AGENT_CONFIG__USERNAME: admin
+      ROCKETCHAT_AGENT_CONFIG__PASSWORD: admin123
+    depends_on:
+      rocketchat:
+        condition: service_healthy

@@ -134,7 +134,7 @@ def init(preset: str | None, output_dir: str) -> None:
                 "complexity": {"easy": 0.3, "medium": 0.5, "hard": 0.2},
             },
             "pipeline": {
-                "model": "claude-sonnet-4-6",
+                "model": "claude-haiku-4-5",
             },
         }
 
@@ -177,7 +177,7 @@ def validate(config_path: str) -> None:
         sys.exit(1)
 
     request_kwargs.setdefault("num_tasks", 10)
-    request_kwargs.setdefault("model", "claude-sonnet-4-6")
+    request_kwargs.setdefault("model", "claude-haiku-4-5")
 
     try:
         request = TaskGenRequest(**request_kwargs)
@@ -242,7 +242,7 @@ def validate(config_path: str) -> None:
     "--model",
     type=str,
     default=None,
-    help="LLM model for task generation (default: claude-sonnet-4-6, or from config)",
+    help="LLM model for task generation (default: claude-haiku-4-5, or from config)",
 )
 @click.option(
     "--verbose",
@@ -277,7 +277,7 @@ def run(
 
     # Apply defaults for fields not set by config or flags.
     request_kwargs.setdefault("num_tasks", 10)
-    request_kwargs.setdefault("model", "claude-sonnet-4-6")
+    request_kwargs.setdefault("model", "claude-haiku-4-5")
 
     # 2. Build request
     try:
@@ -396,11 +396,29 @@ def run(
 
     click.echo()
     task_count = len(result.tasks)
-    click.secho(
-        f"  Done — {task_count} tasks generated, written to {out_path.resolve()}/",
-        fg="green",
-        bold=True,
-    )
+    if task_count < request.num_tasks:
+        click.secho(
+            f"  Done — {task_count} of {request.num_tasks} requested tasks survived quality filtering,",
+            fg="yellow",
+            bold=True,
+        )
+        click.secho(
+            f"  written to {out_path.resolve()}/",
+            fg="yellow",
+            bold=True,
+        )
+        _print_filter_summary(result.filter_summary)
+        click.echo()
+        click.echo("  To get more tasks, try:")
+        click.echo("    - Increase num_tasks in your config (e.g. 2-3x your target)")
+        click.echo("    - Reduce the number of categories")
+        click.echo("    - Set filter = false under [generation] to skip quality checks")
+    else:
+        click.secho(
+            f"  Done — {task_count} tasks generated, written to {out_path.resolve()}/",
+            fg="green",
+            bold=True,
+        )
     if verbose:
         click.echo(f"    Tasks:        {len(result.tasks)}")
         click.echo(f"    Instructions: {len(result.instructions)}")
@@ -654,6 +672,60 @@ def _write_bundle(out_path: Path, result: TaskGenResult) -> None:
     if result.skills_md:
         out_path.mkdir(parents=True, exist_ok=True)
         (out_path / "skills.md").write_text(result.skills_md, encoding="utf-8")
+
+
+_CHECK_LABELS: dict[str, str] = {
+    "required_npcs_covered": "NPC coverage",
+    "message_info_secret_coverage": "NPC secret coverage",
+    "seed_email_quality": "Seed email quality",
+    "seed_calendar_quality": "Seed calendar quality",
+    "seed_chat_channel_quality": "Seed chat channel quality",
+    "task_quality": "Task quality",
+}
+
+
+def _print_filter_summary(summary: dict | None) -> None:
+    """Print a concise breakdown of filtered tasks and which checks they failed."""
+    if not summary:
+        return
+
+    filtered_tasks = summary.get("filtered_tasks", [])
+    if not filtered_tasks:
+        return
+
+    click.echo()
+    click.secho("  Filtered tasks:", bold=True)
+    for entry in filtered_tasks:
+        name = entry.get("display_name") or entry.get("file", "unknown")
+        checks = entry.get("checks", {})
+        failed = [
+            _CHECK_LABELS.get(k, k)
+            for k, v in checks.items()
+            if v == 0
+        ]
+        issues = entry.get("issues", [])
+        reason = "; ".join(issues) if issues else ", ".join(failed)
+        click.echo(f"    \u2717 {name}")
+        if reason:
+            click.echo(f"      {reason}")
+
+    # Show stage-level funnel if available
+    stage_stats = summary.get("stage_stats")
+    total = summary.get("total")
+    if stage_stats and total:
+        click.echo()
+        click.secho("  Filter funnel:", bold=True)
+        click.echo(f"    Started with {total} tasks")
+        for key in ("check1", "check2", "check3", "check4", "check5", "check6"):
+            stage = stage_stats.get(key)
+            if not stage:
+                continue
+            check_key = stage.get("check_key", key)
+            label = _CHECK_LABELS.get(check_key, check_key)
+            filtered = stage.get("filtered", 0)
+            passed = stage.get("passed", 0)
+            if filtered:
+                click.echo(f"    {label}: {filtered} filtered, {passed} passed")
 
 
 def _print_api_error(exc: ScenarioManagerApiError) -> None:

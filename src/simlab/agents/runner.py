@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
@@ -32,6 +34,7 @@ def run_with_agent_contract(
     timeout_seconds: float | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    stop_event: threading.Event | None = None,
 ) -> RunArtifacts:
     """Execute setup() then run() and always return populated artifacts."""
     artifacts = RunArtifacts(
@@ -45,11 +48,16 @@ def run_with_agent_contract(
         agent_cls = load_agent_class(agent_import_path)
         agent = agent_cls()
     else:
-        agent = ReferenceAgent(api_key=api_key, base_url=base_url)
+        agent = ReferenceAgent(provider=provider, api_key=api_key, base_url=base_url)
 
     def _execute() -> None:
         _run_maybe_async(agent.setup, environment)
-        _run_maybe_async(agent.run, instruction, environment, artifacts)
+        run_kwargs: dict[str, Any] = {}
+        if stop_event is not None:
+            sig = inspect.signature(agent.run)
+            if "stop_event" in sig.parameters:
+                run_kwargs["stop_event"] = stop_event
+        _run_maybe_async(agent.run, instruction, environment, artifacts, **run_kwargs)
 
     try:
         if timeout_seconds is None:

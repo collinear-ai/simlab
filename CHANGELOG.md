@@ -1,9 +1,69 @@
-# Simlab CLI — Changelog
+# SimLab CLI — Changelog
 
-### Unreleased
+All notable changes to the SimLab will be documented in this file.
 
-- Centralized global CLI configuration in `simlab.config`, including Scenario Manager, Daytona, agent, verifier, and telemetry settings.
-- Added sectioned `config.toml` support for `[daytona]`, `[agent]`, `[verifier]`, and `[telemetry]` settings.
-- Removed the old split config helpers and aligned docs with the current global-config model.
+## [0.1.0] — 2026-03-16
 
-### v0.1.0 - Initial Release
+Initial public release of SimLab — a self-serve simulation lab for building
+and evaluating long-horizon AI agents.
+
+### Highlights
+
+SimLab lets you spin up isolated sandboxes, run AI agents against realistic
+tasks, and evaluate their performance — all from the command line.
+
+### Environment Management
+
+- `simlab env init` — Create environments from scenario templates or
+  interactively pick tool servers from the catalog
+- `simlab env up / down` — Start and stop environments locally via Docker
+  Compose or remotely via Daytona
+- `simlab env seed` — Populate running environments with initial data
+  (e.g., HRIS records, etc.)
+- Custom MCP servers — Plug in your own MCP servers
+  at environment init time
+- Health-check aware startup — Services wait for dependency health checks
+  before starting dependents; startup fails fast when services exit or stall
+
+### Scenario Templates
+
+Four built-in templates to get started quickly:
+
+- **HR Recruiting** — Interview scheduling, offer management, candidate comms
+- **People Management** — Onboarding, performance reviews, compensation
+- **Coding** — CLI apps, REST APIs, debugging, refactoring via sandboxed bash
+- **Customer Support** — Ticket triage, SLA compliance, escalation workflows
+
+Browse with `simlab templates list`.
+
+### Task Execution
+
+- **`simlab tasks list / info / run`** — Browse tasks, inspect instructions,
+  and run agents against them
+- **Multi-provider agent support** — OpenAI, Fireworks, or any
+  litellm-compatible endpoint
+- **Configurable tool bundles** — Choose which tool servers the agent can access
+- **Local and Daytona execution** — Run tasks on your machine or in remote
+  cloud sandboxes
+
+### Task Generation
+
+- **`simlab tasks-gen init`** — Scaffold a task generation config with
+  `--preset` support (recruiting, people_mgmt, coding, customer_support)
+- **`simlab tasks-gen validate`** — Validate configs locally before submission
+- **`simlab tasks-gen run`** — Generate custom tasks via the API with live
+  streaming progress
+
+### Evaluation & Verification
+
+- **Programmatic verifiers** — Python-based verifiers that check environment
+  state against success criteria, run automatically after each task
+- **Reward Model scoring** — Rubric-based evaluation with configurable
+  pass thresholds, confidence scores, and per-dimension breakdowns
+
+### Toolset Catalog
+
+- **`simlab tools list / info`** — Browse available tool servers by category
+  (core, integrations, specialized)
+- Built-in servers: HRIS (Frappe), Email, Calendar, Chat (RocketChat),
+  Browser (Playwright), Helpdesk (Frappe), Coding (OpenHands), Google Workspace, SEC Edgar, Twelve Data

@@ -1,11 +1,10 @@
-"""Baked-in reference agent implementation."""
+"""Baked-in reference agent implementation using LiteLLM for provider-agnostic support."""
 
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
-
-from openai import OpenAI
 
 from simlab.agents.base import BaseAgent
 from simlab.agents.base import BaseEnvironment
@@ -15,10 +14,21 @@ from simlab.agents.base import ToolCallResult
 
 
 class ReferenceAgent(BaseAgent):
-    """OpenAI SDK tool-calling agent used when --agent-import-path is omitted."""
+    """LiteLLM-based tool-calling agent used when --agent-import-path is omitted.
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
+    Works with any provider supported by LiteLLM (OpenAI, Anthropic, Groq,
+    OpenRouter, Together, Mistral, Cohere, Deepseek, Gemini, etc.).
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         """Initialize the reference agent."""
+        self._provider = provider or "openai"
         self._api_key = api_key
         self._base_url = base_url
 
@@ -31,13 +41,25 @@ class ReferenceAgent(BaseAgent):
         """No-op setup; environment is used during run()."""
         _ = environment
 
-    def run(self, instruction: str, environment: BaseEnvironment, context: RunArtifacts) -> None:
-        """Execute the instruction via OpenAI tool-calling and record results in context."""
-        if not self._api_key:
-            raise ValueError("ReferenceAgent requires an OpenAI API key")
+    def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: RunArtifacts,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        """Execute the instruction via LiteLLM tool-calling and record results in context."""
+        import litellm  # noqa: PLC0415
 
-        model = context.model or "gpt-4o-mini"
-        client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+        if not self._api_key:
+            raise ValueError("ReferenceAgent requires an API key")
+
+        raw_model = context.model or "gpt-4o-mini"
+        litellm_model = raw_model
+        if self._provider and not raw_model.startswith(f"{self._provider}/"):
+            litellm_model = f"{self._provider}/{raw_model}"
+
         openai_tools, dispatch = _build_openai_tools(environment)
         context.metadata["reference_agent_tools"] = {
             "count": len(openai_tools),
@@ -57,15 +79,23 @@ class ReferenceAgent(BaseAgent):
         )
         messages.append({"role": "user", "content": instruction})
         context.metadata["reference_agent"] = True
+        context.metadata["litellm_model"] = litellm_model
 
         max_steps = context.max_steps or 30
         for _ in range(max_steps):
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,  # type: ignore[arg-type]
-                tools=openai_tools or None,  # type: ignore[arg-type]
+            
+            if stop_event is not None and stop_event.is_set():
+                context.error = "Cancelled"
+                return
+            
+            response = litellm.completion(
+                model=litellm_model,
+                messages=messages,
+                tools=openai_tools or None,
+                api_key=self._api_key,
+                base_url=self._base_url,
             )
-            message = response.choices[0].message
+            message = response.choices[0].message  # type: ignore[union-attr]
             tool_calls = message.tool_calls or []
 
             if tool_calls:

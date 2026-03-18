@@ -119,6 +119,10 @@ class TaskGenResult(BaseModel):
         default_factory=list, description="Generated NPC profile files"
     )
     skills_md: str | None = Field(default=None, description="Generated skills.md content")
+    filter_summary: dict | None = Field(
+        default=None,
+        description="Quality filter summary (stage stats, filtered task details)",
+    )
 
 
 class ScenarioToolServer(BaseModel):
@@ -142,7 +146,7 @@ class ScenarioSummary(BaseModel):
     )
     scenario_guidance_md: str | None = Field(
         default=None,
-        description="Optional scenario guidance markdown downloaded from the server",
+        description="Scenario guidance markdown to materialize into environment/task prompts",
     )
     visibility: str | None = Field(default=None, description="Visibility marker")
 

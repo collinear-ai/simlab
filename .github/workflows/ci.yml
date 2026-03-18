@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  checks:
+    name: Checks (py3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - name: Install Python (3.13)
+        run: uv python install 3.13
+      - name: Sync dependencies
+        run: uv sync --dev --python 3.13
+      - name: Ruff
+        run: uv run --with ruff ruff check .
+      - name: Mypy
+        run: uv run --with mypy mypy --ignore-missing-imports src tests
+      - name: Pytest
+        run: uv run pytest -q
+      - name: Build distribution
+        run: uvx --from build pyproject-build --sdist --wheel
+      - name: Twine check
+        run: uvx twine check dist/*

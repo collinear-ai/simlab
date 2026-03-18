@@ -1,0 +1,24 @@
+{
+  "name": "Summarize PDF and XLSX workspace assets",
+  "category": "task",
+  "apps": ["coding"],
+  "meta": {
+    "task_id": "workspace_asset_report",
+    "display_name": "Summarize PDF and XLSX workspace assets",
+    "version": "1.0.0",
+    "idempotent": true
+  },
+  "task": "You have two files in the workspace:\n\n- fixtures/quarterly_metrics.pdf\n- fixtures/headcount.xlsx\n\nUse the available command-line tools in the environment to extract the information. Do not write custom parsing code for PDF or XLSX when the environment already provides tools.\n\nCreate a file named workspace_report.md that contains:\n1. Revenue and growth figures from the PDF\n2. Total headcount from the spreadsheet\n3. Department-level headcount breakdown from the spreadsheet\n4. A short conclusion paragraph",
+  "tool_servers": [
+    {
+      "name": "coding-env",
+      "tool_server_url": "http://localhost:8020"
+    }
+  ],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "collinear.scenarios.coding.verifiers.workspace_asset_report"
+    }
+  ]
+}

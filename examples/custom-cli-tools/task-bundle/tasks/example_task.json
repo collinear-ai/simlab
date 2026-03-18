@@ -1,0 +1,23 @@
+{
+  "name": "Example Custom Coding Task",
+  "category": "task",
+  "apps": ["coding"],
+  "meta": {
+    "task_id": "example_task",
+    "display_name": "Example Custom Coding Task",
+    "difficulty": "medium"
+  },
+  "task": "Inspect the workspace and summarize available tools in `workspace_summary.md`.",
+  "tool_servers": [
+    {
+      "name": "coding-env",
+      "tool_server_url": "http://localhost:8020"
+    }
+  ],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "simlab.verifiers.custom_coding"
+    }
+  ]
+}
