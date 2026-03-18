@@ -1,4 +1,4 @@
-# Simlab CLI — Quickstart (v0.1 Design)
+# Simlab CLI v0.1 — Quickstart
 
 ## Install
 
