@@ -91,6 +91,14 @@ def list_templates(ctx: click.Context, env_name: str | None) -> None:
         click.echo(click.style(str(e), fg="red"), err=True)
         raise SystemExit(1) from e
 
+    scenario_ids = {scenario.scenario_id.strip() for scenario in scenarios}
+    if "hr" in scenario_ids:
+        scenarios = [
+            scenario
+            for scenario in scenarios
+            if scenario.scenario_id.strip() not in {"hr_recruiting", "hr_people_management"}
+        ]
+
     name_w = 28
     slug_w = 24
     desc_w = 78

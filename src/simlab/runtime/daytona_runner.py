@@ -36,6 +36,7 @@ except ImportError as e:
     CreateSnapshotParams = Any  # type: ignore[misc,assignment]
     Daytona = Any  # type: ignore[misc,assignment]
     DaytonaConfig = Any  # type: ignore[misc,assignment]
+
     class DaytonaFallbackNotFoundError(Exception):
         """Fallback type used when the Daytona SDK is not installed."""
 
@@ -428,6 +429,8 @@ class DaytonaRunner:
 
         """
         rpt = reporter if reporter is not None else DefaultReporter()
+
+        ensure_snapshot_exists(self._daytona_api_key)
 
         daytona = _get_daytona(self._daytona_api_key)
 

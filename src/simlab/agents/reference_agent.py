@@ -83,11 +83,10 @@ class ReferenceAgent(BaseAgent):
 
         max_steps = context.max_steps or 30
         for _ in range(max_steps):
-            
             if stop_event is not None and stop_event.is_set():
                 context.error = "Cancelled"
                 return
-            
+
             response = litellm.completion(
                 model=litellm_model,
                 messages=messages,

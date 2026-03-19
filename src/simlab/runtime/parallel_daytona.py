@@ -29,9 +29,9 @@ from simlab.cli.tasks import _ensure_task_calendar_accounts
 from simlab.cli.tasks import _get_local_verifier_file_path
 from simlab.cli.tasks import _load_skills_markdown
 from simlab.cli.tasks import _maybe_run_rubric_judge
+from simlab.cli.tasks import _require_reachable_endpoints
 from simlab.cli.tasks import _restore_env
 from simlab.cli.tasks import _rewrite_tool_server_urls
-from simlab.cli.tasks import _require_reachable_endpoints
 from simlab.cli.tasks import _seed_task_data
 from simlab.cli.tasks import _task_uses_calendar
 from simlab.cli.tasks import get_agent_runtime_helpers
@@ -763,14 +763,10 @@ class ParallelDaytonaOrchestrator:
         # did not explicitly fail.  This matches the CLI exit-code logic
         # which treats ``verification_passed is False`` as a failure.
         passed = [
-            r
-            for r in summary.results
-            if r.error is None and r.verification_passed is not False
+            r for r in summary.results if r.error is None and r.verification_passed is not False
         ]
         failed = [
-            r
-            for r in summary.results
-            if r.error is not None or r.verification_passed is False
+            r for r in summary.results if r.error is not None or r.verification_passed is False
         ]
         # Include all rewards (even 0.0 from failed verifications) so the
         # average reflects actual agent performance, not just the successes.
@@ -782,9 +778,7 @@ class ParallelDaytonaOrchestrator:
             "passed": len(passed),
             "failed": len(failed),
             "avg_reward": (sum(rewards) / len(rewards)) if rewards else None,
-            "avg_steps": (
-                sum(r.steps_taken for r in passed) / len(passed) if passed else None
-            ),
+            "avg_steps": (sum(r.steps_taken for r in passed) / len(passed) if passed else None),
             "total_duration_seconds": round(summary.total_duration_seconds, 1),
             "results": [
                 {

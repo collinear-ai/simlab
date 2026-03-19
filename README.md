@@ -23,7 +23,7 @@ SimLab is the data layer for adaptively composing RL simulations and evaluating 
 - **Run agents** against tasks using any LLM provider (OpenAI, Fireworks, custom endpoints)
 - **Generate custom tasks** with built-in task generation pipelines
 - **Evaluate automatically** with verifiers and reward model scoring
-- **Scale to the cloud** with Daytona for remote sandbox execution
+- **Scale to the cloud** with Daytona for remote sandbox execution (if you want to experiment with large-scale parallel rollouts, reach out to us or join the Discord!)
 
 ## Quickstart
 
@@ -53,7 +53,7 @@ export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY" # corresponding key
 ### Create an environment:
 ```bash
 # Create and start an environment on Daytona
-simlab env init my-env --template hr_recruiting
+simlab env init my-env --template hr
 simlab env up my-env --daytona
 ```
 > To list templates run `simlab templates list`
@@ -86,7 +86,7 @@ simlab env down my-env --daytona
 If you have Docker + Docker Compose installed, you can run environments on your machine instead of Daytona:
 
 ```bash
-simlab env init my-env --template hr_recruiting
+simlab env init my-env --template hr
 simlab env up my-env
 simlab env down my-env
 ```

@@ -64,7 +64,8 @@ def login(ctx: click.Context) -> None:
         root = root.parent
     config_file_override = (root.params or {}).get("config_file")
     config_path = _config_file_path(override=config_file_override, must_exist=False)
-    assert config_path is not None  # must_exist=False always returns a Path
+    if config_path is None:  # pragma: no cover - must_exist=False always returns a Path
+        raise click.ClickException("Could not determine config file path")
 
     # Validate key against the server before saving.
     api_url = resolve_scenario_manager_api_url(base_url=None)
@@ -109,7 +110,8 @@ def status(ctx: click.Context) -> None:
         root = root.parent
     config_file_override = (root.params or {}).get("config_file")
     config_path = _config_file_path(override=config_file_override, must_exist=False)
-    assert config_path is not None  # must_exist=False always returns a Path
+    if config_path is None:  # pragma: no cover - must_exist=False always returns a Path
+        raise click.ClickException("Could not determine config file path")
 
     click.echo()
 

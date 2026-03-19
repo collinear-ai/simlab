@@ -467,8 +467,7 @@ def telemetry_state_path(
     if raw_path:
         return Path(raw_path)
 
-    default = _DEFAULT_CONFIG_DIR / "simlab.json"
-    return default
+    return _DEFAULT_CONFIG_DIR / "simlab.json"
 
 
 def get_environments_dir(

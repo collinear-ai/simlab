@@ -21,14 +21,13 @@ from simlab.api.client import ScenarioManagerClient
 from simlab.api.schemas import TaskGenJob
 from simlab.api.schemas import TaskGenRequest
 from simlab.api.schemas import TaskGenResult
+from simlab.cli.tasks_gen_presets import PRESETS
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_scenario_manager_api_url
 from simlab.telemetry import TelemetryCaptureConfig
 from simlab.telemetry import emit_cli_event
 from simlab.telemetry import resolve_scenario_manager_capture_config
 from simlab.telemetry import with_command_telemetry
-
-from simlab.cli.tasks_gen_presets import PRESETS
 
 _POLL_INTERVAL_SECONDS = 3
 
@@ -397,7 +396,8 @@ def run(
     task_count = len(result.tasks)
     if task_count < request.num_tasks:
         click.secho(
-            f"  Done — {task_count} of {request.num_tasks} requested tasks survived quality filtering,",
+            f"  Done — {task_count} of {request.num_tasks} requested tasks"
+            " survived quality filtering,",
             fg="yellow",
             bold=True,
         )
@@ -697,11 +697,7 @@ def _print_filter_summary(summary: dict | None) -> None:
     for entry in filtered_tasks:
         name = entry.get("display_name") or entry.get("file", "unknown")
         checks = entry.get("checks", {})
-        failed = [
-            _CHECK_LABELS.get(k, k)
-            for k, v in checks.items()
-            if v == 0
-        ]
+        failed = [_CHECK_LABELS.get(k, k) for k, v in checks.items() if v == 0]
         issues = entry.get("issues", [])
         reason = "; ".join(issues) if issues else ", ".join(failed)
         click.echo(f"    \u2717 {name}")

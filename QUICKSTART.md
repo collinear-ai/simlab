@@ -186,7 +186,7 @@ simlab env up my-env --daytona
 
 - **`--force`** (init): overwrite an existing environment without prompting; use to regenerate `docker-compose.yml` and `.env` from the current `env.yaml`.
 - **`--rebuild`** (up): run `docker compose down` then `docker compose up -d` (tear down and start containers again). Does not regenerate compose files.
-
+- If you want to experiment with large-scale parallel rollouts, reach out to us directly or join the Discord!
 ---
 
 ## 1.5) Generate Custom Tasks (optional)

@@ -1360,7 +1360,8 @@ def list_tasks(
         )
         return
 
-    assert env_name is not None  # guaranteed by early exit above
+    if env_name is None:  # guaranteed by early exit above
+        raise click.ClickException("--env is required")
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_path = str(env_dir / "env.yaml")
     global_cfg = get_global_config_from_ctx(ctx)
@@ -1668,7 +1669,8 @@ def info(
         )
         return
 
-    assert env_name is not None  # guaranteed by early exit above
+    if env_name is None:  # guaranteed by early exit above
+        raise click.ClickException("--env is required")
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_path = str(env_dir / "env.yaml")
     global_cfg = get_global_config_from_ctx(ctx)
@@ -1850,16 +1852,8 @@ def _print_parallel_summary(summary: Any) -> None:
     click.echo(f"  Duration:  {summary.total_duration_seconds:.1f}s")
     click.echo()
 
-    passed = [
-        r
-        for r in summary.results
-        if r.error is None and r.verification_passed is not False
-    ]
-    failed = [
-        r
-        for r in summary.results
-        if r.error is not None or r.verification_passed is False
-    ]
+    passed = [r for r in summary.results if r.error is None and r.verification_passed is not False]
+    failed = [r for r in summary.results if r.error is not None or r.verification_passed is False]
     rewards = [r.reward for r in summary.results if r.reward is not None]
 
     for r in summary.results:
@@ -2091,7 +2085,10 @@ def run(
             )
             if cleaned:
                 click.echo(
-                    click.style(f"Cleaned up {cleaned} orphaned sandbox(es) from a previous run.", fg="yellow"),
+                    click.style(
+                        f"Cleaned up {cleaned} orphaned sandbox(es) from a previous run.",
+                        fg="yellow",
+                    ),
                     err=True,
                 )
 
@@ -2143,7 +2140,9 @@ def run(
             scenario_manager_api_key=scenario_manager_api_key,
         )
         _print_parallel_summary(summary)
-        has_failures = any(r.error is not None or r.verification_passed is False for r in summary.results)
+        has_failures = any(
+            r.error is not None or r.verification_passed is False for r in summary.results
+        )
         if has_failures:
             raise SystemExit(1)
         return

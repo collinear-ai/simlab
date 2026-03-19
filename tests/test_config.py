@@ -311,10 +311,13 @@ def test_load_global_config_cli_overrides_file_and_env(
     assert cfg.daytona_api_key == "cli-daytona-key"
 
 
-def test_load_global_config_cli_overrides_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_global_config_cli_overrides_stripped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """CLI override values are stripped; None and unknown keys are ignored."""
     monkeypatch.delenv("SIMLAB_DAYTONA_API_KEY", raising=False)
     monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
+    monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "missing-config.toml"))
     cfg = load_global_config(
         config_file_path=None,
         cli_overrides={
