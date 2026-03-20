@@ -225,10 +225,18 @@ If you generated a local task bundle, browse that bundle directly:
 simlab tasks list --tasks-dir ./generated-tasks
 ```
 
+**Important:** Before running tasks, configure your reward model credentials so task verification works correctly. Set these as environment variables, or add a `[verifier]` section to your `config.toml` (see Step 4 for details).
+
+```bash
+export SIMLAB_VERIFIER_MODEL="gpt-5.2"
+export SIMLAB_VERIFIER_PROVIDER="openai"
+export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY"
+```
+
 Then run a specific task by ID. For `hr`, an available task is `100_weaver_schedule_phone_screen`:
 
 ```bash
-simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
+simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-5.2 --agent-api-key "$OPENAI_API_KEY"
 ```
 
 (You can also set `[agent].model` / `[agent].api_key` in `config.toml`, or use `SIMLAB_AGENT_MODEL`, `SIMLAB_AGENT_API_KEY`, and `OPENAI_API_KEY` for the OpenAI fallback.)
@@ -329,7 +337,7 @@ simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-mo
 
 Available tasks with verifiers include `100_weaver_schedule_phone_screen` under the `hr` template and `0_flag_biased_compensation_adjustment_request` under the `hr_people_management` template.
 
-Verifiers run **locally**. You must configure the credentials for the LLM-as-a-judge when a verifier uses one. Configure judge settings via the `[verifier]` section in global config or via env variables:
+Verifiers run **locally**. You must configure the credentials for the reward model when a verifier uses one. Configure reward model settings via the `[verifier]` section in global config or via env variables:
 
 ```bash
 export SIMLAB_VERIFIER_MODEL="gpt-5.2"
