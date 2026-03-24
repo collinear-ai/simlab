@@ -145,6 +145,32 @@ def test_run_verifier_supports_local_bundle_package_imports(tmp_path: Path) -> N
     assert result.success is True
 
 
+def test_run_verifier_supports_local_bundle_collinear_core_imports(tmp_path: Path) -> None:
+    verifier_file = tmp_path / "generated_task.py"
+    verifier_file.write_text(
+        "\n".join(
+            [
+                "from collinear.core.run_artifacts import RunArtifacts",
+                "from collinear.core.verifier import VerifierResult",
+                "",
+                "def verify(run_artifacts: RunArtifacts) -> VerifierResult:",
+                "    return VerifierResult(success=run_artifacts.task_id == 'generated-task')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.run_verifier(
+        "collinear.scenarios.customer_support.verifiers.generated_task",
+        run_artifacts_adapter=type("Artifacts", (), {"task_id": "generated-task"})(),
+        scenario_id="customer_support",
+        local_verifier_path=verifier_file,
+    )
+
+    assert result.success is True
+
+
 # ---------------------------------------------------------------------------
 # Rubric judge tests
 # ---------------------------------------------------------------------------

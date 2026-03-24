@@ -34,6 +34,8 @@ from simlab.config import get_env_dir
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_env_dir
+from simlab.mcp_config import MCP_SERVERS_FILENAME
+from simlab.mcp_config import load_mcp_servers_config
 from simlab.runtime.compose_ps import parse_ps_output
 from simlab.seeder import query_tool_server
 from simlab.telemetry import TelemetryCaptureConfig
@@ -227,7 +229,9 @@ def _extract_tools_from_scenario(
     """Return (recognized_tools, missing_tools) from scenario.tool_servers[].name."""
     service_to_tool = {
         "coding-env": "coding",
+        "crm-env": "crm",
         "email-env": "email",
+        "erp-env": "erp",
         "chronos-server": "calendar",
         "frappe-hrms-env": "frappe-hrms",
         "google-workspace-tool-server": "google-workspace",
@@ -334,6 +338,13 @@ def _load_scenario_guidance_file(path_str: str) -> str:
     default=None,
     help="Read scenario guidance markdown from a file and store it in env.yaml.",
 )
+@click.option(
+    "--mcp-servers",
+    "mcp_servers_path",
+    type=click.Path(dir_okay=False, path_type=Path, exists=True),
+    default=None,
+    help="Path to JSON file describing MCP servers (mcpServers with url or command/args/env).",
+)
 @click.pass_context
 @with_command_telemetry("env init", resolver=env_init_capture_config)
 def init(
@@ -344,6 +355,7 @@ def init(
     image_registry: str | None,
     force: bool,
     scenario_guidance_file: Path | None,
+    mcp_servers_path: Path | None,
 ) -> None:
     """Initialize an environment and generate docker-compose.yml in one step."""
     global_cfg = get_global_config_from_ctx(ctx)
@@ -415,17 +427,25 @@ def init(
         click.echo(f"Starting from template '{backend_id}': {', '.join(selected_tools)}")
 
     if not non_interactive and not selected_tools:
-        selected_tools = _interactive_select(registry)
+        if mcp_servers_path is not None and not click.confirm(
+            "Add catalog tools in addition to the MCP servers?",
+            default=False,
+        ):
+            selected_tools = []
+        else:
+            selected_tools = _interactive_select(registry)
     elif not non_interactive and selected_tools:
         remaining = [t for t in registry.tool_names if t not in selected_tools]
         if remaining:
             extra = _interactive_add_more(registry, remaining)
             selected_tools.extend(extra)
 
-    # Require tool selection only when creating/overwriting env.yaml (not when regenerating from
-    # existing)
-    if not selected_tools and not (env_yaml.exists() and force):
-        click.echo(click.style("No tools selected. Aborting.", fg="red"), err=True)
+    # Require tool selection or MCP servers when creating/overwriting env.yaml
+    # (not when regenerating)
+    if not selected_tools and not mcp_servers_path and not (env_yaml.exists() and force):
+        click.echo(
+            click.style("No tools selected and no --mcp-servers. Aborting.", fg="red"), err=True
+        )
         raise SystemExit(1)
 
     # Don't silently overwrite unless --force
@@ -447,6 +467,23 @@ def init(
     env_dir.mkdir(parents=True, exist_ok=True)
     if scenario_guidance_file is None and template_name and scenario:
         scenario_guidance_md = scenario.scenario_guidance_md
+
+    mcp_file = env_dir / MCP_SERVERS_FILENAME
+    should_clear_persisted_mcp = mcp_servers_path is None
+
+    # Load and persist MCP servers config if provided
+    if mcp_servers_path is not None:
+        try:
+            mcp_config = load_mcp_servers_config(mcp_servers_path)
+        except (TypeError, ValueError) as e:
+            click.echo(click.style(str(e), fg="red"), err=True)
+            raise SystemExit(1) from e
+        mcp_file.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+        click.echo(click.style(f"MCP servers config written to {mcp_file}", fg="green"))
+    elif should_clear_persisted_mcp and mcp_file.exists():
+        mcp_file.unlink()
+        click.echo(click.style(f"Removed persisted MCP servers config at {mcp_file}", fg="yellow"))
+
     if env_yaml.exists() and force:
         # Regenerate docker-compose and .env from existing env.yaml; do not overwrite env.yaml
         data = yaml.safe_load(env_yaml.read_text()) or {}
@@ -506,7 +543,7 @@ def init(
     # Generate docker-compose.yml and .env.
     engine = ComposeEngine(registry)
     try:
-        compose_output = engine.compose(config, config_dir=env_yaml.parent)
+        compose_output = engine.compose(config, config_dir=env_yaml.parent, env_dir=env_dir)
     except (KeyError, FileNotFoundError, ValueError) as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
@@ -523,6 +560,8 @@ def init(
         click.echo("  coding/fixtures/")
         click.echo("  coding/skills/")
         click.echo("  task-bundle/")
+    if (env_dir / MCP_SERVERS_FILENAME).is_file():
+        click.echo(f"  {MCP_SERVERS_FILENAME}")
     click.echo()
 
     click.echo(click.style("Tool endpoints:", bold=True))
@@ -579,6 +618,8 @@ def _interactive_select(registry: ToolRegistry) -> list[str]:
         choices=choices,
     ).ask()
 
+    if selected is None:
+        raise click.Abort
     return selected or []
 
 
@@ -689,6 +730,8 @@ def _interactive_add_more(registry: ToolRegistry, remaining: list[str]) -> list[
         return []
 
     add_more = questionary.confirm("Add more tools beyond the template?", default=False).ask()
+    if add_more is None:
+        raise click.Abort
     if not add_more:
         return []
 
@@ -704,6 +747,8 @@ def _interactive_add_more(registry: ToolRegistry, remaining: list[str]) -> list[
             )
 
     selected = questionary.checkbox("Select additional tools:", choices=choices).ask()
+    if selected is None:
+        raise click.Abort
     return selected or []
 
 
@@ -713,6 +758,13 @@ def _compose_has_build_contexts(compose_file: Path) -> bool:
     if not existing or "services" not in existing:
         return False
     return any("build" in svc for svc in existing["services"].values())
+
+
+def _compose_has_services(compose_file: Path) -> bool:
+    """Return True if the compose file defines at least one service."""
+    existing = yaml.safe_load(compose_file.read_text())
+    services = existing.get("services") if isinstance(existing, dict) else None
+    return isinstance(services, dict) and bool(services)
 
 
 @env.command()
@@ -752,25 +804,30 @@ def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool, verbose:
         raise SystemExit(1)
 
     has_builds = _compose_has_build_contexts(compose_file)
+    has_services = _compose_has_services(compose_file)
 
     if daytona:
-        global_cfg = get_global_config_from_ctx(ctx)
-        if rebuild:
-            runner = _get_daytona_runner(daytona_api_key=global_cfg.daytona_api_key)
-            state_file = env_dir / "daytona-state.json"
-            if state_file.exists():
-                runner.down(env_dir)
-            else:
-                click.echo("No Daytona state found; starting fresh.")
-        _up_daytona(
-            config,
-            config_file,
-            env_dir,
-            daytona_api_key=global_cfg.daytona_api_key,
-            verbose=verbose,
-        )
+        if not has_services:
+            click.echo("No Daytona services defined; environment uses external endpoints only.")
+            click.echo(click.style("Environment ready.", fg="green", bold=True))
+        else:
+            global_cfg = get_global_config_from_ctx(ctx)
+            if rebuild:
+                runner = _get_daytona_runner(daytona_api_key=global_cfg.daytona_api_key)
+                state_file = env_dir / "daytona-state.json"
+                if state_file.exists():
+                    runner.down(env_dir)
+                else:
+                    click.echo("No Daytona state found; starting fresh.")
+            _up_daytona(
+                config,
+                config_file,
+                env_dir,
+                daytona_api_key=global_cfg.daytona_api_key,
+                verbose=verbose,
+            )
     else:
-        if rebuild:
+        if rebuild and has_services:
             click.echo("Tearing down existing containers...")
             result = subprocess.run(
                 ["docker", "compose", "-f", str(compose_file), "down"],
@@ -782,7 +839,15 @@ def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool, verbose:
                 click.echo(click.style("Failed to stop services:", fg="red"), err=True)
                 click.echo(result.stderr, err=True)
                 raise SystemExit(1)
-        _up_local(compose_file, env_dir, config, config_file, has_builds, verbose=verbose)
+        _up_local(
+            compose_file,
+            env_dir,
+            config,
+            config_file,
+            has_builds,
+            verbose=verbose,
+            has_services=has_services,
+        )
     emit_cli_event(
         "env_up_completed",
         {
@@ -803,6 +868,7 @@ def _up_local(
     config_path: Path | None = None,
     has_builds: bool = False,
     verbose: bool = False,
+    has_services: bool = True,
 ) -> None:
     """Start services locally via docker compose."""
     progress = StepProgress(verbose=verbose)
@@ -814,6 +880,11 @@ def _up_local(
             _run_profiled_services_local(
                 out_dir, preseed_svc_names, profile="preseed", quiet=True, step_ctx=ctx
             )
+
+    if not has_services:
+        click.echo("No local services defined; environment uses external endpoints only.")
+        click.echo(click.style("Environment ready.", fg="green", bold=True))
+        return
 
     with progress.step("Services started") as ctx:
         up_cmd = ["docker", "compose", "-f", str(compose_file), "up", "-d"]
@@ -962,6 +1033,9 @@ def down(ctx: click.Context, env_name: str, daytona: bool) -> None:
     if not compose_file.exists():
         click.echo(click.style(f"No compose file found at {compose_file}", fg="red"), err=True)
         raise SystemExit(1)
+
+    if not _compose_has_services(compose_file):
+        click.echo("No local services defined in current compose file; attempting teardown anyway.")
 
     click.echo("Stopping services...")
     result = subprocess.run(
@@ -1399,6 +1473,7 @@ def _local_health_fetcher(compose_file: Path) -> Callable[[], dict[str, str]]:
                 "-f",
                 str(compose_file),
                 "ps",
+                "--all",
                 "--format",
                 "{{.Name}}\t{{.Status}}",
             ],
@@ -1491,6 +1566,7 @@ def _poll_health(
     msg_interval = 3.0
     lines_printed = 0
     poll_interval = 2.0
+    consecutive_ready_polls = 0
 
     shuffled_messages = list(_WAITING_MESSAGES)
     random.shuffle(shuffled_messages)
@@ -1544,6 +1620,11 @@ def _poll_health(
                 raise SystemExit(1)
 
             if healthy_or_running == total and total > 0:
+                consecutive_ready_polls += 1
+            else:
+                consecutive_ready_polls = 0
+
+            if consecutive_ready_polls >= 2:
                 _clear_lines(lines_printed)
                 click.echo(click.style(" ✓ All services are healthy!", fg="green", bold=True))
                 click.echo()

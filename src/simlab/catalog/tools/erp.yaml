@@ -1,0 +1,37 @@
+name: erp
+display_name: ERP
+description: In-memory ERP workflow server for products, inventory, orders, invoices, and suppliers.
+category: operations
+tool_server_port: 8100
+
+exposed_ports: []
+
+services:
+  erp-env:
+    image: collinear/erp-env:latest
+    ports:
+      - "8100"
+    environment:
+      ERP_FIXED_NOW: "2026-03-18T12:00:00+00:00"
+      ERP_SEED_DATA_PATH: /app/src/toolsets/erp/seed_data/erp_seed_data.json
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+seed_services:
+  erp-seed:
+    image: collinear/erp-env:latest
+    ports: []
+    depends_on:
+      erp-env:
+        condition: service_healthy
+    command:
+      - "python3"
+      - "-c"
+      - >-
+        import urllib.request; urllib.request.urlopen(
+        urllib.request.Request('http://erp-env:8100/reset', data=b'', method='POST')
+        ).read()

@@ -65,6 +65,14 @@ class RunArtifacts:
         data = asdict(self)
         data["tool_calls"] = [asdict(x) for x in self.tool_calls]
         data["tool_results"] = [asdict(x) for x in self.tool_results]
+        # metadata can contain non-serializable values (e.g. mcp_clients: MCPClientHandle)
+        meta = {}
+        for k, v in self.metadata.items():
+            if k == "mcp_clients" and isinstance(v, dict):
+                meta[k] = {name: getattr(handle, "_url", str(handle)) for name, handle in v.items()}
+            else:
+                meta[k] = v
+        data["metadata"] = meta
         return data
 
     def dump(self, path: Path) -> None:

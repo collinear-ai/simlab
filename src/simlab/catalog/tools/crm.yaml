@@ -1,0 +1,32 @@
+name: crm
+display_name: CRM
+description: Customer relationship management with contacts, deals, activities, and pipelines.
+category: business
+tool_server_port: 8045
+
+exposed_ports: []
+
+services:
+  crm-env:
+    image: collinear/crm-env:latest
+    ports:
+      - "8045"
+    environment: {}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8045/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+seed_services:
+  crm-seed:
+    image: collinear/crm-env:latest
+    ports: []
+    depends_on:
+      crm-env:
+        condition: service_healthy
+    command:
+      - "python3"
+      - "-c"
+      - "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://crm-env:8045/reset', data=b'', method='POST')).read()"

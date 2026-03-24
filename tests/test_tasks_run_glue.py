@@ -19,13 +19,17 @@ def test_effective_tool_servers_merges_environment_endpoints() -> None:
     endpoints = {
         "frappe-hrms": "http://localhost:8030",
         "calendar": "http://localhost:8050",
+        "crm": "http://localhost:8045",
         "email": "http://localhost:8040",
+        "erp": "http://localhost:8100",
         "rocketchat": "http://localhost:8060",
     }
     merged = tasks_cli._effective_tool_servers(rewritten_task, endpoints)
     assert "frappe-hrms-env" in merged
     assert "chronos-server" in merged
+    assert merged["crm-env"] == "http://localhost:8045"
     assert merged["email-env"] == "http://localhost:8040"
+    assert merged["erp-env"] == "http://localhost:8100"
     assert merged["rocketchat-env"] == "http://localhost:8060"
 
 
@@ -39,6 +43,7 @@ def test_rewrite_tool_server_urls_uses_service_name_mapping() -> None:
                     "elb.us-east-1.amazonaws.com:8020"
                 ),
             },
+            {"name": "crm-env", "tool_server_url": "http://legacy:8045"},
             {"name": "google-workspace-tool-server", "tool_server_url": "http://legacy:8090"},
             {"name": "sec-edgar-env", "tool_server_url": "http://legacy:8070"},
             {"name": "twelve-data-env", "tool_server_url": "http://legacy:8080"},
@@ -46,6 +51,7 @@ def test_rewrite_tool_server_urls_uses_service_name_mapping() -> None:
     }
     endpoints = {
         "coding": "http://localhost:18020",
+        "crm": "http://localhost:18045",
         "google-workspace": "http://localhost:18090",
         "sec-edgar": "http://localhost:18070",
         "twelve-data": "http://localhost:18080",
@@ -53,9 +59,29 @@ def test_rewrite_tool_server_urls_uses_service_name_mapping() -> None:
     rewritten = tasks_cli._rewrite_tool_server_urls(task_data, endpoints)
     servers = {s["name"]: s["tool_server_url"] for s in rewritten["tool_servers"]}
     assert servers["coding-env"] == "http://localhost:18020"
+    assert servers["crm-env"] == "http://localhost:18045"
     assert servers["google-workspace-tool-server"] == "http://localhost:18090"
     assert servers["sec-edgar-env"] == "http://localhost:18070"
     assert servers["twelve-data-env"] == "http://localhost:18080"
+
+
+def test_rewrite_tool_server_urls_maps_erp_service_name() -> None:
+    task_data = {
+        "tool_servers": [
+            {"name": "erp-env", "tool_server_url": "http://erp-env:8100"},
+            {"name": "email-env", "tool_server_url": "http://email-env:8040"},
+        ]
+    }
+    endpoints = {
+        "erp": "https://erp.preview",
+        "email": "https://email.preview",
+    }
+
+    rewritten = tasks_cli._rewrite_tool_server_urls(task_data, endpoints)
+    servers = {s["name"]: s["tool_server_url"] for s in rewritten["tool_servers"]}
+
+    assert servers["erp-env"] == "https://erp.preview"
+    assert servers["email-env"] == "https://email.preview"
 
 
 def test_seed_task_data_retries_failed_calls(monkeypatch) -> None:  # noqa: ANN001
@@ -87,6 +113,34 @@ def test_seed_task_data_retries_failed_calls(monkeypatch) -> None:  # noqa: ANN0
     assert ok == 1
     assert fail == 0
     assert attempts["count"] == 3
+
+
+def test_seed_task_data_uses_literal_email_sender(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict[str, str] = {}
+
+    def fake_query(url: str, tool_name: str, params: dict):
+        _ = url, tool_name
+        captured["from_email"] = params["from_email"]
+        return {"ok": True}
+
+    monkeypatch.setattr(tasks_cli, "query_tool_server", fake_query)
+
+    task = {
+        "seed_emails": [
+            {
+                "from_profile_id": "procurement@brightpath.io",
+                "to_addr": "agent@weaverenterprises.com",
+                "subject": "Brightpath Solutions purchase request",
+                "body_text": "hello",
+            }
+        ],
+        "seed_calendar_events": [],
+    }
+    ok, fail = tasks_cli._seed_task_data(task, {}, {"email": "http://localhost:8040"})
+
+    assert ok == 1
+    assert fail == 0
+    assert captured["from_email"] == "procurement@brightpath.io"
 
 
 def test_provision_task_calendar_users_only_runs_calendar_helpers(
@@ -143,11 +197,59 @@ def test_provision_task_calendar_users_only_runs_calendar_helpers(
     ]
 
 
+def test_run_env_seed_services_runs_seed_profile_for_local_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = tasks_cli.EnvConfig(
+        name="simlab-env",
+        tools=["crm"],
+        overrides={},
+    )
+    config_path = tmp_path / "simlab-env.yaml"
+    config_path.write_text("name: simlab-env\n")
+    expected_config_path = config_path
+
+    calls: list[tuple[list[str], str, dict[str, str] | None]] = []
+
+    def fake_services(
+        _config: tasks_cli.EnvConfig,
+        profile: str,
+        config_path: Path,
+        tool_names: list[str] | None = None,
+    ) -> list[str]:
+        assert config_path == expected_config_path
+        assert profile == "seed"
+        assert tool_names is None
+        return ["crm-seed"]
+
+    def fake_run(
+        _compose_dir: Path,
+        svc_names: list[str],
+        profile: str,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        calls.append((svc_names, profile, env_overrides))
+
+    monkeypatch.setattr("simlab.cli.env._get_profiled_service_names", fake_services)
+    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+
+    tasks_cli.run_env_seed_services(
+        config,
+        str(config_path),
+        using_daytona=False,
+    )
+
+    assert calls == [(["crm-seed"], "seed", None)]
+
+
 def test_resolve_endpoints_does_not_auto_fallback_to_daytona(monkeypatch) -> None:  # noqa: ANN001
     config = tasks_cli.EnvConfig(name="x", tools=["email"], overrides={})
 
     monkeypatch.setattr(
-        tasks_cli, "get_tool_endpoints", lambda _cfg: {"email": "http://localhost:8040"}
+        tasks_cli,
+        "get_tool_endpoints",
+        lambda _cfg, config_path=None: {"email": "http://localhost:8040"},
     )
     called = {"daytona": False}
 
@@ -235,6 +337,112 @@ def test_require_reachable_endpoints_passes_when_any_reachable(monkeypatch) -> N
         action="task run",
         using_daytona=False,
     )
+
+
+def test_require_reachable_endpoints_gateway_only_raises_when_gateway_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tasks_cli,
+        "_reachable_endpoints",
+        lambda _e: {tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: False},
+    )
+    monkeypatch.setattr(tasks_cli, "_endpoint_is_reachable", lambda _u: False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        tasks_cli._require_reachable_endpoints(
+            endpoints={
+                tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "http://localhost:8081/mcp"
+            },
+            action="task run",
+            using_daytona=False,
+        )
+
+    assert exc_info.value.code == 1
+
+
+def test_require_reachable_endpoints_gateway_only_passes_when_gateway_responds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tasks_cli,
+        "_reachable_endpoints",
+        lambda _e: {tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: False},
+    )
+    monkeypatch.setattr(tasks_cli, "_endpoint_is_reachable", lambda _u: True)
+
+    tasks_cli._require_reachable_endpoints(
+        endpoints={tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "http://localhost:8081/mcp"},
+        action="task run",
+        using_daytona=False,
+    )
+
+
+def test_require_reachable_endpoints_raises_when_only_gateway_responds_in_mixed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tasks_cli,
+        "_reachable_endpoints",
+        lambda _e: {
+            "email": False,
+            tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: False,
+        },
+    )
+    monkeypatch.setattr(tasks_cli, "_endpoint_is_reachable", lambda _u: True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        tasks_cli._require_reachable_endpoints(
+            endpoints={
+                "email": "http://localhost:8040",
+                tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "http://localhost:8081/mcp",
+            },
+            action="task run",
+            using_daytona=False,
+        )
+
+    assert exc_info.value.code == 1
+
+
+def test_get_tool_endpoints_uses_mapped_gateway_port(tmp_path: Path) -> None:
+    env_dir = tmp_path / "gateway-env"
+    env_dir.mkdir()
+    config_path = env_dir / "env.yaml"
+    config_path.write_text("name: gateway-env\ntools: []\n", encoding="utf-8")
+    (env_dir / "docker-compose.yml").write_text(
+        "services:\n  mcp-gateway:\n    ports:\n      - 8081:8080\n",
+        encoding="utf-8",
+    )
+    (env_dir / "mcp-servers.json").write_text(
+        '{"mcpServers": {"weather": {"command": "uvx", "args": ["mcp-weather"]}}}',
+        encoding="utf-8",
+    )
+
+    endpoints = tasks_cli.get_tool_endpoints(
+        tasks_cli.EnvConfig(name="gateway-env", tools=[], overrides={}),
+        config_path=config_path,
+    )
+
+    assert (
+        endpoints[tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME] == "http://localhost:8081/mcp"
+    )
+
+
+def test_build_mcp_clients_preserves_command_server_identity() -> None:
+    clients = tasks_cli._build_mcp_clients(
+        {
+            "mcpServers": {
+                "weather": {"command": "uvx", "args": ["mcp-weather"]},
+                "notion": {"command": "npx", "args": ["-y", "@notionhq/notion-mcp-server"]},
+            }
+        },
+        {tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "http://localhost:8081/mcp"},
+    )
+
+    assert set(clients) == {"weather", "notion"}
+    assert clients["weather"]._url == "http://localhost:8081/mcp"
+    assert clients["weather"]._tool_prefix == "weather_"
+    assert clients["notion"]._tool_prefix == "notion_"
 
 
 def test_build_services_available_section_local_defaults(tmp_path: Path) -> None:
@@ -348,6 +556,50 @@ def test_get_daytona_endpoints_checks_status_inactive(monkeypatch) -> None:  # n
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_get_daytona_endpoints_without_state_uses_non_sandbox_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp = Path.cwd() / "tmp_test_daytona_external_only"
+    tmp.mkdir(exist_ok=True)
+    cfg = tmp / "env.yaml"
+    cfg.write_text("name: x\ntools: []\noverrides: {}\n")
+    monkeypatch.setattr(
+        tasks_cli,
+        "get_tool_endpoints",
+        lambda _config, config_path=None: {"external-tool": "https://email.example.com"},
+    )
+
+    endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
+
+    assert endpoints == {"external-tool": "https://email.example.com"}
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_get_daytona_endpoints_without_state_for_url_only_mcp_returns_empty(monkeypatch) -> None:  # noqa: ANN001
+    tmp = Path.cwd() / "tmp_test_daytona_url_only_mcp"
+    tmp.mkdir(exist_ok=True)
+    cfg = tmp / "env.yaml"
+    cfg.write_text("name: x\ntools: []\noverrides: {}\n")
+    (tmp / "mcp-servers.json").write_text(
+        '{"mcpServers": {"weather": {"url": "https://mcp.weather.example.com"}}}',
+        encoding="utf-8",
+    )
+
+    class FakeRegistry:
+        def load_all(self) -> None:
+            return None
+
+        def get_tool(self, name: str):
+            _ = name
+
+    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+
+    endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
+
+    assert endpoints == {}
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_get_daytona_endpoints_prompts_and_resumes(monkeypatch) -> None:  # noqa: ANN001
     tmp = Path.cwd() / "tmp_test_daytona_resume"
     tmp.mkdir(exist_ok=True)
@@ -433,6 +685,64 @@ def test_get_daytona_endpoints_status_then_urls(monkeypatch) -> None:  # noqa: A
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_get_daytona_endpoints_uses_mapped_gateway_port(monkeypatch) -> None:  # noqa: ANN001
+    tmp = Path.cwd() / "tmp_test_daytona_gateway_port"
+    tmp.mkdir(exist_ok=True)
+    cfg = tmp / "env.yaml"
+    cfg.write_text("name: x\ntools: [twelve-data]\noverrides: {}\n")
+    (tmp / "daytona-state.json").write_text('{"sandbox_id":"sbx-1"}')
+    (tmp / "docker-compose.yml").write_text(
+        "services:\n  mcp-gateway:\n    ports:\n      - 8081:8080\n",
+        encoding="utf-8",
+    )
+    (tmp / "mcp-servers.json").write_text(
+        '{"mcpServers": {"weather": {"command": "uvx", "args": ["mcp-weather"]}}}',
+        encoding="utf-8",
+    )
+
+    class FakePreview:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+    class FakeSandbox:
+        status = "running"
+
+        def __init__(self) -> None:
+            self.preview_ports: list[int] = []
+
+        def get_preview_link(self, port: int):
+            self.preview_ports.append(port)
+            return FakePreview(f"https://{port}-x.daytonaproxy.net")
+
+    fake_sandbox = FakeSandbox()
+
+    class FakeDaytona:
+        def get(self, sandbox_id: str):
+            _ = sandbox_id
+            return fake_sandbox
+
+    class FakeRegistry:
+        def load_all(self) -> None:
+            return None
+
+        def get_tool(self, name: str):
+            if name == "twelve-data":
+                return SimpleNamespace(tool_server_port=8080, tool_server_url=None)
+            return None
+
+    monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
+    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+
+    endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
+
+    assert fake_sandbox.preview_ports == [8080, 8081]
+    assert endpoints["twelve-data"] == "https://8080-x.daytonaproxy.net"
+    assert endpoints[tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME] == (
+        "https://8081-x.daytonaproxy.net/mcp"
+    )
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_resolve_agent_runtime_settings_uses_global_config_defaults() -> None:
     global_cfg = SimpleNamespace(
         agent_model="gpt-5",
@@ -493,3 +803,163 @@ def test_apply_verifier_env_overrides_sets_and_restores(monkeypatch) -> None:  #
 
     assert os.environ["SIMLAB_VERIFIER_MODEL"] == "old-model"
     assert "SIMLAB_VERIFIER_API_KEY" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# _provision_task_group_channels
+# ---------------------------------------------------------------------------
+
+
+def test_provision_task_group_channels_runs_rocketchat_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify group channel provisioning runs rocketchat seed with correct env overrides."""
+    task = {
+        "npcs": [{"id": "diana_walsh"}, {"id": "james_foster"}],
+        "seed_group_channels": [
+            {
+                "channel_name": "billing-support",
+                "member_profile_ids": ["diana_walsh", "james_foster", "mike_williams"],
+                "messages": [],
+            }
+        ],
+    }
+    profiles = {
+        "diana_walsh": {"first_name": "Diana", "last_name": "Walsh", "email": "diana@example.com"},
+        "james_foster": {
+            "first_name": "James",
+            "last_name": "Foster",
+            "email": "james@example.com",
+        },
+    }
+    config = tasks_cli.EnvConfig(
+        name="simlab-env",
+        tools=["rocketchat", "frappe-hrms"],
+        overrides={},
+    )
+    config_path = tmp_path / "simlab-env.yaml"
+    config_path.write_text("name: simlab-env\n")
+
+    calls: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def fake_services(
+        _config: tasks_cli.EnvConfig,
+        profile: str,  # noqa: ARG001
+        config_path: Path,  # noqa: ARG001
+        tool_names: list[str] | None = None,
+    ) -> list[str]:
+        assert tool_names == ["rocketchat"]
+        return ["rocketchat-seed"]
+
+    def fake_run(
+        _compose_dir: Path,
+        svc_names: list[str],
+        profile: str,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        calls.append((profile, svc_names, env_overrides or {}))
+
+    monkeypatch.setattr("simlab.cli.env._get_profiled_service_names", fake_services)
+    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+
+    tasks_cli._provision_task_group_channels(
+        task,
+        profiles,
+        config=config,
+        config_path=str(config_path),
+        using_daytona=False,
+    )
+
+    assert len(calls) == 1
+    profile, svc_names, env_overrides = calls[0]
+    assert profile == "seed"
+    assert svc_names == ["rocketchat-seed"]
+
+    import json  # noqa: PLC0415
+
+    npc_configs = json.loads(env_overrides["ROCKETCHAT_NPC_CONFIGS"])
+    assert "diana_walsh" in npc_configs
+    assert "james_foster" in npc_configs
+    assert "mike_williams" in npc_configs  # from member_profile_ids
+    assert npc_configs["diana_walsh"]["username"] == "diana_walsh"
+    assert npc_configs["diana_walsh"]["email"] == "diana@example.com"
+    assert npc_configs["diana_walsh"]["name"] == "Diana Walsh"
+    # mike_williams not in profiles — should get fallback display name
+    assert npc_configs["mike_williams"]["name"] == "Mike Williams"
+
+    # Verify group channels were passed through
+    group_channels = json.loads(env_overrides["ROCKETCHAT_SEED_GROUP_CHANNELS"])
+    assert len(group_channels) == 1
+    assert group_channels[0]["channel_name"] == "billing-support"
+
+
+def test_provision_task_group_channels_skips_when_no_channels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No seed_group_channels means no seed container is run."""
+    task = {"npcs": [{"id": "alice"}], "seed_group_channels": []}
+    config = tasks_cli.EnvConfig(name="x", tools=["rocketchat"], overrides={})
+    config_path = tmp_path / "env.yaml"
+    config_path.write_text("name: x\n")
+
+    called = {"yes": False}
+
+    def fake_run(*_args: object, **_kwargs: object) -> None:
+        called["yes"] = True
+
+    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+
+    tasks_cli._provision_task_group_channels(
+        task, {}, config=config, config_path=str(config_path), using_daytona=False
+    )
+    assert not called["yes"]
+
+
+def test_provision_task_group_channels_skips_when_no_rocketchat_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """If rocketchat is not in config.tools, provisioning is skipped."""
+    task = {
+        "npcs": [],
+        "seed_group_channels": [
+            {"channel_name": "general", "member_profile_ids": ["bob"], "messages": []}
+        ],
+    }
+    config = tasks_cli.EnvConfig(name="x", tools=["email"], overrides={})
+    config_path = tmp_path / "env.yaml"
+    config_path.write_text("name: x\n")
+
+    called = {"yes": False}
+
+    def fake_run(*_args: object, **_kwargs: object) -> None:
+        called["yes"] = True
+
+    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+
+    tasks_cli._provision_task_group_channels(
+        task, {}, config=config, config_path=str(config_path), using_daytona=False
+    )
+    assert not called["yes"]
+
+
+def test_api_task_to_local_includes_seed_group_channels() -> None:
+    """Verify _api_task_to_local copies seed_group_channels from API response."""
+    api_task = {
+        "task_id": "t1",
+        "name": "Test",
+        "description": "Do something",
+        "tool_servers": [],
+        "seed_emails": [],
+        "seed_calendar_events": [],
+        "seed_group_channels": [
+            {"channel_name": "ops", "member_profile_ids": ["alice"], "messages": []}
+        ],
+        "npc_profiles": [],
+        "verifier_modules": [],
+    }
+    task_dict, _profiles = tasks_cli._api_task_to_local(api_task)
+    assert len(task_dict["seed_group_channels"]) == 1
+    assert task_dict["seed_group_channels"][0]["channel_name"] == "ops"

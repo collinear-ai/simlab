@@ -6,7 +6,7 @@ from pathlib import Path
 
 import click
 import pytest
-import simlab.config as config_mod
+from simlab import config as config_mod
 from simlab.config import GlobalConfig
 from simlab.config import get_global_config_from_ctx
 from simlab.config import load_global_config
@@ -433,6 +433,7 @@ def test_resolve_agent_api_key_does_not_use_openai_env_for_non_openai_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("SIMLAB_AGENT_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-fallback-key")
 
     assert (

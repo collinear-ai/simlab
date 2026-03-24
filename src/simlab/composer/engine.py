@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from pathlib import Path
@@ -15,6 +16,10 @@ from simlab.catalog.registry import ServiceDefinition
 from simlab.catalog.registry import ToolDefinition
 from simlab.catalog.registry import ToolRegistry
 from simlab.composer.npc_config import inject_npc_env_vars
+from simlab.mcp_config import build_gateway_config_arena_format
+from simlab.mcp_config import build_gateway_container_env
+from simlab.mcp_config import get_mcp_command_servers
+from simlab.mcp_config import load_mcp_servers_from_env_dir
 
 DEFAULT_IMAGE_REGISTRY = "ghcr.io/collinear-ai"
 
@@ -68,6 +73,8 @@ class ComposeOutput(BaseModel):
     has_build_contexts: bool = False
     bundled_assets: list[BundledAsset] = Field(default_factory=list)
     scenario_guidance_md: str | None = None
+    mcp_gateway_config_json: str | None = None
+    mcp_gateway_port: int | None = None
 
 
 class ComposeEngine:
@@ -80,7 +87,16 @@ class ComposeEngine:
         """Store the tool registry for lookups."""
         self._registry = registry
 
-    def compose(self, config: EnvConfig, config_dir: Path | None = None) -> ComposeOutput:
+    MCP_GATEWAY_SERVICE_NAME: ClassVar[str] = "mcp-gateway"
+    MCP_GATEWAY_PORT: ClassVar[int] = 8080
+    MCP_GATEWAY_CONFIG_FILENAME: ClassVar[str] = "mcp-gateway-config.json"
+
+    def compose(
+        self,
+        config: EnvConfig,
+        config_dir: Path | None = None,
+        env_dir: Path | None = None,
+    ) -> ComposeOutput:
         """Build compose output for the given config."""
         resolved_config_dir = config_dir or Path.cwd()
         tools = self._registry.get_tools(config.tools)
@@ -132,6 +148,47 @@ class ComposeEngine:
                     config_dir=resolved_config_dir,
                 )
             )
+        mcp_gateway_config_json: str | None = None
+        mcp_gateway_port: int | None = None
+        if env_dir is not None:
+            mcp_config = load_mcp_servers_from_env_dir(env_dir)
+            if mcp_config is not None:
+                command_servers = get_mcp_command_servers(mcp_config)
+                if command_servers:
+                    resolved_env_dir = env_dir.resolve()
+                    gateway_config = build_gateway_config_arena_format(command_servers)
+                    mcp_gateway_config_json = json.dumps(gateway_config, indent=2)
+                    mcp_gateway_port = self._resolve_port(
+                        self.MCP_GATEWAY_PORT,
+                        self.MCP_GATEWAY_SERVICE_NAME,
+                        claimed_ports,
+                    )
+                    # Collect env var names from command servers for gateway container
+                    gateway_env: dict[str, str] = {
+                        "CONFIG_PATH": f"/config/{self.MCP_GATEWAY_CONFIG_FILENAME}",
+                        "MCP_GATEWAY_CONFIG": mcp_gateway_config_json,
+                        "MCP_GATEWAY_PORT": str(self.MCP_GATEWAY_PORT),
+                    }
+                    gateway_overrides, gateway_defaults = build_gateway_container_env(
+                        command_servers
+                    )
+                    gateway_env.update(gateway_overrides)
+                    env_vars.update(gateway_defaults)
+                    gateway_config_source = (
+                        resolved_env_dir / self.MCP_GATEWAY_CONFIG_FILENAME
+                    ).as_posix()
+                    services[self.MCP_GATEWAY_SERVICE_NAME] = {
+                        "build": {"context": "./gateway", "dockerfile": "Dockerfile"},
+                        "ports": [f"{mcp_gateway_port}:{self.MCP_GATEWAY_PORT}"],
+                        "environment": gateway_env,
+                        "volumes": [
+                            f"{gateway_config_source}:/config/{self.MCP_GATEWAY_CONFIG_FILENAME}:ro"
+                        ],
+                        "networks": [self.NETWORK_NAME],
+                    }
+                    tool_endpoints[self.MCP_GATEWAY_SERVICE_NAME] = (
+                        f"http://localhost:{mcp_gateway_port}/mcp"
+                    )
 
         compose = {
             "services": services,
@@ -155,6 +212,8 @@ class ComposeEngine:
             has_build_contexts=has_builds,
             bundled_assets=bundled_assets,
             scenario_guidance_md=scenario_guidance_md,
+            mcp_gateway_config_json=mcp_gateway_config_json,
+            mcp_gateway_port=mcp_gateway_port,
         )
 
     @staticmethod
@@ -366,11 +425,8 @@ class ComposeEngine:
     @staticmethod
     def _compose_source_for(source_path: Path, config_dir: Path) -> str:
         """Return the host-side compose volume source for a resolved local path."""
-        try:
-            relative = source_path.relative_to(config_dir)
-        except ValueError:
-            return source_path.as_posix()
-        return f"./{relative.as_posix()}"
+        _ = config_dir
+        return source_path.as_posix()
 
     @classmethod
     def get_external_coding_asset_paths(cls, config: EnvConfig, config_dir: Path) -> list[Path]:
@@ -453,11 +509,43 @@ class ComposeEngine:
         return "\n".join(lines)
 
 
+def _get_gateway_source_dir() -> Path:
+    """Return the path to the gateway directory in the simlab package."""
+    return Path(__file__).resolve().parent.parent / "gateway"
+
+
+def get_mcp_gateway_host_port(env_dir: Path) -> int:
+    """Return the mapped host port for the MCP gateway from docker-compose.yml."""
+    compose_file = env_dir / "docker-compose.yml"
+    if not compose_file.is_file():
+        return ComposeEngine.MCP_GATEWAY_PORT
+    compose = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    services = compose.get("services") if isinstance(compose, dict) else None
+    gateway = (
+        services.get(ComposeEngine.MCP_GATEWAY_SERVICE_NAME) if isinstance(services, dict) else None
+    )
+    ports = gateway.get("ports") if isinstance(gateway, dict) else None
+    if not isinstance(ports, list):
+        return ComposeEngine.MCP_GATEWAY_PORT
+    for entry in ports:
+        if isinstance(entry, str):
+            parts = [part.strip() for part in entry.split(":")]
+            if len(parts) >= 2 and parts[-1] == str(ComposeEngine.MCP_GATEWAY_PORT):
+                try:
+                    return int(parts[-2])
+                except ValueError:
+                    continue
+    return ComposeEngine.MCP_GATEWAY_PORT
+
+
 def write_output(output: ComposeOutput, output_dir: Path) -> None:
     """Write composition output files to a directory."""
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "docker-compose.yml").write_text(output.compose_yaml)
-    (output_dir / ".env").write_text(output.env_file)
+    env_path = output_dir / ".env"
+    if env_path.exists():
+        env_path.replace(output_dir / ".env.bak")
+    env_path.write_text(output.env_file)
     for asset in output.bundled_assets:
         src = Path(asset.source)
         dest = output_dir / asset.destination
@@ -466,3 +554,14 @@ def write_output(output: ComposeOutput, output_dir: Path) -> None:
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
+    if output.mcp_gateway_config_json is not None:
+        (output_dir / ComposeEngine.MCP_GATEWAY_CONFIG_FILENAME).write_text(
+            output.mcp_gateway_config_json, encoding="utf-8"
+        )
+        gateway_dest = output_dir / "gateway"
+        gateway_dest.mkdir(parents=True, exist_ok=True)
+        gateway_src = _get_gateway_source_dir()
+        for name in ("Dockerfile", "requirements.txt", "run_gateway.py"):
+            src_file = gateway_src / name
+            if src_file.is_file():
+                (gateway_dest / name).write_text(src_file.read_text(encoding="utf-8"))

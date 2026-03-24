@@ -4,11 +4,15 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+import pytest
+import simlab.agents.mcp_client as mcp_client_module
 from simlab.agents import BaseAgent
 from simlab.agents import BaseEnvironment
 from simlab.agents import ToolCallResult
 from simlab.agents import load_agent_class
+from simlab.agents import reference_agent
 from simlab.agents import run_with_agent_contract
 
 
@@ -186,3 +190,88 @@ def test_reference_agent_runs_tool_loop(monkeypatch) -> None:  # noqa: ANN001
     assert tool_payload["tool_call_id"] == "call_1"
     assert tool_payload["tool_name"] == "email-env__send_email"
     assert tool_payload["is_error"] is False
+
+
+def test_reference_agent_raises_when_mcp_server_fails_tool_listing() -> None:
+    class HealthyMCPHandle:
+        def list_tools(self) -> list[dict]:
+            return [
+                {
+                    "tool_server": "healthy-mcp",
+                    "name": "lookup_weather",
+                    "description": "Weather lookup",
+                    "input_schema": {"type": "object"},
+                }
+            ]
+
+    class FailingMCPHandle:
+        def list_tools(self) -> list[dict]:
+            raise RuntimeError("unauthorized")
+
+    mcp_clients: Any = {
+        "healthy-mcp": HealthyMCPHandle(),
+        "broken-mcp": FailingMCPHandle(),
+    }
+
+    with pytest.raises(RuntimeError, match="broken-mcp: unauthorized"):
+        reference_agent._build_openai_tools(
+            FakeEnvironment(),
+            mcp_clients,
+        )
+
+
+def test_reference_agent_raises_on_duplicate_wire_name() -> None:
+    class CollidingMCPHandle:
+        def list_tools(self) -> list[dict]:
+            return [
+                {
+                    "tool_server": "email-env",
+                    "name": "send_email",
+                    "description": "Duplicate send email",
+                    "input_schema": {"type": "object"},
+                }
+            ]
+
+    with pytest.raises(RuntimeError, match="Duplicate tool wire name detected"):
+        reference_agent._build_openai_tools(
+            FakeEnvironment(),
+            {"email-env": CollidingMCPHandle()},  # type: ignore[dict-item]
+        )
+
+
+def test_mcp_client_handle_filters_and_prefixes_namespaced_gateway_tools(monkeypatch) -> None:  # noqa: ANN001
+    async def fake_list_tools(_url: str, **kwargs: Any) -> list[dict]:
+        _ = kwargs
+        return [
+            {"name": "weather_search", "description": "Weather search", "input_schema": {}},
+            {"name": "notion_search", "description": "Notion search", "input_schema": {}},
+        ]
+
+    async def fake_call_tool(_url: str, tool_name: str, parameters: dict, **kwargs: Any):
+        _ = _url, kwargs
+        return ToolCallResult(observation={"tool_name": tool_name, "parameters": parameters})
+
+    monkeypatch.setattr(mcp_client_module, "_async_list_tools", fake_list_tools)
+    monkeypatch.setattr(mcp_client_module, "_async_call_tool", fake_call_tool)
+
+    handle = mcp_client_module.MCPClientHandle(
+        "http://localhost:8081/mcp",
+        "weather",
+        tool_prefix="weather_",
+    )
+
+    tools = handle.list_tools()
+    assert tools == [
+        {
+            "name": "search",
+            "description": "Weather search",
+            "input_schema": {},
+            "tool_server": "weather",
+        }
+    ]
+
+    result = handle.call_tool("search", {"query": "sf"})
+    assert result.observation == {
+        "tool_name": "weather_search",
+        "parameters": {"query": "sf"},
+    }

@@ -412,8 +412,16 @@ class ParallelDaytonaOrchestrator:
                     log_prefix=tag,
                 )
 
-            # 3. Provision calendar accounts (unconditional) + seed task data
+            # 3. Provision group channels + calendar accounts + seed task data
             self._check_cancelled(tag)
+            self._provision_group_channels(
+                tag,
+                sandbox,
+                task_data,
+                profiles,
+                config,
+                config_path,
+            )
             self._provision_calendar_accounts(
                 tag,
                 sandbox,
@@ -601,6 +609,89 @@ class ParallelDaytonaOrchestrator:
         # Register accounts with the calendar tool server
         _ensure_task_calendar_accounts(task_data, profiles, endpoints, config)
 
+    def _provision_group_channels(
+        self,
+        tag: str,
+        sandbox: Any,  # noqa: ANN401
+        task_data: dict[str, Any],
+        profiles: dict[str, dict[str, Any]],
+        config: Any,  # noqa: ANN401
+        config_path: str,
+    ) -> None:
+        """Provision RocketChat NPC users and group channels in ephemeral sandbox."""
+        group_channels = task_data.get("seed_group_channels") or []
+        if not group_channels:
+            return
+
+        if "rocketchat" not in config.tools:
+            return
+
+        # Collect all NPC profile IDs from npcs + group channel members
+        npc_ids: list[str] = []
+        for npc in task_data.get("npcs", []):
+            if isinstance(npc, dict):
+                npc_id = str(npc.get("id") or "").strip()
+                if npc_id:
+                    npc_ids.append(npc_id)
+        for ch in group_channels:
+            if isinstance(ch, dict):
+                for mid in ch.get("member_profile_ids", []):
+                    mid_str = str(mid).strip()
+                    if mid_str:
+                        npc_ids.append(mid_str)
+        npc_ids = list(dict.fromkeys(npc_ids))
+        if not npc_ids:
+            return
+
+        # Build NPC credentials matching server-side format
+        npc_configs: dict[str, dict[str, Any]] = {}
+        for pid in npc_ids:
+            profile = profiles.get(pid, {})
+            first = str(profile.get("first_name") or "").strip()
+            last = str(profile.get("last_name") or "").strip()
+            display_name = (
+                f"{first} {last}".strip() if (first or last) else pid.replace("_", " ").title()
+            )
+            email = str(profile.get("email") or f"{pid}@example.com").strip()
+            npc_configs[pid] = {
+                "username": pid,
+                "password": "npc123",
+                "name": display_name,
+                "email": email,
+            }
+
+        channel_names = [
+            ch.get("channel_name", "?") for ch in group_channels if isinstance(ch, dict)
+        ]
+        click.echo(
+            f"{tag} Provisioning group channels: {', '.join(channel_names)} "
+            f"({len(npc_ids)} NPC user(s))"
+        )
+
+        get_profiled_service_names, _ = get_env_runtime_helpers()
+        config_file = Path(config_path)
+
+        seed_svc_names = get_profiled_service_names(
+            config,
+            profile="seed",
+            config_path=config_file,
+            tool_names=["rocketchat"],
+        )
+        if not seed_svc_names:
+            return
+
+        env_overrides = {
+            "ROCKETCHAT_NPC_CONFIGS": json.dumps(npc_configs),
+            "ROCKETCHAT_SEED_GROUP_CHANNELS": json.dumps(group_channels),
+        }
+        _run_profiled_services_in_sandbox(
+            sandbox,
+            seed_svc_names,
+            profile="seed",
+            env_overrides=env_overrides,
+            log_prefix=tag,
+        )
+
     def _seed_rollout(
         self,
         tag: str,
@@ -608,7 +699,11 @@ class ParallelDaytonaOrchestrator:
         profiles: dict[str, dict[str, Any]],
         endpoints: dict[str, str],
     ) -> None:
-        """Seed emails and calendar events for a single rollout."""
+        """Seed emails and calendar events for a single rollout.
+
+        Group channels are provisioned separately by ``_provision_group_channels``
+        before this method runs.
+        """
         emails = task_data.get("seed_emails", [])
         cal_events = task_data.get("seed_calendar_events", [])
         if not emails and not cal_events:

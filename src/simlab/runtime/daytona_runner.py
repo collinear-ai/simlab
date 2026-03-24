@@ -52,6 +52,7 @@ DaytonaNotFoundError = _daytona_not_found_error
 _STATE_FILE = "daytona-state.json"
 _SNAPSHOT_NAME = "docker-dind"
 _COMPOSE_DIR = "/home/daytona"
+_MCP_GATEWAY_CONFIG_FILE = "mcp-gateway-config.json"
 
 _logger = logging.getLogger(__name__)
 
@@ -97,9 +98,31 @@ def _prepare_compose_for_remote(
     services = compose_data.get("services", {}) if isinstance(compose_data, dict) else {}
 
     build_contexts: dict[str, tuple[Path, str]] = {}
+    compose_root = compose_dir.resolve()
     for service_name, service in services.items():
         if not isinstance(service, dict):
             continue
+
+        volumes = service.get("volumes")
+        if isinstance(volumes, list):
+            rewritten_volumes: list[Any] = []
+            for volume in volumes:
+                if not isinstance(volume, str):
+                    rewritten_volumes.append(volume)
+                    continue
+                source, sep, remainder = volume.partition(":")
+                if not sep or not source.startswith("/"):
+                    rewritten_volumes.append(volume)
+                    continue
+                try:
+                    relative_source = Path(source).resolve().relative_to(compose_root)
+                except ValueError:
+                    rewritten_volumes.append(volume)
+                    continue
+                remote_source = f"{_COMPOSE_DIR}/{relative_source.as_posix()}"
+                rewritten_volumes.append(f"{remote_source}:{remainder}")
+            service["volumes"] = rewritten_volumes
+
         build = service.pop("build", None)
         if build is None:
             continue
@@ -111,6 +134,7 @@ def _prepare_compose_for_remote(
         if not context_path.is_absolute():
             context_path = (compose_dir / context_path).resolve()
         image_tag = str(service.get("image", f"{service_name}:latest"))
+        service["image"] = image_tag
         if context_path.is_dir():
             build_contexts[service_name] = (context_path, image_tag)
         else:
@@ -495,8 +519,8 @@ class DaytonaRunner:
             env_file = compose_dir / ".env"
             if env_file.exists():
                 sandbox.fs.upload_file(env_file.read_bytes(), f"{_COMPOSE_DIR}/.env")
-
                 rpt.detail("Uploaded .env")
+            self._upload_support_files(sandbox, compose_dir)
             rpt.end_step(success=True)
 
             # Build local-context images in the sandbox.
@@ -520,7 +544,6 @@ class DaytonaRunner:
                         )
                         raise SystemExit(1)
                 rpt.end_step(success=True)
-
             # Pull images
             rpt.start_step("Images pulled")
             resp = sandbox.process.exec(
@@ -745,44 +768,10 @@ class DaytonaRunner:
     def _prepare_compose_for_remote(
         self,
         compose_dir: Path,
-    ) -> tuple[bytes, dict[str, tuple[Path, str]]]:
-        """Strip local build contexts and collect contexts to build remotely."""
-        compose_path = compose_dir / "docker-compose.yml"
-        compose_data = yaml.safe_load(compose_path.read_text())
-        services = compose_data.get("services", {}) if isinstance(compose_data, dict) else {}
-
-        build_contexts: dict[str, tuple[Path, str]] = {}
-        for service_name, service in services.items():
-            if not isinstance(service, dict):
-                continue
-            build = service.pop("build", None)
-            if build is None:
-                continue
-            build_context = build.get("context") if isinstance(build, dict) else build
-            if not isinstance(build_context, str):
-                continue
-
-            context_path = Path(build_context)
-            if not context_path.is_absolute():
-                context_path = (compose_dir / context_path).resolve()
-            image_tag = str(service.get("image", f"{service_name}:latest"))
-            if context_path.is_dir():
-                build_contexts[service_name] = (context_path, image_tag)
-            else:
-                click.echo(
-                    click.style(
-                        f"Warning: build context not found for {service_name}: {context_path}",
-                        fg="yellow",
-                    ),
-                    err=True,
-                )
-
-        compose_bytes = yaml.dump(
-            compose_data,
-            default_flow_style=False,
-            sort_keys=False,
-        ).encode()
-        return compose_bytes, build_contexts
+    ) -> bytes:
+        """Return compose content for remote execution."""
+        compose_bytes, _ = _prepare_compose_for_remote(compose_dir)
+        return compose_bytes
 
     def _upload_directory(self, sandbox: Any, local_dir: Path, remote_dir: str) -> None:  # noqa: ANN401
         """Upload a local directory recursively into the sandbox."""
@@ -794,6 +783,29 @@ class DaytonaRunner:
             remote_parent = remote_path.rsplit("/", 1)[0]
             sandbox.process.exec(f"mkdir -p {remote_parent}", cwd=_COMPOSE_DIR)
             sandbox.fs.upload_file(file_path.read_bytes(), remote_path)
+
+    def _upload_compose_bundle(self, sandbox: Any, compose_dir: Path) -> None:  # noqa: ANN401
+        """Upload bundle-local assets referenced by docker-compose relative paths."""
+        ignored = {"docker-compose.yml", ".env", _STATE_FILE}
+        for entry in compose_dir.iterdir():
+            if entry.name in ignored:
+                continue
+            remote_path = f"{_COMPOSE_DIR}/{entry.name}"
+            if entry.is_dir():
+                sandbox.process.exec(f"mkdir -p {remote_path}", cwd=_COMPOSE_DIR)
+                self._upload_directory(sandbox, entry, remote_path)
+                continue
+            sandbox.fs.upload_file(entry.read_bytes(), remote_path)
+
+    def _upload_support_files(self, sandbox: Any, compose_dir: Path) -> None:  # noqa: ANN401
+        """Upload extra compose-sidecar files required by mounted services."""
+        gateway_config = compose_dir / _MCP_GATEWAY_CONFIG_FILE
+        if gateway_config.exists():
+            click.echo(f"Uploading {_MCP_GATEWAY_CONFIG_FILE}...")
+            sandbox.fs.upload_file(
+                gateway_config.read_bytes(),
+                f"{_COMPOSE_DIR}/{_MCP_GATEWAY_CONFIG_FILE}",
+            )
 
     def _run_profiled_services_in_sandbox(
         self,

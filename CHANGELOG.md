@@ -2,6 +2,20 @@
 
 All notable changes to the SimLab will be documented in this file.
 
+## [Unreleased]
+
+### Environment Management
+
+- MCP gateway for stdio servers — Command-based MCP servers are wired through
+  a generated gateway container, while URL-based MCP servers are used directly
+- MCP env var mapping — API keys and other command-server secrets can be set in
+  the generated env via raw names or `SIMLAB_MCP_<SERVER>__<KEY>` overrides
+
+### Task Execution
+
+- Direct MCP tool access — The reference agent can discover and call tools
+  from configured MCP servers alongside built-in SimLab tool servers
+
 ## [0.1.0] — 2026-03-16
 
 Initial public release of SimLab — a self-serve simulation lab for building

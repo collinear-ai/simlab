@@ -113,6 +113,8 @@ Each environment directory contains:
 - `env.yaml` — template, tools, overrides
 - `docker-compose.yml` — generated compose file
 - `.env` — generated env file
+- `mcp-servers.json` — (optional) custom MCP server config when using `--mcp-servers` at init
+- `mcp-gateway-config.json` — (optional) generated for the MCP gateway when you have command-based MCP servers
 - `daytona-state.json` — (when using `--daytona`) Daytona sandbox state
 - `verifiers/` — (optional) env-scoped verifier cache when running tasks with `--env`
 
@@ -177,6 +179,139 @@ simlab env init my-env --force
 simlab env init my-env
 simlab env up my-env
 ```
+
+### C) Custom MCP servers
+
+You can add **custom MCP servers** at init so the reference agent can call MCP tools directly.
+
+SimLab supports two MCP transport patterns:
+
+- **URL-based**: SimLab connects straight to an HTTP MCP endpoint. No extra container is added.
+- **Command-based**: SimLab adds an `mcp-gateway` container. The gateway starts your stdio MCP servers and exposes them over HTTP inside the environment.
+
+The config file must be a JSON object with a top-level `mcpServers` object:
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "url": "https://example.com/mcp"
+    },
+    "weather": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/adhikasp/mcp-weather.git", "mcp-weather"],
+      "env": {
+        "ACCUWEATHER_API_KEY": "replace-me"
+      }
+    }
+  }
+}
+```
+
+Rules:
+
+- Each server must define exactly one of `url` or `command`.
+- Server names may contain only letters, numbers, `_`, and `-`.
+- Server names must not collide with built-in SimLab tool server names such as `email` or `calendar`.
+- `args` is optional for command-based servers.
+- `env` is optional for command-based servers and is the right place to declare required variables such as API keys.
+
+Examples:
+
+- [examples/mcp-servers-url-only.json](examples/mcp-servers-url-only.json)
+- [examples/mcp-servers-command-only.json](examples/mcp-servers-command-only.json)
+- [examples/mcp-servers-mixed.json](examples/mcp-servers-mixed.json)
+- [examples/mcp-servers-local-demo.json](examples/mcp-servers-local-demo.json)
+
+```bash
+# URL-only
+simlab env init my-mcp-env --mcp-servers examples/mcp-servers-url-only.json --non-interactive
+
+# Command-based — adds MCP gateway; edit .env for API keys
+simlab env init my-mcp-env --mcp-servers examples/mcp-servers-command-only.json --non-interactive
+
+# Mix catalog tools + MCP (template + MCP)
+simlab env init my-mcp-env --template hr_recruiting --mcp-servers examples/mcp-servers-mixed.json --non-interactive
+```
+
+After `env init`, SimLab persists your MCP config as `environments/<env-name>/mcp-servers.json`.
+If the config includes any command-based servers, SimLab also generates:
+
+- `environments/<env-name>/mcp-gateway-config.json`
+- an `mcp-gateway` service in `docker-compose.yml`
+
+#### MCP env vars and API keys
+
+For command-based servers, put secrets in `environments/<env-name>/.env` before `simlab env up`.
+
+If an env var name is used by only one MCP server, you can set it directly:
+
+```bash
+# environments/my-mcp-env/.env
+ACCUWEATHER_API_KEY=your-real-key
+```
+
+If multiple MCP servers use the same env var name, use the scoped form instead:
+
+```bash
+# environments/my-mcp-env/.env
+SIMLAB_MCP_WEATHER__API_KEY=weather-key
+SIMLAB_MCP_DOCS__API_KEY=docs-key
+```
+
+Resolution order for command-based MCP env vars:
+
+1. `SIMLAB_MCP_<SERVER>__<KEY>`
+2. Raw `<KEY>`, but only when exactly one configured command-based server declares that key
+3. The default value from `mcp-servers.json`
+
+Server names are normalized for scoped env vars by uppercasing and replacing non-alphanumeric characters with `_`. For example, `my-docs` becomes `SIMLAB_MCP_MY_DOCS__API_KEY`.
+
+This means a config like:
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/adhikasp/mcp-weather.git", "mcp-weather"],
+      "env": {
+        "ACCUWEATHER_API_KEY": "replace-me"
+      }
+    }
+  }
+}
+```
+
+is typically paired with:
+
+```bash
+# environments/my-mcp-env/.env
+ACCUWEATHER_API_KEY=your-real-key
+```
+
+You can also place the same variables under the `mcp-gateway` service in `docker-compose.yml`, but `.env` is the intended default.
+
+When you run tasks, the reference agent gets tools from both catalog tool servers and MCP servers. URL-based MCP servers are contacted directly; command-based MCP servers are reached through the gateway. The gateway container is built from source in the env dir by default; to build or push the gateway image yourself, see **src/simlab/gateway/README.md**.
+
+#### Local smoke test
+
+To verify the full MCP flow without external auth, use the demo server:
+
+```bash
+cd cli/simlab/examples/demo-mcp-server
+docker build -t simlab-demo-mcp .
+docker run --rm -p 8081:8081 simlab-demo-mcp
+```
+
+Then, from `cli/simlab` in another terminal:
+
+```bash
+simlab --environments-dir ./environments env init my-demo-env --mcp-servers examples/mcp-servers-local-demo.json --non-interactive
+simlab --environments-dir ./environments tasks run --env my-demo-env --tasks-dir examples --task list-tools --agent-model gpt-4o-mini
+```
+
+You still need a reference-agent API key such as `OPENAI_API_KEY` or `SIMLAB_AGENT_API_KEY`.
 
 Optional (remote sandbox):
 
@@ -441,5 +576,5 @@ simlab env down my-env
 - **Scenario Manager** auth uses `collinear_api_key` in `config.toml`, `SIMLAB_COLLINEAR_API_KEY`, or the root `--collinear-api-key` flag. The API endpoint uses `scenario_manager_api_url`, `SIMLAB_SCENARIO_MANAGER_API_URL`, or root `--scenario-manager-api-url`. Not used for the LLM.
 - The **reference agent** (LiteLLM) uses the `[agent]` config section, then `SIMLAB_AGENT_*` env vars, then `OPENAI_API_KEY` as an OpenAI-specific fallback. Override on the command line with `--agent-model`, `--agent-api-key`, etc. See [LiteLLM docs](https://docs.litellm.ai/) for provider-specific environment variables.
 - `simlab tasks run` executes the **built‑in reference agent** unless `--agent-import-path` is provided.
-- For MCP‑direct support and "installed agent" mode, see the Future Improvements section in `DESIGN.md`.
+- **Custom MCP servers** are supported at env init via `--mcp-servers <path-to-json>`. The runtime uses an MCP client directly (no /tools or /step bridge). See `examples/README.md` for config examples and walkthrough.
 - Most simlab-related env vars use the **SIMLAB_** prefix (e.g. `SIMLAB_COLLINEAR_API_KEY`, `SIMLAB_SCENARIO_MANAGER_API_URL`, `SIMLAB_ENVIRONMENTS_DIR`, `SIMLAB_VERIFIER_*`, `SIMLAB_AGENT_*`). For Daytona, `SIMLAB_DAYTONA_API_KEY` is used when set; otherwise `DAYTONA_API_KEY` is used.

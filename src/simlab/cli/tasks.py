@@ -20,17 +20,23 @@ from typing import cast
 import click
 import yaml
 
+from simlab.agents.mcp_client import MCPClientHandle
 from simlab.api.client import ScenarioManagerApiError
 from simlab.api.client import ScenarioManagerClient
 from simlab.api.client import resolve_scenario_manager_api_url
 from simlab.api.schemas import ScenarioTask
 from simlab.catalog.registry import ToolRegistry
+from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
+from simlab.composer.engine import get_mcp_gateway_host_port
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_agent_api_key
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_daytona_api_key
 from simlab.config import resolve_env_dir
+from simlab.mcp_config import get_mcp_command_servers
+from simlab.mcp_config import get_mcp_server_urls
+from simlab.mcp_config import load_mcp_servers_from_env_dir
 from simlab.seeder import get_tool_endpoints
 from simlab.seeder import query_tool_server
 from simlab.telemetry import TelemetryCaptureConfig
@@ -42,7 +48,9 @@ from simlab.telemetry import with_command_telemetry
 # Maps Docker service names (used in task JSONs) to tool-catalog names.
 _SERVICE_TO_TOOL = {
     "coding-env": "coding",
+    "crm-env": "crm",
     "email-env": "email",
+    "erp-env": "erp",
     "chronos-server": "calendar",
     "frappe-hrms-env": "frappe-hrms",
     "google-workspace-tool-server": "google-workspace",
@@ -50,6 +58,7 @@ _SERVICE_TO_TOOL = {
     "rocketchat-env": "rocketchat",
     "sec-edgar-env": "sec-edgar",
     "twelve-data-env": "twelve-data",
+    "web-search-env": "web-search",
 }
 _TOOL_TO_SERVICE = {tool: service for service, tool in _SERVICE_TO_TOOL.items()}
 
@@ -209,6 +218,69 @@ def _load_local_task(
     return task_dict, _load_profiles(bundle_dir), task_file
 
 
+def _build_mcp_clients(
+    mcp_config: dict[str, Any] | None,
+    endpoints: dict[str, str],
+) -> dict[str, MCPClientHandle]:
+    """Build MCP client handles for URL-based and command-based MCP servers."""
+    if mcp_config is None:
+        return {}
+
+    clients: dict[str, MCPClientHandle] = {}
+    for server_name, url in get_mcp_server_urls(mcp_config).items():
+        clients[server_name] = MCPClientHandle(url, server_name)
+
+    command_servers = get_mcp_command_servers(mcp_config)
+    if command_servers:
+        gateway_url = endpoints.get(ComposeEngine.MCP_GATEWAY_SERVICE_NAME) or (
+            f"http://localhost:{ComposeEngine.MCP_GATEWAY_PORT}/mcp"
+        )
+        for server_name in command_servers:
+            clients[server_name] = MCPClientHandle(
+                gateway_url,
+                server_name,
+                tool_prefix=f"{server_name}_",
+            )
+    return clients
+
+
+def _require_mcp_tools_available(
+    mcp_clients: dict[str, MCPClientHandle],
+) -> None:
+    """Fail fast when configured MCP servers cannot enumerate any tools."""
+    if not mcp_clients:
+        return
+
+    failures: list[str] = []
+    for server_name, client in mcp_clients.items():
+        try:
+            tools = client.list_tools()
+        except Exception as exc:
+            failures.append(f"{server_name}: tool discovery failed ({exc})")
+            continue
+        if not tools:
+            failures.append(f"{server_name}: exposed no tools")
+
+    if failures:
+        click.echo(
+            click.style(
+                "Configured MCP servers are not usable for task run:",
+                fg="red",
+            ),
+            err=True,
+        )
+        for failure in failures:
+            click.echo(f"  - {failure}", err=True)
+        click.echo(
+            click.style(
+                "Check the MCP server command/args or upstream authentication, then retry.",
+                fg="yellow",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+
+
 def tasks_source_label(tasks_dir: str | None) -> str:
     """Return the telemetry-safe source label for task commands."""
     return "local_bundle" if tasks_dir else "scenario_manager_api"
@@ -352,6 +424,7 @@ def _api_task_to_local(
         "tool_servers": list(tool_servers),
         "seed_emails": api_task.get("seed_emails") or [],
         "seed_calendar_events": api_task.get("seed_calendar_events") or [],
+        "seed_group_channels": api_task.get("seed_group_channels") or [],
         "npcs": [{"id": p.get("profile_id", "")} for p in (api_task.get("npc_profiles") or [])],
         "verifiers": [
             {"func": "python_module", "module": m} for m in (api_task.get("verifier_modules") or [])
@@ -667,6 +740,143 @@ def _provision_task_calendar_users(
         )
 
 
+def _provision_task_group_channels(
+    task: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+    config: EnvConfig,
+    config_path: str,
+    *,
+    using_daytona: bool,
+    daytona_api_key: str | None = None,
+) -> None:
+    """Re-run rocketchat-seed with task-specific NPC users and group channels.
+
+    Generated tasks may reference NPC users and group channels that don't exist
+    in Rocket.Chat yet.  This function re-runs the rocketchat-seed container
+    with ``ROCKETCHAT_NPC_CONFIGS`` (so the users get created) and
+    ``ROCKETCHAT_SEED_GROUP_CHANNELS`` (so the channels get created, members
+    get invited, and seed messages get posted).
+    """
+    group_channels = task.get("seed_group_channels") or []
+    if not group_channels:
+        return
+
+    if "rocketchat" not in config.tools:
+        return
+
+    # Collect all NPC profile IDs referenced by the task (from npcs + group channel members).
+    npc_ids: list[str] = []
+    for npc in task.get("npcs", []):
+        if isinstance(npc, dict):
+            npc_id = str(npc.get("id") or "").strip()
+            if npc_id:
+                npc_ids.append(npc_id)
+    for ch in group_channels:
+        if isinstance(ch, dict):
+            for mid in ch.get("member_profile_ids", []):
+                mid_str = str(mid).strip()
+                if mid_str:
+                    npc_ids.append(mid_str)
+    npc_ids = list(dict.fromkeys(npc_ids))  # unique, order-preserving
+
+    if not npc_ids:
+        return
+
+    # Build NPC credentials in the format rocketchat-seed expects.
+    # Use rocketchat_username from profile (dots) when available, falling
+    # back to profile_id (underscores).  This matches the server-side
+    # _build_npc_configs in workspace_controller.py.
+    #
+    # No client-side dedup of usernames/emails here: npc_ids are already
+    # deduplicated by profile_id (line 780), and the source profile data
+    # guarantees unique rocketchat_usernames and emails.  Silent renaming
+    # would mask bad data — if a collision somehow occurs, the seed script
+    # (seed_rocketchat.py create_user) will surface the HTTP 400 so the
+    # profile data can be fixed at the source.
+    npc_configs: dict[str, dict[str, Any]] = {}
+    for pid in npc_ids:
+        profile = profiles.get(pid, {})
+        rc_username = str(profile.get("rocketchat_username") or "").strip() or pid
+        first = str(profile.get("first_name") or "").strip()
+        last = str(profile.get("last_name") or "").strip()
+        display_name = (
+            f"{first} {last}".strip() if (first or last) else pid.replace("_", " ").title()
+        )
+        email = str(profile.get("email") or f"{rc_username}@example.com").strip()
+        npc_configs[pid] = {
+            "username": rc_username,
+            "password": "npc123",  # deterministic — matches CLI agent password pattern
+            "name": display_name,
+            "email": email,
+        }
+
+    env_overrides: dict[str, str] = {
+        "ROCKETCHAT_NPC_CONFIGS": json.dumps(npc_configs),
+        "ROCKETCHAT_SEED_GROUP_CHANNELS": json.dumps(group_channels),
+    }
+
+    config_file = Path(config_path)
+    compose_dir = _compose_dir_from_config(config_file)
+    get_profiled_service_names, run_profiled_services_local = get_env_runtime_helpers()
+
+    seed_svc_names = get_profiled_service_names(
+        config,
+        profile="seed",
+        config_path=config_file,
+        tool_names=["rocketchat"],
+    )
+    if not seed_svc_names:
+        return
+
+    channel_names = [ch.get("channel_name", "?") for ch in group_channels if isinstance(ch, dict)]
+    click.echo(
+        f"  Provisioning group channels: {', '.join(channel_names)} ({len(npc_ids)} NPC user(s))"
+    )
+
+    if using_daytona:
+        DaytonaRunner = get_daytona_runner_class()
+        runner = DaytonaRunner(daytona_api_key=daytona_api_key)
+        runner.run_profiled_services(
+            compose_dir,
+            seed_svc_names,
+            profile="seed",
+            env_overrides=env_overrides,
+        )
+        return
+
+    run_profiled_services_local(
+        compose_dir,
+        seed_svc_names,
+        profile="seed",
+        env_overrides=env_overrides,
+    )
+
+
+def run_env_seed_services(
+    config: EnvConfig,
+    config_path: str,
+    *,
+    using_daytona: bool,
+    daytona_api_key: str | None = None,
+) -> None:
+    """Run environment seed services so mutable tools start each run from seed state."""
+    config_file = Path(config_path)
+    compose_dir = _compose_dir_from_config(config_file)
+    get_profiled_service_names, run_profiled_services_local = get_env_runtime_helpers()
+    seed_svc_names = get_profiled_service_names(config, profile="seed", config_path=config_file)
+    if not seed_svc_names:
+        return
+
+    click.echo("  Resetting environment state from seed services")
+    if using_daytona:
+        DaytonaRunner = get_daytona_runner_class()
+        runner = DaytonaRunner(daytona_api_key=daytona_api_key)
+        runner.run_profiled_services(compose_dir, seed_svc_names, profile="seed")
+        return
+
+    run_profiled_services_local(compose_dir, seed_svc_names, profile="seed")
+
+
 def _ensure_task_calendar_accounts(
     task: dict[str, Any],
     profiles: dict[str, dict[str, Any]],
@@ -775,8 +985,12 @@ def _seed_task_data(
             for em in emails:
                 from_id = em.get("from_profile_id", "")
                 profile = profiles.get(from_id, {})
-                from_addr = profile.get("email", f"{from_id}@unknown.com")
-                if not profile:
+                if profile:
+                    from_addr = profile.get("email", f"{from_id}@unknown.com")
+                elif "@" in from_id:
+                    from_addr = from_id
+                else:
+                    from_addr = f"{from_id}@unknown.com"
                     click.echo(
                         click.style(
                             f"  ! from_profile_id '{from_id}' not in profiles, "
@@ -1104,6 +1318,12 @@ def _get_daytona_endpoints(
 
     data = yaml.safe_load(config_file.read_text())
     config = EnvConfig(**data)
+    local_endpoints = get_tool_endpoints(config, config_path=config_file)
+    env_dir = config_file.parent
+    mcp_config = load_mcp_servers_from_env_dir(env_dir)
+    if not _requires_daytona_sandbox(config, mcp_config):
+        return local_endpoints
+
     state_file = Path(config_path).parent / "daytona-state.json"
     if not state_file.exists():
         click.echo(
@@ -1136,7 +1356,26 @@ def _get_daytona_endpoints(
             urls[tool_name] = preview.url
         elif tool.tool_server_url:
             urls[tool_name] = tool.tool_server_url
+
+    # When env has command-based MCP servers, gateway runs in the sandbox; add its URL.
+    if mcp_config and get_mcp_command_servers(mcp_config):
+        preview = sandbox.get_preview_link(get_mcp_gateway_host_port(env_dir))
+        urls[ComposeEngine.MCP_GATEWAY_SERVICE_NAME] = preview.url.rstrip("/") + "/mcp"
     return urls
+
+
+def _requires_daytona_sandbox(
+    config: EnvConfig,
+    mcp_config: dict[str, Any] | None,
+) -> bool:
+    """Return True when the env needs a Daytona sandbox for tool execution."""
+    registry = ToolRegistry()
+    registry.load_all()
+    for tool_name in config.tools:
+        tool = registry.get_tool(tool_name)
+        if tool is not None and tool.tool_server_port is not None:
+            return True
+    return bool(mcp_config and get_mcp_command_servers(mcp_config))
 
 
 def _endpoint_has_tools(base_url: str) -> bool:
@@ -1148,6 +1387,22 @@ def _endpoint_has_tools(base_url: str) -> bool:
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return False
     return isinstance(payload, dict) and isinstance(payload.get("tools"), list)
+
+
+def _endpoint_is_reachable(url: str) -> bool:
+    """Return True when an HTTP endpoint responds at all."""
+    req = urllib.request.Request(url)  # noqa: S310
+    try:
+        with urllib.request.urlopen(req, timeout=5):  # noqa: S310
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, TimeoutError):
+        return False
+
+
+def _any_endpoint_reachable(endpoints: dict[str, str]) -> bool:
+    return any(_endpoint_has_tools(url) for url in endpoints.values())
 
 
 def _reachable_endpoints(endpoints: dict[str, str]) -> dict[str, bool]:
@@ -1178,7 +1433,9 @@ def _require_reachable_endpoints(
     When *wait* is ``True``, poll until all endpoints respond or *timeout*
     seconds elapse (useful after ``docker compose up -d`` in a fresh sandbox).
     After polling (or immediately when ``wait=False``), raise ``SystemExit(1)``
-    if **zero** endpoints are reachable.
+    if **zero** endpoints are reachable. Skips the MCP gateway's /tools check,
+    but still requires the gateway itself to respond when it is the only
+    configured endpoint.
     """
     if not endpoints:
         click.echo(click.style(f"No endpoints resolved for {action}.", fg="red"), err=True)
@@ -1190,9 +1447,12 @@ def _require_reachable_endpoints(
         deadline = time.monotonic() + timeout
         while True:
             reachability = _reachable_endpoints(endpoints)
-            if all(reachability.values()):
+            check = {
+                k: v for k, v in reachability.items() if k != ComposeEngine.MCP_GATEWAY_SERVICE_NAME
+            }
+            if not check or all(check.values()):
                 return
-            remaining = [n for n, ok in reachability.items() if not ok]
+            remaining = [n for n, ok in check.items() if not ok]
             if time.monotonic() >= deadline:
                 click.echo(
                     click.style(
@@ -1207,7 +1467,12 @@ def _require_reachable_endpoints(
     else:
         reachability = _reachable_endpoints(endpoints)
 
-    if any(reachability.values()):
+    # MCP gateway does not expose /tools; exclude it from reachability requirement
+    check = {k: v for k, v in reachability.items() if k != ComposeEngine.MCP_GATEWAY_SERVICE_NAME}
+    if any(check.values()):
+        return
+    gateway_url = endpoints.get(ComposeEngine.MCP_GATEWAY_SERVICE_NAME)
+    if not check and gateway_url and _endpoint_is_reachable(gateway_url):
         return
 
     mode = "daytona" if using_daytona else "local"
@@ -1264,7 +1529,7 @@ def _resolve_endpoints(
     if daytona_requested:
         return _get_daytona_endpoints(config_path, daytona_api_key=daytona_api_key), True
 
-    return get_tool_endpoints(config), False
+    return get_tool_endpoints(config, config_path=Path(config_path)), False
 
 
 # ---------------------------------------------------------------------------
@@ -1771,7 +2036,8 @@ def seed(
         task_dict, profiles = _api_task_to_local(api_task.model_dump())
     emails = task_dict.get("seed_emails", [])
     cal_events = task_dict.get("seed_calendar_events", [])
-    if not emails and not cal_events:
+    group_channels = task_dict.get("seed_group_channels", [])
+    if not emails and not cal_events and not group_channels:
         click.echo("No seed data for this task.")
         emit_cli_event(
             "tasks_seed_completed",
@@ -1810,6 +2076,14 @@ def seed(
     )
     if using_daytona:
         click.echo(click.style("Using Daytona tool endpoints.", fg="cyan"))
+    _provision_task_group_channels(
+        task_dict,
+        profiles,
+        config,
+        config_path,
+        using_daytona=using_daytona,
+        daytona_api_key=global_cfg.daytona_api_key,
+    )
     _provision_task_calendar_users(
         task_dict,
         config,
@@ -2157,11 +2431,30 @@ def run(
         daytona_requested=daytona,
         daytona_api_key=global_cfg.daytona_api_key,
     )
-    _require_reachable_endpoints(
-        endpoints=endpoints,
-        action="task run",
+    # --- Load MCP servers (if any) and build MCP client handles ---
+    mcp_config = load_mcp_servers_from_env_dir(env_dir)
+    mcp_clients = _build_mcp_clients(mcp_config, endpoints)
+    if endpoints:
+        _require_reachable_endpoints(
+            endpoints=endpoints,
+            action="task run",
+            using_daytona=using_daytona,
+            config_path=config_path,
+        )
+    _require_mcp_tools_available(mcp_clients)
+    run_env_seed_services(
+        config,
+        config_path,
         using_daytona=using_daytona,
-        config_path=config_path,
+        daytona_api_key=global_cfg.daytona_api_key,
+    )
+    _provision_task_group_channels(
+        task_data,
+        profiles,
+        config,
+        config_path,
+        using_daytona=using_daytona,
+        daytona_api_key=global_cfg.daytona_api_key,
     )
     _provision_task_calendar_users(
         task_data,
@@ -2176,7 +2469,8 @@ def run(
     if not no_seed:
         emails = task_data.get("seed_emails", [])
         cal_events = task_data.get("seed_calendar_events", [])
-        if emails or cal_events:
+        group_channels = task_data.get("seed_group_channels", [])
+        if emails or cal_events or group_channels:
             click.echo(click.style(f"\nSeeding task: {display}\n", bold=True))
             ok, fail = _seed_task_data(task_data, profiles, endpoints)
             if fail:
@@ -2189,8 +2483,14 @@ def run(
     # --- Build environment + run ---
     rewritten = _rewrite_tool_server_urls(task_data, endpoints)
     tool_servers = _effective_tool_servers(rewritten, endpoints)
-    if not tool_servers:
-        click.echo(click.style("Task has no valid tool_servers after URL resolution.", fg="red"))
+    if not tool_servers and not mcp_clients:
+        click.echo(
+            click.style(
+                "Task has no valid tool_servers and no MCP servers. "
+                "Add tools to the env or use --mcp-servers at env init.",
+                fg="red",
+            )
+        )
         raise SystemExit(1)
     if not agent_import_path and not api_key:
         click.echo(
@@ -2241,6 +2541,7 @@ def run(
         timeout_seconds=agent_timeout_seconds,
         api_key=api_key,
         base_url=base_url,
+        mcp_clients=mcp_clients or None,
     )
     artifacts.metadata.setdefault("cli_runtime", {})
     artifacts.metadata["cli_runtime"].update(
@@ -2480,7 +2781,7 @@ def validate(tasks_dir: str) -> None:
         profile_emails = {p.get("email", "").lower() for p in profiles.values() if p.get("email")}
         for em in data.get("seed_emails", []):
             from_id = em.get("from_profile_id", "")
-            if from_id and profile_ids and from_id not in profile_ids:
+            if from_id and profile_ids and from_id not in profile_ids and "@" not in from_id:
                 warnings.append(
                     f"{fname}: seed_email from_profile_id '{from_id}' not found in profiles.json"
                 )

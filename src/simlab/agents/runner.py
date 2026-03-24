@@ -15,6 +15,16 @@ from simlab.agents.loader import load_agent_class
 from simlab.agents.reference_agent import ReferenceAgent
 
 
+def _format_exception(exc: BaseException) -> str:
+    """Format exception and any nested causes so the real error is visible."""
+    parts = [str(exc)]
+    if hasattr(exc, "exceptions") and isinstance(exc.exceptions, (list, tuple)):
+        parts.extend(f"  - {sub!r}" for sub in exc.exceptions)
+    if exc.__cause__:
+        parts.append(f"Caused by: {exc.__cause__!r}")
+    return "\n".join(parts)
+
+
 def _run_maybe_async(callable_obj: Any, *args: Any, **kwargs: Any) -> Any:
     result = callable_obj(*args, **kwargs)
     if asyncio.iscoroutine(result):
@@ -35,6 +45,7 @@ def run_with_agent_contract(
     api_key: str | None = None,
     base_url: str | None = None,
     stop_event: threading.Event | None = None,
+    mcp_clients: dict[str, Any] | None = None,
 ) -> RunArtifacts:
     """Execute setup() then run() and always return populated artifacts."""
     artifacts = RunArtifacts(
@@ -44,6 +55,8 @@ def run_with_agent_contract(
         provider=provider,
         max_steps=max_steps,
     )
+    if mcp_clients:
+        artifacts.metadata["mcp_clients"] = mcp_clients
     if agent_import_path:
         agent_cls = load_agent_class(agent_import_path)
         agent = agent_cls()
@@ -70,7 +83,8 @@ def run_with_agent_contract(
         artifacts.error = "Rollout timeout exceeded"
         artifacts.metadata["timeout"] = True
     except Exception as exc:
-        artifacts.error = f"Agent execution failed: {exc}"
+        detail = _format_exception(exc)
+        artifacts.error = f"Agent execution failed: {detail}"
 
     if artifacts.final_observation and not artifacts.messages:
         artifacts.record_message("assistant", artifacts.final_observation)

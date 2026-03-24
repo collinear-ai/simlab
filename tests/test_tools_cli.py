@@ -6,6 +6,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 from simlab.api.schemas import ScenarioSummary
 from simlab.api.schemas import ScenarioToolServer
+from simlab.catalog.registry import ToolRegistry
 from simlab.cli.main import cli
 from simlab.cli.tools import tools
 from simlab.config import DEFAULT_SCENARIO_MANAGER_API_URL
@@ -74,3 +75,17 @@ scenario_manager_api_url = "https://leaked.example.com"
         base_url=DEFAULT_SCENARIO_MANAGER_API_URL,
         api_key="env-key",
     )
+
+
+def test_tool_registry_loads_crm_definition() -> None:
+    registry = ToolRegistry()
+    registry.load_all()
+
+    crm = registry.get_tool("crm")
+
+    assert crm is not None
+    assert crm.tool_server_port == 8045
+    assert crm.services["crm-env"].image == "collinear/crm-env:latest"
+    assert "crm-seed" in crm.seed_services
+    cmd = crm.seed_services["crm-seed"].command or []
+    assert "/reset" in " ".join(cmd if isinstance(cmd, list) else [cmd])

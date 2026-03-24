@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "task_id": "list-tools",
+    "display_name": "List all tools",
+    "difficulty": "easy"
+  },
+  "task": "List all the tools available to you. For each tool, state its name and a brief description. You do not need to call any tools—just report what is available.",
+  "tool_servers": []
+}

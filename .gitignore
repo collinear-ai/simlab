@@ -1,4 +1,5 @@
 *-env
+__pycache__
 __pycache__/
 *.pyc
 build/
@@ -14,4 +15,5 @@ email-calendar.yaml
 generated-tasks
 environments
 /simlab
+/src/simlab/verifier_runtime
 daytona-state.json

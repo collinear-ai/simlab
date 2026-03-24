@@ -316,6 +316,25 @@ def _collinear_runtime_module_names() -> list[str]:
     return [name for name in sys.modules if name in exact_names or name.startswith(prefixes)]
 
 
+def _install_collinear_core_shims(injected_modules: list[str]) -> None:
+    """Inject minimal collinear.core modules for verifier imports."""
+
+    def ensure_shim(name: str) -> ModuleType:
+        if name not in sys.modules:
+            mod = ModuleType(name)
+            mod.__path__ = []
+            mod.__package__ = name
+            sys.modules[name] = mod
+            injected_modules.append(name)
+        return sys.modules[name]
+
+    ensure_shim("collinear.core")
+    run_artifacts_module = ensure_shim("collinear.core.run_artifacts")
+    run_artifacts_module.RunArtifacts = _VerifierArtifactsAdapter  # type: ignore[attr-defined]
+    verifier_module = ensure_shim("collinear.core.verifier")
+    verifier_module.VerifierResult = VerifierResult  # type: ignore[attr-defined]
+
+
 class VerifierBundleError(Exception):
     """Failed to fetch or prepare verifier bundle from API."""
 
@@ -378,6 +397,7 @@ def run_verifier(
             import_paths.append(str(local_verifier_path.parent.parent))
 
         added_paths: list[str] = []
+        injected_modules: list[str] = []
         original_module = sys.modules.get(verifier_module_path)
         original_runtime_modules = {
             name: sys.modules[name] for name in _collinear_runtime_module_names()
@@ -406,6 +426,7 @@ def run_verifier(
             for module_name in _collinear_runtime_module_names():
                 sys.modules.pop(module_name, None)
 
+            _install_collinear_core_shims(injected_modules)
             importlib.invalidate_caches()
             if import_root is not None:
                 module = importlib.import_module(verifier_module_path)
@@ -447,6 +468,8 @@ def run_verifier(
                     sys.path.remove(path)
             for module_name in _collinear_runtime_module_names():
                 sys.modules.pop(module_name, None)
+            for module_name in injected_modules:
+                sys.modules.pop(module_name, None)
             sys.modules.update(original_runtime_modules)
             if original_module is None:
                 sys.modules.pop(verifier_module_path, None)
@@ -487,27 +510,11 @@ def run_verifier(
         except VerifierBundleError as e:
             return VerifierResult(success=False, message=str(e), output=str(e))
         sys.path.insert(0, str(cache_root))
-        injected_modules: list[str] = []
+        cached_injected_modules: list[str] = []
         try:
-            # Inject collinear.core shims so verifiers that import
-            # collinear.core.run_artifacts / collinear.core.verifier work
-            # without the full collinear package being installed.
-            # Only shim collinear.core — let the real collinear package
-            # in the bundle be discovered normally via sys.path.
-            def _ensure_shim(name: str) -> ModuleType:
-                if name not in sys.modules:
-                    mod = ModuleType(name)
-                    mod.__path__ = []  # mark as package so sub-imports work
-                    mod.__package__ = name
-                    sys.modules[name] = mod
-                    injected_modules.append(name)
-                return sys.modules[name]
-
-            _ensure_shim("collinear.core")
-            ra_mod = _ensure_shim("collinear.core.run_artifacts")
-            ra_mod.RunArtifacts = _VerifierArtifactsAdapter  # type: ignore[attr-defined]
-            vr_mod = _ensure_shim("collinear.core.verifier")
-            vr_mod.VerifierResult = VerifierResult  # type: ignore[attr-defined]
+            # Let the bundle provide collinear.scenarios while we supply only the
+            # minimal collinear.core modules verifiers expect at runtime.
+            _install_collinear_core_shims(cached_injected_modules)
 
             try:
                 module = importlib.import_module(verifier_module_path)
@@ -522,7 +529,7 @@ def run_verifier(
             return VerifierResult(success=False, message=f"Verifier error: {e}", output=str(e))
         finally:
             sys.path.pop(0)
-            for _mod_name in injected_modules:
+            for _mod_name in cached_injected_modules:
                 sys.modules.pop(_mod_name, None)
 
     # Direct import (monorepo or local)

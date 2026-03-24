@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import click
 import pytest
 import simlab.cli.env as env_module
 import yaml
@@ -251,6 +252,96 @@ def test_env_init_template_maps_google_workspace_service_name(tmp_path: Path) ->
     data = yaml.safe_load(out_file.read_text())
     assert data["registry"] == DEFAULT_IMAGE_REGISTRY
     assert data["tools"] == ["google-workspace"]
+
+
+def test_env_init_template_maps_erp_service_name(tmp_path: Path) -> None:
+    env_name = "erp-env"
+    env_dir = tmp_path / "environments" / env_name
+    out_file = env_dir / "env.yaml"
+    runner = CliRunner()
+    fake_scenarios = [
+        ScenarioSummary(
+            scenario_id="erp",
+            name="ERP",
+            tool_servers=[
+                ScenarioToolServer(name="erp-env"),
+                ScenarioToolServer(name="email-env"),
+            ],
+        )
+    ]
+
+    with (
+        patch(
+            "simlab.cli.env._get_registry",
+            return_value=_FakeRegistry({"erp", "email"}),
+        ),
+        patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
+        patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
+    ):
+        mocked_client = mocked_client_cls.return_value
+        mocked_client.list_scenarios.return_value = fake_scenarios
+        mocked_client.resolve_template_to_backend_id.return_value = "erp"
+        result = runner.invoke(
+            env,
+            [
+                "init",
+                env_name,
+                "--template",
+                "erp",
+                "--non-interactive",
+            ],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Starting from template 'erp': erp, email" in result.output
+
+    assert out_file.exists()
+    data = yaml.safe_load(out_file.read_text())
+    assert data["registry"] == DEFAULT_IMAGE_REGISTRY
+    assert data["tools"] == ["erp", "email"]
+
+
+def test_env_init_template_maps_crm_service_name(tmp_path: Path) -> None:
+    env_name = "crm-env"
+    env_dir = tmp_path / "environments" / env_name
+    out_file = env_dir / "env.yaml"
+    runner = CliRunner()
+    fake_scenarios = [
+        ScenarioSummary(
+            scenario_id="crm_sales",
+            name="CRM Sales",
+            tool_servers=[ScenarioToolServer(name="crm-env")],
+        )
+    ]
+
+    with (
+        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"crm"})),
+        patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
+        patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
+    ):
+        mocked_client = mocked_client_cls.return_value
+        mocked_client.list_scenarios.return_value = fake_scenarios
+        mocked_client.resolve_template_to_backend_id.return_value = "crm_sales"
+        result = runner.invoke(
+            env,
+            [
+                "init",
+                env_name,
+                "--template",
+                "crm_sales",
+                "--non-interactive",
+            ],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert out_file.exists()
+    data = yaml.safe_load(out_file.read_text())
+    assert data["registry"] == DEFAULT_IMAGE_REGISTRY
+    assert data["tools"] == ["crm"]
 
 
 def test_env_init_uses_default_registry_when_flag_omitted(tmp_path: Path) -> None:
@@ -507,6 +598,205 @@ def test_env_init_coding_template_scaffolds_customization_files(tmp_path: Path) 
     assert str(env_dir / "task-bundle") in result.output
 
 
+def test_env_init_with_mcp_servers_persists_and_calls_compose_with_env_dir(
+    tmp_path: Path,
+) -> None:
+    """env init with --mcp-servers writes mcp-servers.json and calls compose with env_dir."""
+    env_name = "mcp-env"
+    env_dir = tmp_path / "environments" / env_name
+    mcp_file = tmp_path / "input-mcp.json"
+    mcp_file.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "notion": {"url": "https://mcp.notion.com/mcp"},
+                    "weather": {
+                        "command": "uvx",
+                        "args": ["mcp-weather"],
+                        "env": {"ACCUWEATHER_API_KEY": ""},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    fake_compose_output = MagicMock()
+    fake_compose_output.tool_endpoints = {}
+    fake_compose_output.env_file = ""
+    del fake_compose_output.readme
+
+    with (
+        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())),
+        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
+        patch("simlab.cli.env.write_output"),
+    ):
+        mocked_engine = mocked_engine_cls.return_value
+        mocked_engine.compose.return_value = fake_compose_output
+
+        result = runner.invoke(
+            env,
+            [
+                "init",
+                env_name,
+                "--mcp-servers",
+                str(mcp_file),
+                "--non-interactive",
+            ],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    persisted = env_dir / "mcp-servers.json"
+    assert persisted.exists()
+    data = json.loads(persisted.read_text())
+    assert "mcpServers" in data
+    assert "notion" in data["mcpServers"]
+    assert data["mcpServers"]["notion"]["url"] == "https://mcp.notion.com/mcp"
+    assert "weather" in data["mcpServers"]
+    mocked_engine.compose.assert_called_once()
+    call_kwargs = mocked_engine.compose.call_args[1]
+    assert call_kwargs.get("env_dir") == env_dir
+
+
+def test_env_init_with_mcp_servers_interactive_skips_picker_when_user_declines_extra_tools(
+    tmp_path: Path,
+) -> None:
+    env_name = "mcp-env"
+    env_dir = tmp_path / "environments" / env_name
+    mcp_file = tmp_path / "input-mcp.json"
+    mcp_file.write_text(
+        json.dumps({"mcpServers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    fake_compose_output = MagicMock()
+    fake_compose_output.tool_endpoints = {}
+    fake_compose_output.env_file = "# No environment variables required"
+    del fake_compose_output.readme
+
+    with (
+        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.click.confirm", return_value=False) as mocked_confirm,
+        patch("simlab.cli.env._interactive_select") as mocked_picker,
+        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
+        patch("simlab.cli.env.write_output"),
+    ):
+        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
+
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--mcp-servers", str(mcp_file)],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert env_dir.exists()
+    mocked_confirm.assert_called_once_with(
+        "Add catalog tools in addition to the MCP servers?",
+        default=False,
+    )
+    mocked_picker.assert_not_called()
+
+
+def test_env_init_with_mcp_servers_interactive_can_add_extra_tools(tmp_path: Path) -> None:
+    env_name = "mcp-env"
+    env_dir = tmp_path / "environments" / env_name
+    mcp_file = tmp_path / "input-mcp.json"
+    mcp_file.write_text(
+        json.dumps({"mcpServers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    fake_compose_output = MagicMock()
+    fake_compose_output.tool_endpoints = {"email": "http://localhost:8040/tools"}
+    fake_compose_output.env_file = "# No environment variables required"
+    del fake_compose_output.readme
+
+    with (
+        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.click.confirm", return_value=True),
+        patch("simlab.cli.env._interactive_select", return_value=["email"]) as mocked_picker,
+        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
+        patch("simlab.cli.env.write_output"),
+    ):
+        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
+
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--mcp-servers", str(mcp_file)],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert env_dir.exists()
+    mocked_picker.assert_called_once()
+    data = yaml.safe_load((env_dir / "env.yaml").read_text())
+    assert data["tools"] == ["email"]
+
+
+def test_env_init_interactive_cancel_aborts_before_writing_files(tmp_path: Path) -> None:
+    env_name = "cancelled-env"
+    mcp_file = tmp_path / "input-mcp.json"
+    mcp_file.write_text(
+        json.dumps({"mcpServers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    with (
+        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.click.confirm", return_value=True),
+        patch("simlab.cli.env._interactive_select", side_effect=click.Abort()),
+    ):
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--mcp-servers", str(mcp_file)],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code != 0
+    assert not (tmp_path / "environments" / env_name).exists()
+
+
+def test_env_init_mcp_servers_invalid_json_fails(tmp_path: Path) -> None:
+    """env init with --mcp-servers pointing to invalid JSON exits with error."""
+    env_name = "mcp-fail"
+    mcp_file = tmp_path / "bad-mcp.json"
+    mcp_file.write_text('{"mcpServers": {"x": {}}}', encoding="utf-8")  # missing url/command
+    runner = CliRunner()
+    with patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())):
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--mcp-servers", str(mcp_file), "--non-interactive"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+    assert result.exit_code == 1
+    assert "must have" in result.output or "url" in result.output or "command" in result.output
+
+
+def test_env_init_mcp_servers_invalid_shape_fails_cleanly(tmp_path: Path) -> None:
+    env_name = "mcp-bad-shape"
+    mcp_file = tmp_path / "bad-shape-mcp.json"
+    mcp_file.write_text('{"mcpServers": []}', encoding="utf-8")
+    runner = CliRunner()
+    with patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())):
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--mcp-servers", str(mcp_file), "--non-interactive"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 1
+    assert "mcpServers must be an object" in result.output
+
+
 def test_env_init_force_preserves_existing_env_yaml(tmp_path: Path) -> None:
     """env init ENV_NAME --force with existing env.yaml regenerates compose only."""
     env_name = "preserved-env"
@@ -699,6 +989,229 @@ def test_validate_daytona_coding_assets_rejects_external_paths(
     assert str(external_script.resolve()) in captured.err
 
 
+def test_env_init_overwrite_without_mcp_servers_clears_persisted_mcp_config(tmp_path: Path) -> None:
+    env_name = "mcp-reset-env"
+    env_dir = tmp_path / "environments" / env_name
+    runner = CliRunner()
+    env_dir.mkdir(parents=True)
+    (env_dir / "env.yaml").write_text(
+        yaml.dump({"name": env_name, "tools": []}, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    mcp_file = env_dir / "mcp-servers.json"
+    mcp_file.write_text(
+        json.dumps({"mcpServers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    fake_compose_output = MagicMock()
+    fake_compose_output.tool_endpoints = {}
+    fake_compose_output.env_file = "# No environment variables required"
+
+    with (
+        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env._interactive_select", return_value=["email"]),
+        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
+        patch("simlab.cli.env.write_output"),
+    ):
+        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
+
+        result = runner.invoke(
+            env,
+            ["init", env_name],
+            input="y\n",
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert not mcp_file.exists()
+    assert "Removed persisted MCP servers config" in result.output
+
+
+def test_env_init_force_without_mcp_servers_clears_persisted_mcp_config(tmp_path: Path) -> None:
+    env_name = "mcp-reset-env"
+    env_dir = tmp_path / "environments" / env_name
+    runner = CliRunner()
+    env_dir.mkdir(parents=True)
+    (env_dir / "env.yaml").write_text(
+        yaml.dump({"name": env_name, "tools": []}, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    mcp_file = env_dir / "mcp-servers.json"
+    mcp_file.write_text(
+        json.dumps({"mcpServers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    fake_compose_output = MagicMock()
+    fake_compose_output.tool_endpoints = {}
+    fake_compose_output.env_file = "# No environment variables required"
+
+    with (
+        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())),
+        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
+        patch("simlab.cli.env.write_output"),
+    ):
+        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
+
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--force", "--non-interactive"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert not mcp_file.exists()
+    assert "Removed persisted MCP servers config" in result.output
+
+
+def test_env_up_with_no_local_services_skips_docker_compose(tmp_path: Path) -> None:
+    env_name = "url-only-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True)
+    (env_dir / "env.yaml").write_text(
+        yaml.dump({"name": env_name, "tools": []}, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    (env_dir / "docker-compose.yml").write_text(
+        yaml.dump(
+            {
+                "services": {},
+                "networks": {"simlab": {"driver": "bridge"}},
+            },
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    with (
+        patch("simlab.cli.env.subprocess.run") as mocked_run,
+        patch("simlab.cli.env._get_preseed_service_names", return_value=[]),
+        patch("simlab.cli.env._get_seed_service_names", return_value=[]),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["up", env_name],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "No local services defined" in result.output
+    mocked_run.assert_not_called()
+
+
+def test_env_up_daytona_with_no_services_skips_daytona_startup(tmp_path: Path) -> None:
+    env_name = "url-only-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True)
+    (env_dir / "env.yaml").write_text(
+        yaml.dump({"name": env_name, "tools": []}, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    (env_dir / "docker-compose.yml").write_text(
+        yaml.dump(
+            {
+                "services": {},
+                "networks": {"simlab": {"driver": "bridge"}},
+            },
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    with (
+        patch("simlab.cli.env._up_daytona") as mocked_up_daytona,
+        patch("simlab.cli.env._get_daytona_runner") as mocked_get_daytona_runner,
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["up", env_name, "--daytona"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "No Daytona services defined" in result.output
+    mocked_up_daytona.assert_not_called()
+    mocked_get_daytona_runner.assert_not_called()
+
+
+def test_env_down_with_no_current_services_still_attempts_compose_down(tmp_path: Path) -> None:
+    env_name = "url-only-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True)
+    (env_dir / "env.yaml").write_text(
+        yaml.dump({"name": env_name, "tools": []}, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    (env_dir / "docker-compose.yml").write_text(
+        yaml.dump(
+            {
+                "services": {},
+                "networks": {"simlab": {"driver": "bridge"}},
+            },
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    completed = SimpleNamespace(returncode=0, stderr="")
+
+    with (
+        patch("simlab.cli.env.subprocess.run", return_value=completed) as mocked_run,
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["down", env_name],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "attempting teardown anyway" in result.output
+    mocked_run.assert_called_once_with(
+        ["docker", "compose", "-f", str(env_dir / "docker-compose.yml"), "down"],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_local_health_fetcher_uses_compose_ps_all(tmp_path: Path) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    completed = SimpleNamespace(returncode=0, stdout="svc\tUp 1 second\n")
+
+    with patch("simlab.cli.env.subprocess.run", return_value=completed) as mocked_run:
+        fetch = env_module._local_health_fetcher(compose_file)
+        assert fetch() == {"svc": "running"}
+
+    mocked_run.assert_called_once_with(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(compose_file),
+            "ps",
+            "--all",
+            "--format",
+            "{{.Name}}\t{{.Status}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_poll_health_raises_when_service_exits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(env_module.time, "sleep", lambda _seconds: None)
 
@@ -710,6 +1223,51 @@ def test_poll_health_raises_when_service_exits(monkeypatch: pytest.MonkeyPatch) 
             },
             timeout=1,
         )
+
+    assert exc_info.value.code == 1
+
+
+def test_poll_health_requires_stable_ready_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = {"value": 0.0}
+
+    def fake_time() -> float:
+        now["value"] += 1.0
+        return now["value"]
+
+    states = iter(
+        [
+            {"mcp-gateway": "running"},
+            {"mcp-gateway": "running"},
+        ]
+    )
+
+    monkeypatch.setattr(env_module.time, "time", fake_time)
+    monkeypatch.setattr(env_module.time, "sleep", lambda _seconds: None)
+
+    env_module._poll_health(lambda: next(states), timeout=5)
+
+
+def test_poll_health_does_not_succeed_on_single_running_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = {"value": 0.0}
+
+    def fake_time() -> float:
+        now["value"] += 1.0
+        return now["value"]
+
+    states = iter(
+        [
+            {"mcp-gateway": "running"},
+            {"mcp-gateway": "exited"},
+        ]
+    )
+
+    monkeypatch.setattr(env_module.time, "time", fake_time)
+    monkeypatch.setattr(env_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        env_module._poll_health(lambda: next(states), timeout=5)
 
     assert exc_info.value.code == 1
 

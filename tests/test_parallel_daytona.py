@@ -560,3 +560,109 @@ class TestDaytonaRunnerDownErrorHandling:
             runner.down(tmp_path)
 
         assert not state_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# _provision_group_channels
+# ---------------------------------------------------------------------------
+
+
+class TestProvisionGroupChannels:
+    """Verify _provision_group_channels in parallel Daytona orchestrator."""
+
+    def test_runs_rocketchat_seed_with_env_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = ParallelDaytonaOrchestrator(rollout_count=1, max_parallel=1)
+
+        task_data = {
+            "npcs": [{"id": "diana_walsh"}],
+            "seed_group_channels": [
+                {
+                    "channel_name": "billing-support",
+                    "member_profile_ids": ["diana_walsh", "mike_williams"],
+                    "messages": [],
+                }
+            ],
+        }
+        profiles = {
+            "diana_walsh": {
+                "first_name": "Diana",
+                "last_name": "Walsh",
+                "email": "diana@example.com",
+            },
+        }
+
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        config = SimpleNamespace(tools=["rocketchat"])
+        config_path = tmp_path / "env.yaml"
+        config_path.write_text("name: x\n")
+
+        sandbox_calls: list[dict[str, str]] = []
+
+        def fake_profiled_services(
+            _config: object,
+            profile: str,  # noqa: ARG001
+            config_path: object = None,  # noqa: ARG001
+            tool_names: list[str] | None = None,
+        ) -> list[str]:
+            assert tool_names == ["rocketchat"]
+            return ["rocketchat-seed"]
+
+        def fake_run_in_sandbox(
+            _sandbox: object,
+            svc_names: list[str],  # noqa: ARG001
+            profile: str,  # noqa: ARG001
+            env_overrides: dict[str, str] | None = None,
+            log_prefix: str = "",  # noqa: ARG001
+        ) -> None:
+            sandbox_calls.append(env_overrides or {})
+
+        monkeypatch.setattr("simlab.cli.env._get_profiled_service_names", fake_profiled_services)
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._run_profiled_services_in_sandbox",
+            fake_run_in_sandbox,
+        )
+
+        fake_sandbox = MagicMock()
+        orch._provision_group_channels(
+            "[rollout 1/1]",
+            fake_sandbox,
+            task_data,
+            profiles,
+            config,
+            str(config_path),
+        )
+
+        assert len(sandbox_calls) == 1
+        env = sandbox_calls[0]
+        npc_configs = json.loads(env["ROCKETCHAT_NPC_CONFIGS"])
+        assert "diana_walsh" in npc_configs
+        assert "mike_williams" in npc_configs
+        assert npc_configs["diana_walsh"]["email"] == "diana@example.com"
+
+        channels = json.loads(env["ROCKETCHAT_SEED_GROUP_CHANNELS"])
+        assert channels[0]["channel_name"] == "billing-support"
+
+    def test_skips_when_no_group_channels(self) -> None:
+        orch = ParallelDaytonaOrchestrator(rollout_count=1, max_parallel=1)
+        task_data: dict[str, list[object]] = {"npcs": [], "seed_group_channels": []}
+        # Should return immediately without error
+        orch._provision_group_channels(
+            "[rollout 1/1]", MagicMock(), task_data, {}, MagicMock(), "/fake"
+        )
+
+    def test_skips_when_rocketchat_not_in_tools(self) -> None:
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        orch = ParallelDaytonaOrchestrator(rollout_count=1, max_parallel=1)
+        task_data = {
+            "npcs": [],
+            "seed_group_channels": [
+                {"channel_name": "ch", "member_profile_ids": ["bob"], "messages": []}
+            ],
+        }
+        config = SimpleNamespace(tools=["email"])
+        # Should return without running anything
+        orch._provision_group_channels("[rollout 1/1]", MagicMock(), task_data, {}, config, "/fake")

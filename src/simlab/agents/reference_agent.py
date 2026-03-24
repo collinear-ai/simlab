@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import Any
 
@@ -11,6 +12,40 @@ from simlab.agents.base import BaseEnvironment
 from simlab.agents.base import RunArtifacts
 from simlab.agents.base import ToolCall
 from simlab.agents.base import ToolCallResult
+from simlab.agents.mcp_client import MCPClientHandle
+
+logger = logging.getLogger(__name__)
+
+
+def _register_tool_wire_name(
+    *,
+    openai_tools: list[dict[str, Any]],
+    dispatch: dict[str, tuple[str, str]],
+    wire_name: str,
+    server_name: str,
+    tool_name: str,
+    description: str,
+    parameters: dict[str, Any],
+) -> None:
+    """Register one tool wire name, rejecting ambiguous duplicates."""
+    if wire_name in dispatch:
+        existing_server, existing_tool = dispatch[wire_name]
+        raise RuntimeError(
+            "Duplicate tool wire name detected: "
+            f"{wire_name} is provided by both {existing_server}.{existing_tool} "
+            f"and {server_name}.{tool_name}"
+        )
+    dispatch[wire_name] = (server_name, tool_name)
+    openai_tools.append(
+        {
+            "type": "function",
+            "function": {
+                "name": wire_name,
+                "description": description,
+                "parameters": parameters,
+            },
+        }
+    )
 
 
 class ReferenceAgent(BaseAgent):
@@ -60,7 +95,8 @@ class ReferenceAgent(BaseAgent):
         if self._provider and not raw_model.startswith(f"{self._provider}/"):
             litellm_model = f"{self._provider}/{raw_model}"
 
-        openai_tools, dispatch = _build_openai_tools(environment)
+        mcp_clients: dict[str, MCPClientHandle] = context.metadata.get("mcp_clients") or {}
+        openai_tools, dispatch = _build_openai_tools(environment, mcp_clients)
         context.metadata["reference_agent_tools"] = {
             "count": len(openai_tools),
             "names": [t["function"]["name"] for t in openai_tools],
@@ -143,6 +179,7 @@ class ReferenceAgent(BaseAgent):
                         raw_args=fn.arguments,
                         dispatch=dispatch,
                         environment=environment,
+                        mcp_clients=mcp_clients,
                         context=context,
                     )
                     messages.append(
@@ -172,26 +209,52 @@ class ReferenceAgent(BaseAgent):
 
 def _build_openai_tools(
     environment: BaseEnvironment,
+    mcp_clients: dict[str, MCPClientHandle],
 ) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str]]]:
     openai_tools: list[dict[str, Any]] = []
     dispatch: dict[str, tuple[str, str]] = {}
+    mcp_discovery_failures: list[str] = []
+    # Tools from HTTP environment
     for tool in environment.list_tools():
         server = tool.get("tool_server")
         name = tool.get("name")
         if not server or not name:
             continue
         wire_name = f"{server}__{name}"
-        dispatch[wire_name] = (server, name)
-        openai_tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": wire_name,
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("input_schema", {"type": "object"}),
-                },
-            }
+        _register_tool_wire_name(
+            openai_tools=openai_tools,
+            dispatch=dispatch,
+            wire_name=wire_name,
+            server_name=server,
+            tool_name=name,
+            description=tool.get("description", ""),
+            parameters=tool.get("input_schema", {"type": "object"}),
         )
+    # Tools from MCP clients (agent uses MCP client directly)
+    for server_name, handle in mcp_clients.items():
+        try:
+            tools = handle.list_tools()
+        except Exception as exc:
+            logger.warning("MCP server %s failed during tool discovery: %s", server_name, exc)
+            mcp_discovery_failures.append(f"{server_name}: {exc}")
+            continue
+        for tool in tools:
+            name = tool.get("name")
+            if not name:
+                continue
+            wire_name = f"{server_name}__{name}"
+            _register_tool_wire_name(
+                openai_tools=openai_tools,
+                dispatch=dispatch,
+                wire_name=wire_name,
+                server_name=server_name,
+                tool_name=name,
+                description=tool.get("description", ""),
+                parameters=tool.get("input_schema", {"type": "object"}),
+            )
+    if mcp_discovery_failures:
+        failures = "; ".join(mcp_discovery_failures)
+        raise RuntimeError(f"MCP tool discovery failed for configured server(s): {failures}")
     return openai_tools, dispatch
 
 
@@ -202,6 +265,7 @@ def _execute_tool_call(
     raw_args: str,
     dispatch: dict[str, tuple[str, str]],
     environment: BaseEnvironment,
+    mcp_clients: dict[str, MCPClientHandle],
     context: RunArtifacts,
 ) -> ToolCallResult:
     if tool_name not in dispatch:
@@ -217,7 +281,10 @@ def _execute_tool_call(
     except json.JSONDecodeError:
         params = {}
     call = ToolCall(tool_server=server, tool_name=actual_name, parameters=params)
-    result = environment.call_tool(server, actual_name, params)
+    if server in mcp_clients:
+        result = mcp_clients[server].call_tool(actual_name, params)
+    else:
+        result = environment.call_tool(server, actual_name, params)
     context.record_tool_call(call, result)
     _ = tool_call_id
     return result

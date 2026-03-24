@@ -1,0 +1,24 @@
+name: web-search
+display_name: Web Search (Parallel)
+description: Web search and page content extraction powered by Parallel AI.
+category: research
+tool_server_port: 8085
+
+exposed_ports: []
+
+required_env_vars:
+  - PARALLEL_API_KEY
+
+services:
+  web-search-env:
+    image: collinear/web-search-env:latest
+    ports:
+      - "8085"
+    environment:
+      PARALLEL_API_KEY: ${PARALLEL_API_KEY}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8085/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
