@@ -87,7 +87,7 @@ class ConfigurableAgent(BaseAgent):
 
         system_prompt = self._load_system_prompt()
 
-        raw_model = self._model
+        raw_model = self._model or "gpt-4o-mini"
         litellm_model = raw_model
         if self._provider and not raw_model.startswith(f"{self._provider}/"):
             litellm_model = f"{self._provider}/{raw_model}"
