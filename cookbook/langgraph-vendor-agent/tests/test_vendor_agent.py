@@ -53,6 +53,14 @@ class FakeEnvironment(BaseEnvironment):
     ) -> ToolCallResult:
         return ToolCallResult(observation={"results": [{"name": "NovaTech"}]})
 
+    async def alist_tools(self, tool_server: str | None = None) -> list[dict[str, Any]]:
+        return self.list_tools(tool_server)
+
+    async def acall_tool(
+        self, tool_server: str, tool_name: str, parameters: dict[str, Any]
+    ) -> ToolCallResult:
+        return self.call_tool(tool_server, tool_name, parameters)
+
 
 def test_vendor_agent_populates_artifacts() -> None:
     from langgraph_vendor_agent.simlab_adapter import VendorManagementAgent
