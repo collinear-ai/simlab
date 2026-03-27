@@ -9,6 +9,7 @@ from unittest.mock import patch
 import click
 import pytest
 import simlab.cli.env as env_module
+import simlab.runtime.env_lifecycle as lifecycle_module
 import yaml
 from click.testing import CliRunner
 from simlab.api.client import ScenarioManagerApiError
@@ -981,7 +982,7 @@ def test_validate_daytona_coding_assets_rejects_external_paths(
     )
 
     with pytest.raises(SystemExit) as exc_info:
-        env_module._validate_daytona_coding_assets(config, env_dir)
+        lifecycle_module._validate_daytona_coding_assets(config, env_dir)
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
@@ -1089,9 +1090,9 @@ def test_env_up_with_no_local_services_skips_docker_compose(tmp_path: Path) -> N
     runner = CliRunner()
 
     with (
-        patch("simlab.cli.env.subprocess.run") as mocked_run,
-        patch("simlab.cli.env._get_preseed_service_names", return_value=[]),
-        patch("simlab.cli.env._get_seed_service_names", return_value=[]),
+        patch("simlab.runtime.env_lifecycle.subprocess.run") as mocked_run,
+        patch("simlab.runtime.env_lifecycle._get_preseed_service_names", return_value=[]),
+        patch("simlab.runtime.env_lifecycle._get_seed_service_names", return_value=[]),
         patch("simlab.cli.env.emit_cli_event"),
     ):
         result = runner.invoke(
@@ -1129,7 +1130,7 @@ def test_env_up_daytona_with_no_services_skips_daytona_startup(tmp_path: Path) -
 
     with (
         patch("simlab.cli.env._up_daytona") as mocked_up_daytona,
-        patch("simlab.cli.env._get_daytona_runner") as mocked_get_daytona_runner,
+        patch("simlab.runtime.env_lifecycle._get_daytona_runner") as mocked_get_daytona_runner,
         patch("simlab.cli.env.emit_cli_event"),
     ):
         result = runner.invoke(
@@ -1143,6 +1144,41 @@ def test_env_up_daytona_with_no_services_skips_daytona_startup(tmp_path: Path) -
     assert "No Daytona services defined" in result.output
     mocked_up_daytona.assert_not_called()
     mocked_get_daytona_runner.assert_not_called()
+
+
+def test_add_mcp_gateway_endpoint_skips_url_only_mcp_servers(tmp_path: Path) -> None:
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "mcp-servers.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    endpoints = env_module._add_mcp_gateway_endpoint(
+        {"email": "http://localhost:8040"},
+        env_dir=env_dir,
+    )
+
+    assert endpoints == {"email": "http://localhost:8040"}
+
+
+def test_add_mcp_gateway_endpoint_adds_command_server_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "mcp-servers.json").write_text(
+        json.dumps({"mcpServers": {"weather": {"command": "uvx", "args": ["mcp-weather"]}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(env_module, "get_mcp_gateway_host_port", lambda _env_dir: 8081)
+
+    endpoints = env_module._add_mcp_gateway_endpoint({}, env_dir=env_dir)
+
+    assert endpoints == {
+        env_module.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "http://localhost:8081/mcp"
+    }
 
 
 def test_env_down_with_no_current_services_still_attempts_compose_down(tmp_path: Path) -> None:
@@ -1168,7 +1204,7 @@ def test_env_down_with_no_current_services_still_attempts_compose_down(tmp_path:
     completed = SimpleNamespace(returncode=0, stderr="")
 
     with (
-        patch("simlab.cli.env.subprocess.run", return_value=completed) as mocked_run,
+        patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed) as mocked_run,
         patch("simlab.cli.env.emit_cli_event"),
     ):
         result = runner.invoke(
@@ -1192,8 +1228,8 @@ def test_local_health_fetcher_uses_compose_ps_all(tmp_path: Path) -> None:
     compose_file.write_text("services: {}\n", encoding="utf-8")
     completed = SimpleNamespace(returncode=0, stdout="svc\tUp 1 second\n")
 
-    with patch("simlab.cli.env.subprocess.run", return_value=completed) as mocked_run:
-        fetch = env_module._local_health_fetcher(compose_file)
+    with patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed) as mocked_run:
+        fetch = lifecycle_module._local_health_fetcher(compose_file)
         assert fetch() == {"svc": "running"}
 
     mocked_run.assert_called_once_with(
@@ -1213,10 +1249,10 @@ def test_local_health_fetcher_uses_compose_ps_all(tmp_path: Path) -> None:
 
 
 def test_poll_health_raises_when_service_exits(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(env_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(lifecycle_module.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(SystemExit) as exc_info:
-        env_module._poll_health(
+        lifecycle_module._poll_health(
             lambda: {
                 "openhands-agent-server": "healthy",
                 "coding-env": "exited",
@@ -1241,10 +1277,10 @@ def test_poll_health_requires_stable_ready_state(monkeypatch: pytest.MonkeyPatch
         ]
     )
 
-    monkeypatch.setattr(env_module.time, "time", fake_time)
-    monkeypatch.setattr(env_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(lifecycle_module.time, "time", fake_time)
+    monkeypatch.setattr(lifecycle_module.time, "sleep", lambda _seconds: None)
 
-    env_module._poll_health(lambda: next(states), timeout=5)
+    lifecycle_module._poll_health(lambda: next(states), timeout=5)
 
 
 def test_poll_health_does_not_succeed_on_single_running_poll(
@@ -1263,11 +1299,11 @@ def test_poll_health_does_not_succeed_on_single_running_poll(
         ]
     )
 
-    monkeypatch.setattr(env_module.time, "time", fake_time)
-    monkeypatch.setattr(env_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(lifecycle_module.time, "time", fake_time)
+    monkeypatch.setattr(lifecycle_module.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(SystemExit) as exc_info:
-        env_module._poll_health(lambda: next(states), timeout=5)
+        lifecycle_module._poll_health(lambda: next(states), timeout=5)
 
     assert exc_info.value.code == 1
 
@@ -1279,11 +1315,11 @@ def test_poll_health_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
         now["value"] += 1.0
         return now["value"]
 
-    monkeypatch.setattr(env_module.time, "time", fake_time)
-    monkeypatch.setattr(env_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(lifecycle_module.time, "time", fake_time)
+    monkeypatch.setattr(lifecycle_module.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(SystemExit) as exc_info:
-        env_module._poll_health(lambda: {"coding-env": "starting"}, timeout=1)
+        lifecycle_module._poll_health(lambda: {"coding-env": "starting"}, timeout=1)
 
     assert exc_info.value.code == 1
 
@@ -1346,7 +1382,7 @@ def test_env_seed_emits_telemetry_when_no_seed_services(tmp_path: Path) -> None:
     runner = CliRunner()
 
     with (
-        patch("simlab.cli.env._get_seed_service_names", return_value=[]),
+        patch("simlab.runtime.env_lifecycle._get_seed_service_names", return_value=[]),
         patch("simlab.cli.env.emit_cli_event") as mocked_emit,
     ):
         result = runner.invoke(

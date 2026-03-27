@@ -16,24 +16,28 @@ uv tool install "simulationlab[daytona]"
 
 The PyPI package is named `simulationlab`. The installed CLI command is `simlab`.
 
+### Install from source
+
+```bash
+git clone https://github.com/collinear-ai/simlab.git
+cd simlab/cli/simlab
+uv tool install .
+# or with extras:
+uv tool install ".[daytona]"
+```
+
+Then run with `simlab <command>`. To run directly from the repo without installing:
+
+```bash
+uv run simlab <command>
+```
+
 ## Prerequisites
 
 - Python 3.13
 - Docker + Docker Compose
 - Collinear API key for SimLab commands
 - `OPENAI_API_KEY` set in your environment
-
-If you are running from this repo, use:
-
-```bash
-uv run simlab <command>
-```
-
-If you installed the CLI as a package, use:
-
-```bash
-simlab <command>
-```
 
 Optional global config lives at `~/.config/simlab/config.toml` by default, or at the path in `SIMLAB_CONFIG`.
 
@@ -133,15 +137,14 @@ simlab tasks list --tasks-dir ./generated-tasks   # or a local bundle
 
 ---
 
-## 1) Start a Local Environment
+## 1) Initialize an Environment
 
-**`env init`** creates the env dir, writes `env.yaml`, and generates `docker-compose.yml` and `.env`. **`env up`** starts the containers; it requires `docker-compose.yml` to exist (run `env init` first). To regenerate compose after editing `env.yaml`, run **`simlab env init my-env --force`**. To tear down and start containers again without regenerating compose, use **`simlab env up my-env --rebuild`**.
+**`env init`** creates the env dir, writes `env.yaml`, and generates `docker-compose.yml` and `.env`. You do not need to run `env up` separately — `tasks run` automatically starts the environment, seeds data, and tears it down when done. To regenerate compose after editing `env.yaml`, run **`simlab env init my-env --force`**.
 
 ### A) Use a template
 
 ```bash
 simlab env init my-env --template hr
-simlab env up my-env
 ```
 
 `env init --template ...` stores the template's resolved scenario guidance in `env.yaml` as
@@ -177,7 +180,6 @@ simlab env init my-env --force
 
 ```bash
 simlab env init my-env
-simlab env up my-env
 ```
 
 ### C) Custom MCP servers
@@ -313,14 +315,7 @@ simlab --environments-dir ./environments tasks run --env my-demo-env --tasks-dir
 
 You still need a reference-agent API key such as `OPENAI_API_KEY` or `SIMLAB_AGENT_API_KEY`.
 
-Optional (remote sandbox):
-
-```bash
-simlab env up my-env --daytona
-```
-
 - **`--force`** (init): overwrite an existing environment without prompting; use to regenerate `docker-compose.yml` and `.env` from the current `env.yaml`.
-- **`--rebuild`** (up): run `docker compose down` then `docker compose up -d` (tear down and start containers again). Does not regenerate compose files.
 - If you want to experiment with large-scale parallel rollouts, reach out to us directly or join the Discord!
 ---
 
@@ -368,7 +363,7 @@ export SIMLAB_VERIFIER_PROVIDER="openai"
 export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY"
 ```
 
-Then run a specific task by ID. For `hr`, an available task is `100_weaver_schedule_phone_screen`:
+Then run a specific task by ID. `tasks run` automatically starts the environment, seeds data, runs the agent, verifies, and tears down when done. For `hr`, an available task is `100_weaver_schedule_phone_screen`:
 
 ```bash
 simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-5.2 --agent-api-key "$OPENAI_API_KEY"
@@ -381,6 +376,8 @@ For a generated local task bundle, point `tasks run` at the bundle directory:
 ```bash
 simlab tasks run --env my-env --tasks-dir ./generated-tasks --task generated-task-id --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
+
+If the environment is already running (e.g. from a previous run or manual `env up`), `tasks run` detects it and skips startup/teardown.
 
 ---
 
@@ -400,7 +397,7 @@ simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-mo
 simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --daytona --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
-Use `--daytona` when the environment is up with Daytona; omit it for local Docker.
+Use `--daytona` to run in a Daytona sandbox; omit it for local Docker.
 The Daytona API key is resolved from `--daytona-api-key`, `[daytona].api_key` in `config.toml`, `SIMLAB_DAYTONA_API_KEY`, then `DAYTONA_API_KEY`.
 
 ### C) Parallel rollouts (Daytona only)
@@ -429,6 +426,11 @@ simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-im
 (Custom agents use their own credentials; `--agent-model` and `--agent-api-key` do not apply.)
 
 Your agent must implement the `BaseAgent` contract and populate `RunArtifacts` during execution. Custom agents use their own credentials; the CLI's agent API key and model settings do not apply.
+
+If you are integrating a framework-backed agent, start with
+[`docs/agent-integrations.md`](./docs/agent-integrations.md). SimLab now ships
+an adapter layer for framework-neutral tool descriptors and artifact recording,
+plus an optional LangChain/LangGraph bridge behind the `langchain` extra.
 
 If `--agent-import-path` is omitted, the CLI uses the baked‑in reference agent.
 
@@ -513,7 +515,7 @@ simlab env init my-env --template hr
 simlab tools list
 simlab templates list
 simlab tasks list --env my-env
-# Run a task (env must be up: simlab env up my-env, or use --daytona)
+# tasks run auto-starts the environment, runs the agent, and tears down when done
 uv run simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
 
@@ -532,7 +534,7 @@ simlab templates list
 simlab tasks list --env my-env
 ```
 
-To run a task you still need an environment with tool servers: `simlab env up my-env` (local Docker) or `simlab env up my-env --daytona`. Then:
+To run a task, `tasks run` auto-starts the environment (local Docker or `--daytona`):
 
 ```bash
 uv run simlab tasks run --env my-env --task 100_weaver_schedule_phone_screen --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
@@ -564,6 +566,8 @@ simlab --collinear-api-key "<your-collinear-api-key>" <command>
 ---
 
 ## 7) Tear Down
+
+`tasks run` automatically tears down the environment when the run completes. If you started the environment manually with `env up`, or need to tear it down separately:
 
 ```bash
 simlab env down my-env

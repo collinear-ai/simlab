@@ -11,6 +11,7 @@ from simlab.config import resolve_scenario_manager_api_url
 
 COMMAND_IMPORT_PATHS = {
     "auth": "simlab.cli.auth:auth",
+    "eval": "simlab.cli.eval:eval_command",
     "env": "simlab.cli.env:env",
     "tasks": "simlab.cli.tasks:tasks",
     "tasks-gen": "simlab.cli.tasks_gen:tasks_gen",
@@ -19,7 +20,7 @@ COMMAND_IMPORT_PATHS = {
 }
 
 # Commands that do not require a Collinear API key (e.g. auth login/status).
-_AUTH_EXEMPT_COMMANDS = {"auth"}
+AUTH_EXEMPT_COMMANDS = {"auth"}
 
 
 class SimlabGroup(click.Group):
@@ -54,7 +55,7 @@ class SimlabGroup(click.Group):
         cmd_name, command, remaining = super().resolve_command(ctx, args)
         if any(arg in ctx.help_option_names for arg in remaining):
             return cmd_name, command, remaining
-        if cmd_name in _AUTH_EXEMPT_COMMANDS:
+        if cmd_name in AUTH_EXEMPT_COMMANDS:
             return cmd_name, command, remaining
 
         global_cfg = get_global_config_from_ctx(ctx)
@@ -133,3 +134,7 @@ def cli(
         "daytona_api_key": daytona_api_key,
         "environments_dir": environments_dir,
     }
+
+
+if __name__ == "__main__":
+    cli()

@@ -1,0 +1,84 @@
+{
+  "meta": {
+    "task_id": "meeting_prep_packet",
+    "display_name": "Prepare a customer meeting prep packet with public-company context",
+    "difficulty": "medium"
+  },
+  "task": "You are preparing for a customer meeting for `agent@weaverenterprises.com`. Only use emails sent to that mailbox, even if the email tools can see other users. Return exactly two markdown sections: `## Todo List` and `## Meeting Prep Packet`. In `## Todo List`, include at least four concrete bullets formatted like `- [P1] ...`, `- [P2] ...`, or `- [P3] ...`. In `## Meeting Prep Packet`, prepare the packet for the Adobe renewal prep call and use these exact labels: `Meeting:`, `Objective:`, `Agenda:`, `Stakeholders:`, `Risks:`, `Open Questions:`, `Next Step:`, and `Public Company Context:`. In `Public Company Context:`, include a revenue or company scale fact about the counterparty based on available tool output. Base every factual claim on available tool output and ignore unrelated inbox noise.",
+  "apps": [
+    "Email",
+    "SEC EDGAR"
+  ],
+  "tool_servers": [
+    {
+      "name": "email-env",
+      "tool_server_url": "http://email-env:8040"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "nina.patel@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Adobe renewal prep call tomorrow",
+      "body_text": "Please prep me for tomorrow's Adobe renewal call at 11am PT. Their VP of Procurement wants a tighter commercial walk-through, and Dana Ortiz asked whether we can bundle premium support into the renewal. I want a short prep packet before EOD today.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "security@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Adobe security asks still open",
+      "body_text": "Adobe still needs confirmation on SSO rollout timing plus our latest SOC 2 bridge letter. If we do not send both before the call, their security lead said procurement will not finalize paperwork this week.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "legal@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Adobe paper status",
+      "body_text": "The Adobe redlines are down to audit rights and termination assistance. I can join the prep call if needed, but we should decide whether we are conceding on the audit language before tomorrow morning.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "finance@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Adobe pricing guardrails",
+      "body_text": "Finance can support the Adobe renewal if the discount stays under 8 percent and premium support is sold as a separate line item. If sales wants an exception, I need the request by 4pm today.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "nina.patel@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Adobe champion update",
+      "body_text": "Our champion said Adobe wants the renewal signed this month, but internal budget scrutiny is higher than expected. She suggested we lead with deployment wins and then address commercial flexibility near the end of the call.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "customer-success@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Adobe adoption highlights",
+      "body_text": "Customer success can provide a one-slide summary showing 93 percent admin adoption, a 21 percent drop in ticket resolution time, and strong expansion usage in EMEA if that would help the Adobe prep packet.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "ops@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Kitchen restock poll",
+      "body_text": "Please fill out the office kitchen restock poll by next Wednesday so facilities can place the order.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "newsletter@vendor-updates.io",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Weekly SaaS metrics newsletter",
+      "body_text": "This week's industry roundup covers expansion benchmarks, retention trends, and AI adoption statistics across B2B software.",
+      "body_html": null
+    }
+  ],
+  "seed_calendar_events": [],
+  "npcs": [],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "collinear.scenarios.email_ops.verifiers.meeting_prep_packet"
+    }
+  ]
+}

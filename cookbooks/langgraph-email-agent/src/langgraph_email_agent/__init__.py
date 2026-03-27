@@ -1,0 +1,1 @@
+"""LangGraph email agent package."""

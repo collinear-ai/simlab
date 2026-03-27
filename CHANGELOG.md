@@ -2,19 +2,81 @@
 
 All notable changes to the SimLab will be documented in this file.
 
-## [Unreleased]
+## [0.2.0] — 2026-03-26
 
-### Environment Management
+### Added:
 
-- MCP gateway for stdio servers — Command-based MCP servers are wired through
-  a generated gateway container, while URL-based MCP servers are used directly
-- MCP env var mapping — API keys and other command-server secrets can be set in
-  the generated env via raw names or `SIMLAB_MCP_<SERVER>__<KEY>` overrides
+#### New Toolsets
 
-### Task Execution
+- **CRM** — Sales pipeline and account management tool server
+- **ERP** — Enterprise resource planning tool server with seed data support
+- **Web Search** — Internet search powered by Parallel AI
+- **Project Management** — Simulated project management tool
 
-- Direct MCP tool access — The reference agent can discover and call tools
-  from configured MCP servers alongside built-in SimLab tool servers
+#### MCP Support
+
+- **Custom MCP servers at `env init`** — Plug in stdio-based or URL-based MCP
+  servers when creating environments
+- **MCP env var mapping** — API keys and secrets can be set via
+  `SIMLAB_MCP_<SERVER>__<KEY>` overrides
+- **Direct MCP tool access** — The reference agent discovers and calls tools
+  from configured MCP servers alongside built-in tool servers
+
+#### Parallel Execution
+
+- **Parallel Daytona rollouts** — Run multiple rollouts concurrently via
+  ephemeral sandboxes with `--rollout-count` and `--max-parallel`
+
+#### Seeding
+
+- **Seed group channels** — Tasks can provision RocketChat group channels with
+  members and seed messages via `seed_group_channels` in task data
+
+#### Agent Integrations
+
+- **LangGraph** — Built-in adapter for connecting LangGraph agents to SimLab
+  environments
+
+#### Evaluation & Analysis
+
+- **`simlab eval`** — Post-rollout analysis command for reviewing agent
+  performance
+
+#### CLI Improvements
+
+- **Merged `env up` into `tasks run`** — Single command to spin up environment
+  and execute tasks
+- **Cookbook** — Step-by-step recipes for SimLab use cases (e.g., agent
+  baselining, auto-research)
+
+### Changed
+
+- **LiteLLM reference agent** — `ReferenceAgent` is now provider-agnostic via
+  LiteLLM
+- **Daytona snapshot auto-creation** — `env up --daytona` automatically creates
+  the docker-dind snapshot if it doesn't exist
+- **Template consolidation** — Unified HR templates (`hr_recruiting`,
+  `people_mgmt`) into 1 `hr` template
+
+### Fixed
+
+- Scenario names and descriptions truncated in `templates list`
+- Calendar UID lookup failures when seeding generated tasks
+- Docker Compose bind mount resolution when source path contains a symlink
+- `env down --daytona` losing state file on transient API errors
+- Task IDs showing as `…` in `tasks list` table
+- Seeding duplicates when re-running `env seed`
+
+### Agent Integrations
+
+- Shared adapter layer — Added `simlab.agents.adapters` as a framework-neutral
+  tool descriptor and artifact recording layer for external agent integrations
+- LangChain / LangGraph bridge — Added an optional `langchain` dependency extra
+  plus `simlab.agents.adapters.langchain.build_langchain_tools(...)` for
+  adapting SimLab environments into LangChain tools
+- Reduced duplication in agent wiring — The LangGraph cookbook adapter and the
+  built-in reference agent now share the same normalized tool descriptor and
+  dispatch logic
 
 ## [0.1.0] — 2026-03-16
 

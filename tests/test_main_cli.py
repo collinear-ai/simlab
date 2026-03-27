@@ -112,6 +112,7 @@ def test_cli_help_and_version_work_without_api_key(
 @pytest.mark.parametrize(
     "args",
     [
+        ["eval", "--help"],
         ["env", "--help"],
         ["tasks", "--help"],
         ["tasks", "run", "--help"],

@@ -23,10 +23,35 @@ jobs:
       - name: Ruff
         run: uv run --with ruff ruff check .
       - name: Mypy
-        run: uv run --with mypy mypy --ignore-missing-imports src tests
+        run: uv run --with mypy mypy --ignore-missing-imports src tests cookbook
       - name: Pytest
         run: uv run pytest -q
       - name: Build distribution
         run: uvx --from build pyproject-build --sdist --wheel
       - name: Twine check
         run: uvx twine check dist/*
+
+  cookbook-checks:
+    name: Cookbook Checks (${{ matrix.cookbook.name }}, py3.13)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cookbook:
+          - name: langgraph-email-agent
+            path: cookbook/langgraph-email-agent
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - name: Install Python (3.13)
+        run: uv python install 3.13
+      - name: Sync cookbook dependencies
+        working-directory: ${{ matrix.cookbook.path }}
+        run: uv sync --dev --python 3.13
+      - name: Pytest
+        working-directory: ${{ matrix.cookbook.path }}
+        run: uv run pytest -q

@@ -367,6 +367,176 @@ def test_tasks_run_supports_local_bundle_without_template(tmp_path: Path) -> Non
     assert local_verifier_path == bundle_dir / "verifiers" / "generated_task.py"
 
 
+def test_tasks_run_custom_agent_does_not_require_reference_agent_credentials(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "generated-tasks"
+    _write_local_bundle(bundle_dir)
+    env_name = "local-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: local-env\ntemplate: customer_support\ntools: [email]\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+
+    with (
+        patch(
+            "simlab.cli.tasks.get_global_config_from_ctx",
+            return_value=SimpleNamespace(
+                scenario_manager_api_url="https://api.example.com",
+                api_key="api-token",
+                daytona_api_key=None,
+                agent_model=None,
+                agent_provider=None,
+                agent_api_key=None,
+                agent_base_url=None,
+                verifier_model=None,
+                verifier_provider=None,
+                verifier_base_url=None,
+                verifier_api_key=None,
+            ),
+        ),
+        patch(
+            "simlab.cli.tasks.resolve_scenario_manager_api_url",
+            return_value="https://api.example.com",
+        ),
+        patch(
+            "simlab.cli.tasks._resolve_endpoints",
+            return_value=({"email": "http://localhost:8040"}, False),
+        ),
+        patch("simlab.cli.tasks._require_reachable_endpoints"),
+        patch("simlab.cli.tasks._provision_task_calendar_users"),
+        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
+        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
+        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch(
+            "simlab.agents.run_with_agent_contract",
+            return_value=RunArtifacts(
+                task_id="generated-task",
+                task="Complete the generated task.",
+                model="custom-agent",
+                provider="custom-agent",
+                max_steps=5,
+            ),
+        ) as mocked_run_with_agent_contract,
+        patch(
+            "simlab.verifiers.build_verifier_artifacts",
+            return_value=SimpleNamespace(),
+        ),
+        patch("simlab.verifiers.run_verifier") as mocked_run_verifier,
+    ):
+        mocked_run_verifier.return_value = VerifierResult(success=True, message="ok")
+        result = runner.invoke(
+            tasks,
+            [
+                "run",
+                "--env",
+                env_name,
+                "--tasks-dir",
+                str(bundle_dir),
+                "--task",
+                "generated-task",
+                "--agent-import-path",
+                "customer.agent:EmailAgent",
+            ],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    _, run_kwargs = mocked_run_with_agent_contract.call_args
+    assert run_kwargs["model"] == "custom-agent"
+    assert run_kwargs["provider"] == "custom-agent"
+
+
+def test_tasks_run_custom_agent_ignores_global_reference_agent_metadata(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "generated-tasks"
+    _write_local_bundle(bundle_dir)
+    env_name = "local-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: local-env\ntemplate: customer_support\ntools: [email]\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+
+    with (
+        patch(
+            "simlab.cli.tasks.get_global_config_from_ctx",
+            return_value=SimpleNamespace(
+                scenario_manager_api_url="https://api.example.com",
+                api_key="api-token",
+                daytona_api_key=None,
+                agent_model="claude-3-5-sonnet",
+                agent_provider="anthropic",
+                agent_api_key=None,
+                agent_base_url=None,
+                verifier_model=None,
+                verifier_provider=None,
+                verifier_base_url=None,
+                verifier_api_key=None,
+            ),
+        ),
+        patch(
+            "simlab.cli.tasks.resolve_scenario_manager_api_url",
+            return_value="https://api.example.com",
+        ),
+        patch(
+            "simlab.cli.tasks._resolve_endpoints",
+            return_value=({"email": "http://localhost:8040"}, False),
+        ),
+        patch("simlab.cli.tasks._require_reachable_endpoints"),
+        patch("simlab.cli.tasks._provision_task_calendar_users"),
+        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
+        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
+        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch(
+            "simlab.agents.run_with_agent_contract",
+            return_value=RunArtifacts(
+                task_id="generated-task",
+                task="Complete the generated task.",
+                model="custom-agent",
+                provider="custom-agent",
+                max_steps=5,
+            ),
+        ) as mocked_run_with_agent_contract,
+        patch(
+            "simlab.verifiers.build_verifier_artifacts",
+            return_value=SimpleNamespace(),
+        ),
+        patch("simlab.verifiers.run_verifier") as mocked_run_verifier,
+    ):
+        mocked_run_verifier.return_value = VerifierResult(success=True, message="ok")
+        result = runner.invoke(
+            tasks,
+            [
+                "run",
+                "--env",
+                env_name,
+                "--tasks-dir",
+                str(bundle_dir),
+                "--task",
+                "generated-task",
+                "--agent-import-path",
+                "customer.agent:EmailAgent",
+            ],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    _, run_kwargs = mocked_run_with_agent_contract.call_args
+    assert run_kwargs["model"] == "custom-agent"
+    assert run_kwargs["provider"] == "custom-agent"
+
+
 def test_tasks_validate_emits_telemetry(tmp_path: Path) -> None:
     bundle_dir = tmp_path / "generated-tasks"
     _write_local_bundle(bundle_dir)
@@ -398,3 +568,97 @@ def test_load_skills_markdown_prefers_inline_config_guidance() -> None:
     )
 
     assert loaded == "# Inline Guidance\nUse the environment carefully."
+
+
+def test_tasks_run_passes_mcp_verifier_tool_urls_when_http_tool_servers_are_absent(
+    tmp_path: Path,
+) -> None:
+    bundle_dir = tmp_path / "generated-tasks"
+    _write_local_bundle(bundle_dir, include_verifier=True)
+    task_path = bundle_dir / "tasks" / "generated-task.json"
+    task = json.loads(task_path.read_text(encoding="utf-8"))
+    task["tool_servers"] = []
+    task_path.write_text(json.dumps(task), encoding="utf-8")
+
+    env_name = "local-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: local-env\ntemplate: customer_support\ntools: []\n",
+        encoding="utf-8",
+    )
+
+    fake_mcp_client = SimpleNamespace(_url="http://localhost:8091/mcp")
+    runner = CliRunner()
+
+    with (
+        patch(
+            "simlab.cli.tasks.get_global_config_from_ctx",
+            return_value=SimpleNamespace(
+                scenario_manager_api_url="https://api.example.com",
+                api_key="api-token",
+                daytona_api_key=None,
+                agent_model=None,
+                agent_provider=None,
+                agent_api_key=None,
+                agent_base_url=None,
+                verifier_model=None,
+                verifier_provider=None,
+                verifier_base_url=None,
+                verifier_api_key=None,
+            ),
+        ),
+        patch(
+            "simlab.cli.tasks.resolve_scenario_manager_api_url",
+            return_value="https://api.example.com",
+        ),
+        patch("simlab.cli.tasks._resolve_endpoints", return_value=({}, False)),
+        patch("simlab.cli.tasks._provision_task_calendar_users"),
+        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
+        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch(
+            "simlab.cli.tasks.load_mcp_servers_from_env_dir",
+            return_value={"mcpServers": {"demo": {"url": "http://localhost:8091/mcp"}}},
+        ),
+        patch("simlab.cli.tasks._build_mcp_clients", return_value={"demo": fake_mcp_client}),
+        patch("simlab.cli.tasks._require_mcp_tools_available"),
+        patch(
+            "simlab.agents.run_with_agent_contract",
+            return_value=RunArtifacts(
+                task_id="generated-task",
+                task="Complete the generated task.",
+                model="gpt-5.2",
+                provider="openai",
+                max_steps=5,
+            ),
+        ),
+        patch(
+            "simlab.verifiers.build_verifier_artifacts",
+            return_value=SimpleNamespace(),
+        ) as mocked_build_verifier_artifacts,
+        patch(
+            "simlab.verifiers.run_verifier",
+            return_value=VerifierResult(success=True, message="ok"),
+        ),
+    ):
+        result = runner.invoke(
+            tasks,
+            [
+                "run",
+                "--env",
+                env_name,
+                "--tasks-dir",
+                str(bundle_dir),
+                "--task",
+                "generated-task",
+                "--agent-model",
+                "gpt-5.2",
+                "--agent-api-key",
+                "openai-key",
+            ],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    _, _, verifier_tool_servers = mocked_build_verifier_artifacts.call_args.args
+    assert verifier_tool_servers == {"demo": "http://localhost:8091"}

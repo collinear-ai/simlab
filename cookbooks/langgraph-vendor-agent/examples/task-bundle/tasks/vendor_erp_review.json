@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "task_id": "vendor_erp_review",
+    "display_name": "Review vendor performance using emails and ERP data",
+    "difficulty": "medium"
+  },
+  "task": "You are a procurement analyst at Weaver Enterprises. Read the inbox at `agent@weaverenterprises.com` for vendor issues. Then use the ERP system to look up suppliers, check for overdue invoices, and review recent purchase orders. Produce exactly two markdown sections: `## Vendor Performance Report` and `## Action Items`. In `## Vendor Performance Report`, include a subsection for each vendor mentioned in the emails with these labeled fields: `Supplier:`, `Supplier ID:` (from ERP), `Categories:` (from ERP), `Issue Summary:` (from emails), and `Risk Rating:` (High/Medium/Low). In `## Action Items`, include at least 4 prioritized bullets formatted as `- [P1] ...`, `- [P2] ...`, or `- [P3] ...`. Base every claim on tool output from the email inbox and ERP system.",
+  "apps": [
+    "Email",
+    "ERP"
+  ],
+  "tool_servers": [
+    {
+      "name": "email-env",
+      "tool_server_url": "http://email-env:8040"
+    },
+    {
+      "name": "erp-env",
+      "tool_server_url": "http://erp-env:8100"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "warehouse@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "NovaTech Components shipment delayed",
+      "body_text": "The NovaTech Components order for PowerEdge R740 servers is 2 weeks late. This is the third late delivery this quarter. Our server buildout for Brightpath Solutions is blocked. NovaTech blamed a component shortage but gave no revised ETA. We need to escalate and check if there are open POs in the ERP that are also overdue.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "finance@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "GlobalParts Direct payment overdue",
+      "body_text": "We owe GlobalParts Direct on overdue invoices. Please check the ERP for exact amounts and due dates. They handle our storage equipment and have been reliable, but we are late on payment which risks the relationship. Recommend we process payment this week.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "ops@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Meridian Supplies quality problem",
+      "body_text": "We received a batch of peripherals from Meridian Supplies and 24% failed QA. The defective units need to be returned. Please check the ERP for their supplier profile and recent order history so we can document this for the quarterly vendor review.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "cto@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Quarterly vendor review",
+      "body_text": "Please prepare a vendor performance report covering NovaTech Components, GlobalParts Direct, and Meridian Supplies. Pull their details from the ERP system and cross-reference with the issues reported via email. We need this for the board meeting on Thursday.",
+      "body_html": null
+    }
+  ],
+  "seed_calendar_events": [],
+  "npcs": [],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "collinear.scenarios.email_ops.verifiers.vendor_erp_review"
+    }
+  ]
+}

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +10,7 @@ from typing import Any
 
 from simlab.agents.base import BaseEnvironment
 from simlab.agents.base import RunArtifacts
+from simlab.agents.base import _run_async_compat
 from simlab.agents.loader import load_agent_class
 from simlab.agents.reference_agent import ReferenceAgent
 
@@ -27,8 +27,8 @@ def _format_exception(exc: BaseException) -> str:
 
 def _run_maybe_async(callable_obj: Any, *args: Any, **kwargs: Any) -> Any:
     result = callable_obj(*args, **kwargs)
-    if asyncio.iscoroutine(result):
-        return asyncio.run(result)
+    if inspect.iscoroutine(result):
+        return _run_async_compat(result)
     return result
 
 
@@ -45,7 +45,6 @@ def run_with_agent_contract(
     api_key: str | None = None,
     base_url: str | None = None,
     stop_event: threading.Event | None = None,
-    mcp_clients: dict[str, Any] | None = None,
 ) -> RunArtifacts:
     """Execute setup() then run() and always return populated artifacts."""
     artifacts = RunArtifacts(
@@ -55,8 +54,6 @@ def run_with_agent_contract(
         provider=provider,
         max_steps=max_steps,
     )
-    if mcp_clients:
-        artifacts.metadata["mcp_clients"] = mcp_clients
     if agent_import_path:
         agent_cls = load_agent_class(agent_import_path)
         agent = agent_cls()

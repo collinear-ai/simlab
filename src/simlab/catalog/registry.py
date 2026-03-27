@@ -19,6 +19,15 @@ class ExposedPort(BaseModel):
     description: str = ""
 
 
+class EnvVarRequirement(BaseModel):
+    """A required environment variable with an optional user-facing description."""
+
+    model_config = {"extra": "forbid"}
+
+    name: str
+    description: str = ""
+
+
 class ServiceDefinition(BaseModel):
     """A single docker-compose service."""
 
@@ -54,7 +63,7 @@ class ToolDefinition(BaseModel):
     tool_server_port: int | None = None
     tool_server_url: str | None = None
     exposed_ports: list[ExposedPort] = Field(default_factory=list)
-    required_env_vars: list[str] = Field(default_factory=list)
+    required_env_vars: list[EnvVarRequirement] = Field(default_factory=list)
     services: dict[str, ServiceDefinition] = Field(default_factory=dict)
     preseed_services: dict[str, ServiceDefinition] = Field(default_factory=dict)
     seed_services: dict[str, ServiceDefinition] = Field(default_factory=dict)
@@ -87,6 +96,19 @@ class ToolDefinition(BaseModel):
         return self
 
 
+def _parse_env_var_requirements(raw: list[str | dict[str, str]]) -> list[EnvVarRequirement]:
+    """Parse mixed-format required_env_vars: plain strings or {name, description} dicts."""
+    result: list[EnvVarRequirement] = []
+    for item in raw:
+        if isinstance(item, str):
+            result.append(EnvVarRequirement(name=item))
+        elif isinstance(item, dict):
+            result.append(EnvVarRequirement(**item))
+        else:
+            raise TypeError(f"required_env_vars item must be a string or dict, got {type(item)}")
+    return result
+
+
 def _parse_tool_yaml(data: dict[str, Any]) -> ToolDefinition:
     """Parse a raw YAML dict into a ToolDefinition."""
     services = {}
@@ -114,7 +136,7 @@ def _parse_tool_yaml(data: dict[str, Any]) -> ToolDefinition:
         tool_server_port=data.get("tool_server_port"),
         tool_server_url=data.get("tool_server_url"),
         exposed_ports=[ExposedPort(**ep) for ep in data.get("exposed_ports", [])],
-        required_env_vars=data.get("required_env_vars", []),
+        required_env_vars=_parse_env_var_requirements(data.get("required_env_vars", [])),
         services=services,
         preseed_services=preseed_services,
         seed_services=seed_services,

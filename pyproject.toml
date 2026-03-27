@@ -42,6 +42,10 @@ Changelog = "https://github.com/collinear-ai/simlab/blob/main/CHANGELOG.md"
 daytona = [
     "daytona>=0.149.0",
 ]
+langchain = [
+    "langchain-core>=0.3.0",
+    "langgraph>=0.3.0",
+]
 
 [project.scripts]
 simlab = "simlab.cli.main:cli"

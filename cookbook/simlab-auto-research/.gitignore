@@ -1,0 +1,7 @@
+autoresearch-reference/
+output/
+results.tsv
+run.log
+.venv/
+__pycache__/
+*.egg-info/

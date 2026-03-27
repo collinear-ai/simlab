@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "task_id": "procurement_audit",
+    "display_name": "Cross-reference emails with ERP to audit procurement issues",
+    "difficulty": "hard"
+  },
+  "task": "You are a procurement auditor at Weaver Enterprises. Read the inbox at `agent@weaverenterprises.com` for escalation emails, then use the ERP system to verify every claim by looking up the specific orders, invoices, products, and suppliers mentioned. Produce exactly three markdown sections: `## Findings`, `## Financial Summary`, and `## Remediation Plan`.\n\nIn `## Findings`, list each issue as a numbered item with these exact fields:\n- `Order:` (the order ID from ERP, e.g. ORD-3101)\n- `Customer:` (customer name from ERP)\n- `Supplier:` (supplier name and ID from ERP)\n- `Product:` (product name and SKU from ERP)\n- `Invoice Status:` (from ERP — paid, unpaid, or overdue)\n- `Finding:` (one sentence describing the discrepancy or issue)\n\nIn `## Financial Summary`, include:\n- `Total Overdue Amount:` (sum of overdue invoice amounts from ERP)\n- `Total At-Risk Revenue:` (sum of order values for orders with issues)\n- `Suppliers With Open POs:` (list supplier names with submitted or draft POs)\n\nIn `## Remediation Plan`, include at least 5 prioritized bullets formatted as `- [P1] ...`, `- [P2] ...`, or `- [P3] ...`.\n\nBase every number and fact on actual ERP tool output. Do not estimate or guess.",
+  "apps": [
+    "Email",
+    "ERP"
+  ],
+  "tool_servers": [
+    {
+      "name": "email-env",
+      "tool_server_url": "http://email-env:8040"
+    },
+    {
+      "name": "erp-env",
+      "tool_server_url": "http://erp-env:8100"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "cs@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "URGENT: Pinnacle Corp order ORD-3101 invoice overdue",
+      "body_text": "Pinnacle Corp is complaining that their order ORD-3101 was confirmed weeks ago but the invoice INV-5002 is past due date and still unpaid on our side. They ordered monitors and docks. Please verify in the ERP whether INV-5002 is actually overdue and confirm the exact amount. Also check if the products are still in stock because they are threatening to cancel if we cannot fulfill soon.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "warehouse@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Cascade Analytics invoice INV-5006 still showing overdue",
+      "body_text": "Cascade Analytics order ORD-3106 was delivered months ago but invoice INV-5006 is still showing as overdue in the system. This is a NetVault NAS unit. The amount is not huge but it has been overdue since February. Finance needs to either collect payment or write it off. Please pull the exact figures from ERP.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "procurement@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "NovaTech PO-7004 and Meridian PO-7002 status check",
+      "body_text": "We submitted PO-7004 to NovaTech for PowerEdge E450 edge servers and PO-7002 to Meridian for monitors and cables. Both have been in submitted status for over a week with no acknowledgment. Please verify the PO details, check what products and quantities were ordered, and confirm the supplier contact info so I can follow up. Also check if Apex has any open POs — I think we have a draft for the SecureGuard licenses.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "cfo@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Board audit prep — need exact numbers",
+      "body_text": "For the board meeting I need exact figures: total overdue invoice amount across all customers, total revenue at risk from orders that have issues (ORD-3101 and ORD-3106 specifically), and a list of which suppliers have open purchase orders that are not yet received. Pull everything from the ERP — do not estimate. The board will verify these numbers.",
+      "body_html": null
+    }
+  ],
+  "seed_calendar_events": [],
+  "npcs": [],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "collinear.scenarios.email_ops.verifiers.procurement_audit"
+    }
+  ]
+}

@@ -504,6 +504,459 @@ class TestStopEventCancelsAgent:
 
 
 # ---------------------------------------------------------------------------
+# MCP support in parallel Daytona rollouts
+# ---------------------------------------------------------------------------
+
+
+class TestParallelDaytonaMcpSupport:
+    """Verify MCP-backed tasks work in the parallel Daytona path."""
+
+    def test_run_single_rollout_allows_mcp_only_url_mcp_task_without_endpoint_checks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = ParallelDaytonaOrchestrator(rollout_count=1, max_parallel=1)
+        compose_dir = tmp_path / "compose"
+        compose_dir.mkdir()
+        env_dir = tmp_path / "env"
+        env_dir.mkdir()
+        config_path = env_dir / "env.yaml"
+        config_path.write_text("name: test\n")
+
+        fake_daytona = MagicMock()
+        fake_sandbox = MagicMock()
+        fake_sandbox.id = "sbx-1"
+        fake_daytona.create.return_value = fake_sandbox
+        demo_client = object()
+
+        captured: dict[str, object] = {}
+
+        class FakeEnvironment:
+            def __init__(
+                self,
+                *,
+                tool_servers: dict[str, str],
+                mcp_clients: dict[str, object] | None = None,
+            ) -> None:
+                captured["tool_servers"] = tool_servers
+                captured["mcp_clients"] = mcp_clients
+
+        def fake_run_with_agent_contract(**kwargs) -> RunArtifacts:
+            captured["environment"] = kwargs["environment"]
+            return RunArtifacts(
+                task_id="task-1",
+                task="do task",
+                model="gpt-test",
+                provider="openai",
+                max_steps=5,
+                final_observation="done",
+            )
+
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._get_daytona", lambda _key: fake_daytona
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.CreateSandboxFromSnapshotParams",
+            lambda **kwargs: kwargs,
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.setup_sandbox_environment",
+            lambda *args, **kwargs: {},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._require_reachable_endpoints",
+            lambda **kwargs: pytest.fail(
+                "MCP-only URL-based rollout should not check HTTP endpoints"
+            ),
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.load_mcp_servers_from_env_dir",
+            lambda _env_dir: {"mcpServers": {"demo": {"url": "http://mcp.example/mcp"}}},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_mcp_clients",
+            lambda _config, _endpoints: {"demo": demo_client},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._require_mcp_tools_available",
+            lambda clients: captured.setdefault("validated_clients", clients),
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.get_agent_runtime_helpers",
+            lambda: (FakeEnvironment, fake_run_with_agent_contract),
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_provision_group_channels",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_provision_calendar_accounts",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_run_verifiers",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._load_skills_markdown",
+            lambda **kwargs: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_skills_guidance_section",
+            lambda _skills: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_services_available_section",
+            lambda *args, **kwargs: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.teardown_sandbox", lambda *args, **kwargs: True
+        )
+
+        result = orch._run_single_rollout(
+            0,
+            task_data={"task": "do task", "meta": {"task_id": "task-1"}, "tool_servers": []},
+            profiles={},
+            compose_dir=compose_dir,
+            tool_ports={},
+            extra_tool_urls={},
+            preseed_svc_names=None,
+            seed_svc_names=None,
+            config=MagicMock(),
+            config_path=str(config_path),
+            model="gpt-test",
+            provider="openai",
+            api_key="sk-test",
+            base_url=None,
+            max_steps=5,
+            agent_import_path=None,
+            agent_timeout_seconds=10.0,
+            no_seed=True,
+            bundle_dir=None,
+            global_cfg=MagicMock(),
+            backend_id=None,
+            base_url_api="http://example.invalid",
+            scenario_manager_api_key=None,
+            run_dir=tmp_path / "output",
+        )
+
+        assert result.error is None
+        assert captured["tool_servers"] == {}
+        assert captured["validated_clients"] == {"demo": demo_client}
+        assert captured["mcp_clients"] == {"demo": demo_client}
+
+    def test_run_single_rollout_adds_daytona_gateway_url_for_command_mcp_servers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = ParallelDaytonaOrchestrator(rollout_count=1, max_parallel=1)
+        compose_dir = tmp_path / "compose"
+        compose_dir.mkdir()
+        env_dir = tmp_path / "env"
+        env_dir.mkdir()
+        config_path = env_dir / "env.yaml"
+        config_path.write_text("name: test\n")
+
+        fake_daytona = MagicMock()
+        fake_sandbox = MagicMock()
+        fake_sandbox.id = "sbx-1"
+        fake_daytona.create.return_value = fake_sandbox
+        fake_sandbox.get_preview_link.return_value = MagicMock(
+            url="https://8081-x.daytonaproxy.net"
+        )
+        captured: dict[str, object] = {}
+        gateway_checks = {"count": 0}
+
+        class FakeMCPClient:
+            def __init__(self) -> None:
+                self._url = "https://8081-x.daytonaproxy.net/mcp"
+
+            async def alist_tools(self) -> list[dict[str, object]]:
+                gateway_checks["count"] += 1
+                if gateway_checks["count"] < 3:
+                    raise RuntimeError("gateway not ready")
+                return [{"name": "ping", "description": "Ping", "input_schema": {}}]
+
+        demo_client = FakeMCPClient()
+
+        class FakeEnvironment:
+            def __init__(
+                self,
+                *,
+                tool_servers: dict[str, str],
+                mcp_clients: dict[str, object] | None = None,
+            ) -> None:
+                captured["tool_servers"] = tool_servers
+                captured["mcp_clients"] = mcp_clients
+
+        def fake_run_with_agent_contract(**kwargs) -> RunArtifacts:
+            _ = kwargs
+            return RunArtifacts(
+                task_id="task-1",
+                task="do task",
+                model="gpt-test",
+                provider="openai",
+                max_steps=5,
+                final_observation="done",
+            )
+
+        def fake_build_mcp_clients(_config: dict[str, object] | None, endpoints: dict[str, str]):
+            captured["build_endpoints"] = dict(endpoints)
+            return {"demo": demo_client}
+
+        def fake_require_mcp_tools_available(clients: dict[str, object]) -> None:
+            captured["validation_after_gateway_checks"] = gateway_checks["count"]
+            captured["validated_clients"] = clients
+
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._get_daytona", lambda _key: fake_daytona
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.CreateSandboxFromSnapshotParams",
+            lambda **kwargs: kwargs,
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.setup_sandbox_environment",
+            lambda *args, **kwargs: {},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.load_mcp_servers_from_env_dir",
+            lambda _env_dir: {"mcpServers": {"demo": {"command": "uvx", "args": ["demo-mcp"]}}},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.get_mcp_gateway_host_port",
+            lambda _env_dir: 8081,
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_mcp_clients",
+            fake_build_mcp_clients,
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._require_mcp_tools_available",
+            fake_require_mcp_tools_available,
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._require_reachable_endpoints",
+            lambda **kwargs: captured.setdefault("reachable_endpoints", kwargs["endpoints"]),
+        )
+        monkeypatch.setattr("simlab.runtime.parallel_daytona.time.sleep", lambda _s: None)
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.get_agent_runtime_helpers",
+            lambda: (FakeEnvironment, fake_run_with_agent_contract),
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_provision_group_channels",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_provision_calendar_accounts",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_run_verifiers",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._load_skills_markdown",
+            lambda **kwargs: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_skills_guidance_section",
+            lambda _skills: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_services_available_section",
+            lambda *args, **kwargs: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.teardown_sandbox",
+            lambda *args, **kwargs: True,
+        )
+
+        result = orch._run_single_rollout(
+            0,
+            task_data={"task": "do task", "meta": {"task_id": "task-1"}, "tool_servers": []},
+            profiles={},
+            compose_dir=compose_dir,
+            tool_ports={},
+            extra_tool_urls={},
+            preseed_svc_names=None,
+            seed_svc_names=None,
+            config=MagicMock(),
+            config_path=str(config_path),
+            model="gpt-test",
+            provider="openai",
+            api_key="sk-test",
+            base_url=None,
+            max_steps=5,
+            agent_import_path=None,
+            agent_timeout_seconds=10.0,
+            no_seed=True,
+            bundle_dir=None,
+            global_cfg=MagicMock(),
+            backend_id=None,
+            base_url_api="http://example.invalid",
+            scenario_manager_api_key=None,
+            run_dir=tmp_path / "output",
+        )
+
+        expected_gateway = {
+            tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "https://8081-x.daytonaproxy.net/mcp"
+        }
+        assert result.error is None
+        assert captured["reachable_endpoints"] == expected_gateway
+        assert captured["build_endpoints"] == expected_gateway
+        assert captured["validation_after_gateway_checks"] == 3
+        assert captured["validated_clients"] == {"demo": demo_client}
+        assert captured["mcp_clients"] == {"demo": demo_client}
+
+    def test_run_single_rollout_passes_mcp_verifier_tool_urls_when_http_tool_servers_are_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = ParallelDaytonaOrchestrator(rollout_count=1, max_parallel=1)
+        compose_dir = tmp_path / "compose"
+        compose_dir.mkdir()
+        env_dir = tmp_path / "env"
+        env_dir.mkdir()
+        config_path = env_dir / "env.yaml"
+        config_path.write_text("name: test\n")
+
+        fake_daytona = MagicMock()
+        fake_sandbox = MagicMock()
+        fake_sandbox.id = "sbx-1"
+        fake_daytona.create.return_value = fake_sandbox
+        captured: dict[str, object] = {}
+
+        class FakeMCPClient:
+            def __init__(self) -> None:
+                self._url = "http://mcp.example/mcp"
+
+            async def alist_tools(self) -> list[dict[str, object]]:
+                return [{"name": "ping", "description": "Ping", "input_schema": {}}]
+
+        demo_client = FakeMCPClient()
+
+        class FakeEnvironment:
+            def __init__(
+                self,
+                *,
+                tool_servers: dict[str, str],
+                mcp_clients: dict[str, object] | None = None,
+            ) -> None:
+                captured["tool_servers"] = tool_servers
+                captured["mcp_clients"] = mcp_clients
+
+        def fake_run_with_agent_contract(**kwargs) -> RunArtifacts:
+            _ = kwargs
+            return RunArtifacts(
+                task_id="task-1",
+                task="do task",
+                model="gpt-test",
+                provider="openai",
+                max_steps=5,
+                final_observation="done",
+            )
+
+        def fake_run_verifiers(_self: object, **kwargs):
+            captured["verifier_tool_servers"] = kwargs["tool_servers"]
+            return (None, None)
+
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._get_daytona", lambda _key: fake_daytona
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.CreateSandboxFromSnapshotParams",
+            lambda **kwargs: kwargs,
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.setup_sandbox_environment",
+            lambda *args, **kwargs: {},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.load_mcp_servers_from_env_dir",
+            lambda _env_dir: {"mcpServers": {"demo": {"url": "http://mcp.example/mcp"}}},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_mcp_clients",
+            lambda _config, _endpoints: {"demo": demo_client},
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._require_mcp_tools_available",
+            lambda clients: captured.setdefault("validated_clients", clients),
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.get_agent_runtime_helpers",
+            lambda: (FakeEnvironment, fake_run_with_agent_contract),
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_provision_group_channels",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            ParallelDaytonaOrchestrator,
+            "_provision_calendar_accounts",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(ParallelDaytonaOrchestrator, "_run_verifiers", fake_run_verifiers)
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._load_skills_markdown",
+            lambda **kwargs: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_skills_guidance_section",
+            lambda _skills: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona._build_services_available_section",
+            lambda *args, **kwargs: "",
+        )
+        monkeypatch.setattr(
+            "simlab.runtime.parallel_daytona.teardown_sandbox", lambda *args, **kwargs: True
+        )
+
+        result = orch._run_single_rollout(
+            0,
+            task_data={
+                "task": "do task",
+                "meta": {"task_id": "task-1"},
+                "tool_servers": [],
+                "verifiers": [{"func": "python_module", "module": "demo.verifier"}],
+            },
+            profiles={},
+            compose_dir=compose_dir,
+            tool_ports={},
+            extra_tool_urls={},
+            preseed_svc_names=None,
+            seed_svc_names=None,
+            config=MagicMock(),
+            config_path=str(config_path),
+            model="gpt-test",
+            provider="openai",
+            api_key="sk-test",
+            base_url=None,
+            max_steps=5,
+            agent_import_path=None,
+            agent_timeout_seconds=10.0,
+            no_seed=True,
+            bundle_dir=None,
+            global_cfg=MagicMock(),
+            backend_id=None,
+            base_url_api="http://example.invalid",
+            scenario_manager_api_key=None,
+            run_dir=tmp_path / "output",
+        )
+
+        assert result.error is None
+        assert captured["tool_servers"] == {}
+        assert captured["verifier_tool_servers"] == {"demo": "http://mcp.example"}
+
+
+# ---------------------------------------------------------------------------
 # DaytonaRunner.down() transient vs not-found errors
 # ---------------------------------------------------------------------------
 
@@ -619,7 +1072,10 @@ class TestProvisionGroupChannels:
         ) -> None:
             sandbox_calls.append(env_overrides or {})
 
-        monkeypatch.setattr("simlab.cli.env._get_profiled_service_names", fake_profiled_services)
+        monkeypatch.setattr(
+            "simlab.runtime.env_lifecycle._get_profiled_service_names",
+            fake_profiled_services,
+        )
         monkeypatch.setattr(
             "simlab.runtime.parallel_daytona._run_profiled_services_in_sandbox",
             fake_run_in_sandbox,

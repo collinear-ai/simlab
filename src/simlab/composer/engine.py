@@ -105,6 +105,7 @@ class ComposeEngine:
         volumes: dict[str, dict] = {}
         claimed_ports: dict[int, str] = {}
         env_vars: dict[str, str] = {}
+        env_var_descriptions: dict[str, str] = {}
         tool_endpoints: dict[str, str] = {}
         preseed_service_names: list[str] = []
         seed_service_names: list[str] = []
@@ -117,7 +118,7 @@ class ComposeEngine:
                 continue
             self._collect_services(tool, config, services, claimed_ports)
             self._collect_volumes(tool, volumes)
-            self._collect_env_vars(tool, env_vars)
+            self._collect_env_vars(tool, env_vars, env_var_descriptions)
             tool_endpoints[tool.name] = f"http://localhost:{tool.tool_server_port}/tools"
             self._collect_profiled_services(
                 tool_name=tool.name,
@@ -198,7 +199,7 @@ class ComposeEngine:
             compose["volumes"] = volumes
 
         compose_yaml = yaml.dump(compose, default_flow_style=False, sort_keys=False, width=10000)
-        env_file = self._generate_env_file(env_vars)
+        env_file = self._generate_env_file(env_vars, env_var_descriptions)
         scenario_guidance_md = self._resolve_scenario_guidance(config, resolved_config_dir)
 
         # Detect whether any service has a build context
@@ -471,9 +472,16 @@ class ComposeEngine:
                 vol["driver"] = vol_def.driver
             volumes[vol_name] = vol
 
-    def _collect_env_vars(self, tool: ToolDefinition, env_vars: dict[str, str]) -> None:
-        for var in tool.required_env_vars:
-            env_vars[var] = ""
+    def _collect_env_vars(
+        self,
+        tool: ToolDefinition,
+        env_vars: dict[str, str],
+        env_var_descriptions: dict[str, str],
+    ) -> None:
+        for req in tool.required_env_vars:
+            env_vars[req.name] = ""
+            if req.description:
+                env_var_descriptions[req.name] = req.description
         # Scan service environments for ${VAR} references
         for svc_def in tool.services.values():
             for val in svc_def.environment.values():
@@ -499,11 +507,19 @@ class ComposeEngine:
         claimed_ports[actual] = svc_name
         return actual
 
-    def _generate_env_file(self, env_vars: dict[str, str]) -> str:
+    def _generate_env_file(
+        self,
+        env_vars: dict[str, str],
+        env_var_descriptions: dict[str, str] | None = None,
+    ) -> str:
         if not env_vars:
             return "# No environment variables required\n"
+        descriptions = env_var_descriptions or {}
         lines = ["# Fill in required environment variables", ""]
         for var, default in sorted(env_vars.items()):
+            desc = descriptions.get(var)
+            if desc:
+                lines.append(f"# {desc}")
             lines.append(f"{var}={default}")
         lines.append("")
         return "\n".join(lines)

@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 from simlab.cli import tasks as tasks_cli
+from simlab.runtime.daytona_runner import DaytonaNotFoundError
+from simlab.runtime.env_lifecycle import ensure_daytona_sandbox_ready
+from simlab.runtime.env_lifecycle import ensure_env_started_daytona
+from simlab.runtime.env_lifecycle import ensure_env_started_local
+from simlab.runtime.env_lifecycle import env_down_daytona
+from simlab.runtime.env_lifecycle import env_down_local
+from simlab.runtime.env_lifecycle import env_has_local_services
+from simlab.runtime.env_lifecycle import is_env_running_daytona
+from simlab.runtime.env_lifecycle import is_env_running_local
+from simlab.runtime.env_lifecycle import run_env_seed_daytona
+from simlab.runtime.env_lifecycle import run_env_seed_local
 
 
 def test_effective_tool_servers_merges_environment_endpoints() -> None:
@@ -82,6 +95,64 @@ def test_rewrite_tool_server_urls_maps_erp_service_name() -> None:
 
     assert servers["erp-env"] == "https://erp.preview"
     assert servers["email-env"] == "https://email.preview"
+
+
+def test_needed_task_endpoints_only_include_seed_tools_for_seeding() -> None:
+    task = {
+        "apps": ["calendar"],
+        "tool_servers": [
+            {"name": "coding-env", "tool_server_url": "http://legacy:8020"},
+            {"name": "crm-env", "tool_server_url": "http://legacy:8045"},
+        ],
+        "seed_emails": [{"subject": "hello"}],
+        "seed_calendar_events": [],
+        "npcs": [{"id": "patricia_lee"}],
+    }
+    endpoints = {
+        "calendar": "http://localhost:8050",
+        "coding": "http://localhost:8020",
+        "crm": "http://localhost:8045",
+        "email": "http://localhost:8040",
+    }
+
+    assert tasks_cli.needed_task_endpoints(
+        task,
+        endpoints,
+        include_tool_servers=False,
+    ) == {
+        "calendar": "http://localhost:8050",
+        "email": "http://localhost:8040",
+    }
+
+
+def test_needed_task_endpoints_include_task_servers_for_run() -> None:
+    task = {
+        "apps": ["calendar"],
+        "tool_servers": [
+            {"name": "coding-env", "tool_server_url": "http://legacy:8020"},
+            {"name": "crm-env", "tool_server_url": "http://legacy:8045"},
+        ],
+        "seed_emails": [{"subject": "hello"}],
+        "seed_calendar_events": [],
+        "npcs": [{"id": "patricia_lee"}],
+    }
+    endpoints = {
+        "calendar": "http://localhost:8050",
+        "coding": "http://localhost:8020",
+        "crm": "http://localhost:8045",
+        "email": "http://localhost:8040",
+    }
+
+    assert tasks_cli.needed_task_endpoints(
+        task,
+        endpoints,
+        include_tool_servers=True,
+    ) == {
+        "calendar": "http://localhost:8050",
+        "coding": "http://localhost:8020",
+        "crm": "http://localhost:8045",
+        "email": "http://localhost:8040",
+    }
 
 
 def test_seed_task_data_retries_failed_calls(monkeypatch) -> None:  # noqa: ANN001
@@ -181,8 +252,8 @@ def test_provision_task_calendar_users_only_runs_calendar_helpers(
     ) -> None:
         calls.append((profile, svc_names, env_overrides or {}))
 
-    monkeypatch.setattr("simlab.cli.env._get_profiled_service_names", fake_services)
-    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._get_profiled_service_names", fake_services)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._run_profiled_services_local", fake_run)
 
     tasks_cli._provision_task_calendar_users(
         task,
@@ -231,8 +302,8 @@ def test_run_env_seed_services_runs_seed_profile_for_local_env(
     ) -> None:
         calls.append((svc_names, profile, env_overrides))
 
-    monkeypatch.setattr("simlab.cli.env._get_profiled_service_names", fake_services)
-    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._get_profiled_service_names", fake_services)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._run_profiled_services_local", fake_run)
 
     tasks_cli.run_env_seed_services(
         config,
@@ -638,12 +709,118 @@ def test_get_daytona_endpoints_prompts_and_resumes(monkeypatch) -> None:  # noqa
                 return SimpleNamespace(tool_server_port=8040, tool_server_url=None)
             return None
 
+    restart_calls: list[list[str]] = []
+
+    class FakeRunner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def restart_sandbox_services(
+            self,
+            sandbox: object,
+            *,
+            preseed_svc_names: list[str] | None = None,
+            log_prefix: str = "",
+        ) -> None:
+            _ = sandbox, log_prefix
+            restart_calls.append(list(preseed_svc_names or []))
+
     monkeypatch.setattr(tasks_cli.click, "confirm", lambda *_a, **_k: True)
     monkeypatch.setattr(tasks_cli.time, "sleep", lambda _s: None)
     monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
+    monkeypatch.setattr(tasks_cli, "get_daytona_runner_class", lambda: FakeRunner)
+    monkeypatch.setattr(
+        tasks_cli,
+        "get_env_runtime_helpers",
+        lambda: (
+            lambda _config, profile, _config_path, tool_names=None: ["email-preseed"]
+            if profile == "preseed" and tool_names is None
+            else [],
+            lambda *_args, **_kwargs: None,
+        ),
+    )
     monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
     endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
     assert endpoints["email"].startswith("https://")
+    assert restart_calls == [["email-preseed"]]
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_get_daytona_endpoints_resume_restart_failure_mentions_env_up(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tmp = Path.cwd() / "tmp_test_daytona_restart_failure"
+    tmp.mkdir(exist_ok=True)
+    cfg = tmp / "env.yaml"
+    cfg.write_text("name: x\ntools: [email]\noverrides: {}\n")
+    (tmp / "daytona-state.json").write_text('{"sandbox_id":"sbx-1"}')
+
+    class FakeSandbox:
+        def __init__(self) -> None:
+            self.status = "stopped"
+
+        def resume(self) -> None:
+            self.status = "running"
+
+        def get_preview_link(self, port: int):
+            _ = port
+            return SimpleNamespace(url="https://8040-x.daytonaproxy.net")
+
+    class FakeDaytona:
+        def __init__(self) -> None:
+            self.sandbox = FakeSandbox()
+
+        def get(self, sandbox_id: str):
+            _ = sandbox_id
+            return self.sandbox
+
+    class FakeRegistry:
+        def load_all(self) -> None:
+            return None
+
+        def get_tool(self, name: str):
+            if name == "email":
+                return SimpleNamespace(tool_server_port=8040, tool_server_url=None)
+            return None
+
+    class FakeRunner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def restart_sandbox_services(
+            self,
+            sandbox: object,
+            *,
+            preseed_svc_names: list[str] | None = None,
+            log_prefix: str = "",
+        ) -> None:
+            _ = sandbox, preseed_svc_names, log_prefix
+            raise RuntimeError("docker compose up failed")
+
+    monkeypatch.setattr(tasks_cli.click, "confirm", lambda *_a, **_k: True)
+    monkeypatch.setattr(tasks_cli.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
+    monkeypatch.setattr(tasks_cli, "get_daytona_runner_class", lambda: FakeRunner)
+    monkeypatch.setattr(
+        tasks_cli,
+        "get_env_runtime_helpers",
+        lambda: (
+            lambda _config, profile, _config_path, tool_names=None: ["email-preseed"]
+            if profile == "preseed" and tool_names is None
+            else [],
+            lambda *_args, **_kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+
+    with pytest.raises(SystemExit) as exc_info:
+        tasks_cli._get_daytona_endpoints(str(cfg))
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Unable to restart services in the resumed Daytona sandbox." in captured.err
+    assert "simlab env up x --daytona" in captured.err
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -860,8 +1037,8 @@ def test_provision_task_group_channels_runs_rocketchat_seed(
     ) -> None:
         calls.append((profile, svc_names, env_overrides or {}))
 
-    monkeypatch.setattr("simlab.cli.env._get_profiled_service_names", fake_services)
-    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._get_profiled_service_names", fake_services)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._run_profiled_services_local", fake_run)
 
     tasks_cli._provision_task_group_channels(
         task,
@@ -909,7 +1086,7 @@ def test_provision_task_group_channels_skips_when_no_channels(
     def fake_run(*_args: object, **_kwargs: object) -> None:
         called["yes"] = True
 
-    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._run_profiled_services_local", fake_run)
 
     tasks_cli._provision_task_group_channels(
         task, {}, config=config, config_path=str(config_path), using_daytona=False
@@ -937,7 +1114,7 @@ def test_provision_task_group_channels_skips_when_no_rocketchat_tool(
     def fake_run(*_args: object, **_kwargs: object) -> None:
         called["yes"] = True
 
-    monkeypatch.setattr("simlab.cli.env._run_profiled_services_local", fake_run)
+    monkeypatch.setattr("simlab.runtime.env_lifecycle._run_profiled_services_local", fake_run)
 
     tasks_cli._provision_task_group_channels(
         task, {}, config=config, config_path=str(config_path), using_daytona=False
@@ -963,3 +1140,640 @@ def test_api_task_to_local_includes_seed_group_channels() -> None:
     task_dict, _profiles = tasks_cli._api_task_to_local(api_task)
     assert len(task_dict["seed_group_channels"]) == 1
     assert task_dict["seed_group_channels"][0]["channel_name"] == "ops"
+
+
+def test_seed_command_waits_only_on_seed_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    env_dir = tmp_path / "environments" / "my-env"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: my-env\ntools: [email, calendar, coding, crm]\n",
+        encoding="utf-8",
+    )
+
+    bundle_dir = tmp_path / "bundle"
+    tasks_dir = bundle_dir / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "task-1.json").write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "task_id": "task-1",
+                    "display_name": "Task 1",
+                    "difficulty": "easy",
+                    "category": "workflow",
+                },
+                "task": "Do the task.",
+                "apps": ["calendar"],
+                "tool_servers": [{"name": "coding-env", "tool_server_url": "http://legacy:8020"}],
+                "seed_emails": [
+                    {
+                        "from_profile_id": "ops@example.com",
+                        "to_addr": "agent@example.com",
+                        "subject": "Hello",
+                        "body_text": "Body",
+                    }
+                ],
+                "seed_calendar_events": [],
+                "seed_group_channels": [],
+                "npcs": [{"id": "patricia_lee"}],
+                "verifiers": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_require(
+        *,
+        endpoints: dict[str, str],
+        action: str,
+        using_daytona: bool,
+        config_path: str | None = None,
+        wait: bool = False,
+    ) -> None:
+        captured["endpoints"] = endpoints
+        captured["action"] = action
+        captured["using_daytona"] = using_daytona
+        captured["config_path"] = config_path
+        captured["wait"] = wait
+
+    monkeypatch.setattr(
+        tasks_cli,
+        "get_global_config_from_ctx",
+        lambda _ctx: SimpleNamespace(daytona_api_key="daytona-key"),
+    )
+    monkeypatch.setattr(
+        tasks_cli,
+        "_resolve_endpoints",
+        lambda **_kwargs: (
+            {
+                "email": "https://email.preview",
+                "calendar": "https://calendar.preview",
+                "coding": "https://coding.preview",
+                "crm": "https://crm.preview",
+            },
+            True,
+        ),
+    )
+    monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", fake_require)
+    monkeypatch.setattr(tasks_cli, "_provision_task_group_channels", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "_provision_task_calendar_users", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "_ensure_task_calendar_accounts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "_seed_task_data", lambda *args, **kwargs: (1, 0))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        tasks_cli.tasks,
+        [
+            "seed",
+            "--env",
+            "my-env",
+            "--task",
+            "task-1",
+            "--tasks-dir",
+            str(bundle_dir),
+            "--daytona",
+        ],
+        env={
+            "SIMLAB_DISABLE_TELEMETRY": "1",
+            "SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments"),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["endpoints"] == {
+        "email": "https://email.preview",
+        "calendar": "https://calendar.preview",
+    }
+    assert captured["action"] == "task seeding"
+    assert captured["using_daytona"] is True
+    assert captured["wait"] is True
+
+
+def test_run_command_waits_only_on_task_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    env_dir = tmp_path / "environments" / "my-env"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: my-env\ntools: [email, calendar, coding, crm]\n",
+        encoding="utf-8",
+    )
+
+    bundle_dir = tmp_path / "bundle"
+    tasks_dir = bundle_dir / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "task-1.json").write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "task_id": "task-1",
+                    "display_name": "Task 1",
+                    "difficulty": "easy",
+                    "category": "workflow",
+                },
+                "task": "Do the task.",
+                "apps": ["calendar"],
+                "tool_servers": [{"name": "coding-env", "tool_server_url": "http://legacy:8020"}],
+                "seed_emails": [
+                    {
+                        "from_profile_id": "ops@example.com",
+                        "to_addr": "agent@example.com",
+                        "subject": "Hello",
+                        "body_text": "Body",
+                    }
+                ],
+                "seed_calendar_events": [],
+                "seed_group_channels": [],
+                "npcs": [{"id": "patricia_lee"}],
+                "verifiers": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeArtifacts:
+        def __init__(self) -> None:
+            self.metadata: dict[str, object] = {}
+            self.error: str | None = None
+            self.messages: list[dict[str, object]] = []
+            self.steps_taken = 0
+            self.tool_calls: list[object] = []
+
+        def dump(self, path: Path) -> None:
+            path.write_text("{}", encoding="utf-8")
+
+    class FakeEnvironment:
+        def __init__(
+            self,
+            *,
+            tool_servers: dict[str, str],
+            mcp_clients: dict[str, object] | None = None,
+        ) -> None:
+            self.tool_servers = tool_servers
+            self.mcp_clients = mcp_clients
+
+    def fake_require(
+        *,
+        endpoints: dict[str, str],
+        action: str,
+        using_daytona: bool,
+        config_path: str | None = None,
+        wait: bool = False,
+    ) -> None:
+        captured["endpoints"] = endpoints
+        captured["action"] = action
+        captured["using_daytona"] = using_daytona
+        captured["config_path"] = config_path
+        captured["wait"] = wait
+
+    monkeypatch.setattr(
+        tasks_cli,
+        "get_global_config_from_ctx",
+        lambda _ctx: SimpleNamespace(
+            daytona_api_key="daytona-key",
+            verifier_model="",
+            verifier_provider="",
+            verifier_base_url="",
+            verifier_api_key="",
+        ),
+    )
+    monkeypatch.setattr(
+        tasks_cli,
+        "resolve_scenario_manager_api_url",
+        lambda *args, **kwargs: "https://api.example.com",
+    )
+    monkeypatch.setattr(tasks_cli, "resolve_collinear_api_key", lambda *args, **kwargs: "ck-test")
+    monkeypatch.setattr(
+        tasks_cli,
+        "_resolve_agent_runtime_settings",
+        lambda *args, **kwargs: ("test-model", "openai", None, None),
+    )
+    monkeypatch.setattr(
+        tasks_cli,
+        "_resolve_endpoints",
+        lambda **_kwargs: (
+            {
+                "email": "https://email.preview",
+                "calendar": "https://calendar.preview",
+                "coding": "https://coding.preview",
+                "crm": "https://crm.preview",
+            },
+            True,
+        ),
+    )
+    monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", fake_require)
+    monkeypatch.setattr(tasks_cli, "load_mcp_servers_from_env_dir", lambda _env_dir: None)
+    monkeypatch.setattr(tasks_cli, "_build_mcp_clients", lambda *args, **kwargs: {})
+    monkeypatch.setattr(tasks_cli, "_require_mcp_tools_available", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "run_env_seed_services", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "_provision_task_group_channels", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "_provision_task_calendar_users", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "_ensure_task_calendar_accounts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_cli, "_seed_task_data", lambda *args, **kwargs: (1, 0))
+    monkeypatch.setattr(
+        tasks_cli,
+        "get_agent_runtime_helpers",
+        lambda: (
+            FakeEnvironment,
+            lambda **kwargs: FakeArtifacts(),
+        ),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        tasks_cli.tasks,
+        [
+            "run",
+            "--env",
+            "my-env",
+            "--task",
+            "task-1",
+            "--tasks-dir",
+            str(bundle_dir),
+            "--daytona",
+            "--agent-import-path",
+            "custom.agent:Agent",
+            "--agent-model",
+            "test-model",
+        ],
+        env={
+            "SIMLAB_DISABLE_TELEMETRY": "1",
+            "SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments"),
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["endpoints"] == {
+        "email": "https://email.preview",
+        "calendar": "https://calendar.preview",
+        "coding": "https://coding.preview",
+    }
+    assert captured["action"] == "task run"
+    assert captured["using_daytona"] is True
+    assert captured["wait"] is True
+
+
+def test_env_has_local_services_false_when_no_compose(tmp_path: Path) -> None:
+    assert env_has_local_services(tmp_path) is False
+
+
+def test_env_has_local_services_false_for_empty_compose(tmp_path: Path) -> None:
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    assert env_has_local_services(tmp_path) is False
+
+
+def test_env_has_local_services_true_when_services_defined(tmp_path: Path) -> None:
+    (tmp_path / "docker-compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+    assert env_has_local_services(tmp_path) is True
+
+
+def test_is_env_running_local_false_when_no_compose(tmp_path: Path) -> None:
+    assert is_env_running_local(tmp_path) is False
+
+
+def test_is_env_running_daytona_false_when_no_state_file(tmp_path: Path) -> None:
+    assert is_env_running_daytona(tmp_path) is False
+
+
+def test_is_env_running_daytona_false_when_bad_json(tmp_path: Path) -> None:
+    (tmp_path / "daytona-state.json").write_text("not json")
+    assert is_env_running_daytona(tmp_path) is False
+
+
+def test_is_env_running_daytona_false_when_no_sandbox_id(tmp_path: Path) -> None:
+    (tmp_path / "daytona-state.json").write_text("{}")
+    assert is_env_running_daytona(tmp_path) is False
+
+
+def test_lifecycle_imports_available() -> None:
+    """Verify all lifecycle functions are callable."""
+    for fn in (
+        env_has_local_services,
+        is_env_running_local,
+        is_env_running_daytona,
+        ensure_daytona_sandbox_ready,
+        ensure_env_started_local,
+        ensure_env_started_daytona,
+        run_env_seed_local,
+        run_env_seed_daytona,
+        env_down_local,
+        env_down_daytona,
+    ):
+        assert callable(fn)
+
+
+# ---------------------------------------------------------------------------
+# is_env_running_local — partial stack detection (P2)
+# ---------------------------------------------------------------------------
+
+
+def test_is_env_running_local_false_when_partial_stack(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If only a subset of expected services are running, return False."""
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n    image: nginx\n"
+        "  db:\n    image: postgres\n"
+        "  seed:\n    image: seed\n    profiles: [seed]\n"
+    )
+    # 2 non-profile services expected, but only 1 running container ID returned
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.subprocess.run",
+        lambda *_a, **_kw: SimpleNamespace(stdout="abc123\n", returncode=0),
+    )
+    assert is_env_running_local(tmp_path) is False
+
+
+def test_is_env_running_local_true_when_all_services_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Return True when all non-profile services are running."""
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n    image: nginx\n"
+        "  db:\n    image: postgres\n"
+        "  seed:\n    image: seed\n    profiles: [seed]\n"
+    )
+    # 2 non-profile services expected, 2 running container IDs returned
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.subprocess.run",
+        lambda *_a, **_kw: SimpleNamespace(stdout="abc123\ndef456\n", returncode=0),
+    )
+    assert is_env_running_local(tmp_path) is True
+
+
+def test_is_env_running_local_false_when_no_containers_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Return False when compose exists but zero containers are running."""
+    (tmp_path / "docker-compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.subprocess.run",
+        lambda *_a, **_kw: SimpleNamespace(stdout="", returncode=0),
+    )
+    assert is_env_running_local(tmp_path) is False
+
+
+# ---------------------------------------------------------------------------
+# ensure_daytona_sandbox_ready — resume / cleanup (P1)
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_daytona_sandbox_ready_false_when_no_state(tmp_path: Path) -> None:
+    assert ensure_daytona_sandbox_ready(tmp_path) is False
+
+
+def test_ensure_daytona_sandbox_ready_true_when_active(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Active sandbox → return True without side effects."""
+    (tmp_path / "daytona-state.json").write_text('{"sandbox_id": "sbx-1"}')
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+
+    class FakeSandbox:
+        status = "running"
+
+    class FakeClient:
+        def get(self, _sandbox_id: str) -> FakeSandbox:
+            return FakeSandbox()
+
+    fake_daytona_mod = SimpleNamespace(
+        Daytona=lambda _cfg: FakeClient(),
+        DaytonaConfig=lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.import_module", lambda _name: fake_daytona_mod
+    )
+    assert ensure_daytona_sandbox_ready(tmp_path) is True
+    # State file should still exist (no cleanup)
+    assert (tmp_path / "daytona-state.json").exists()
+
+
+def test_ensure_daytona_sandbox_ready_resumes_paused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Paused sandbox → resume it, return True."""
+    (tmp_path / "daytona-state.json").write_text('{"sandbox_id": "sbx-1"}')
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+
+    class FakeSandbox:
+        def __init__(self) -> None:
+            self.status = "paused"
+
+        def resume(self) -> None:
+            self.status = "running"
+
+    sandbox = FakeSandbox()
+
+    class FakeClient:
+        def get(self, _sandbox_id: str) -> FakeSandbox:
+            return sandbox
+
+    fake_daytona_mod = SimpleNamespace(
+        Daytona=lambda _cfg: FakeClient(),
+        DaytonaConfig=lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.import_module", lambda _name: fake_daytona_mod
+    )
+    monkeypatch.setattr("simlab.runtime.env_lifecycle.time.sleep", lambda _s: None)
+    assert ensure_daytona_sandbox_ready(tmp_path) is True
+    assert (tmp_path / "daytona-state.json").exists()
+
+
+def test_ensure_daytona_sandbox_ready_cleans_up_on_failed_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Paused sandbox that cannot be resumed → delete it, remove state, return False."""
+    (tmp_path / "daytona-state.json").write_text('{"sandbox_id": "sbx-1"}')
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+    deleted = {"called": False}
+
+    class FakeSandbox:
+        status = "paused"
+        # No resume method → resume will fail
+
+    class FakeClient:
+        def get(self, _sandbox_id: str) -> FakeSandbox:
+            return FakeSandbox()
+
+        def delete(self, _sandbox: FakeSandbox) -> None:
+            deleted["called"] = True
+
+    fake_daytona_mod = SimpleNamespace(
+        Daytona=lambda _cfg: FakeClient(),
+        DaytonaConfig=lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.import_module", lambda _name: fake_daytona_mod
+    )
+    assert ensure_daytona_sandbox_ready(tmp_path) is False
+    # Stale sandbox should have been deleted and state file removed
+    assert deleted["called"]
+    assert not (tmp_path / "daytona-state.json").exists()
+
+
+def test_is_env_running_daytona_is_pure_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """is_env_running_daytona returns False for paused sandbox without side effects."""
+    (tmp_path / "daytona-state.json").write_text('{"sandbox_id": "sbx-1"}')
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+
+    class FakeSandbox:
+        status = "paused"
+
+    class FakeClient:
+        def get(self, _sandbox_id: str) -> FakeSandbox:
+            return FakeSandbox()
+
+    fake_daytona_mod = SimpleNamespace(
+        Daytona=lambda _cfg: FakeClient(),
+        DaytonaConfig=lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.import_module", lambda _name: fake_daytona_mod
+    )
+    # Pure check: returns False but does NOT delete or modify state
+    assert is_env_running_daytona(tmp_path) is False
+    assert (tmp_path / "daytona-state.json").exists()
+
+
+def test_ensure_daytona_sandbox_ready_preserves_state_on_failed_delete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If sandbox delete fails, keep daytona-state.json for manual cleanup."""
+    (tmp_path / "daytona-state.json").write_text('{"sandbox_id": "sbx-1"}')
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+
+    class FakeSandbox:
+        status = "paused"
+        # No resume method → resume will fail
+
+    class FakeClient:
+        def get(self, _sandbox_id: str) -> FakeSandbox:
+            return FakeSandbox()
+
+        def delete(self, _sandbox: FakeSandbox) -> None:
+            msg = "API timeout"
+            raise TimeoutError(msg)
+
+    fake_daytona_mod = SimpleNamespace(
+        Daytona=lambda _cfg: FakeClient(),
+        DaytonaConfig=lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.import_module", lambda _name: fake_daytona_mod
+    )
+    assert ensure_daytona_sandbox_ready(tmp_path) is False
+    # State file must be preserved because delete failed — needed for manual cleanup
+    assert (tmp_path / "daytona-state.json").exists()
+
+
+def test_get_daytona_endpoints_rejects_resume_when_disallowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """allow_resume=False should fail fast on a non-active sandbox."""
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    config_path = env_dir / "env.yaml"
+    config_path.write_text("name: x\ntools: [email]\noverrides: {}\n")
+    (env_dir / "daytona-state.json").write_text('{"sandbox_id":"sbx-1"}')
+
+    class FakeSandbox:
+        status = "paused"
+
+    class FakeDaytona:
+        def get(self, _sandbox_id: str) -> FakeSandbox:
+            return FakeSandbox()
+
+    monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
+    monkeypatch.setattr(
+        tasks_cli,
+        "ToolRegistry",
+        lambda: SimpleNamespace(
+            load_all=lambda: None,
+            get_tool=lambda _n: SimpleNamespace(tool_server_port=8040, tool_server_url=None),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        tasks_cli._get_daytona_endpoints(str(config_path), allow_resume=False)
+
+    assert exc_info.value.code == 1
+
+
+def test_is_env_running_local_false_when_docker_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Return False (not crash) when Docker CLI is not installed."""
+    (tmp_path / "docker-compose.yml").write_text("services:\n  web:\n    image: nginx\n")
+
+    def raise_oserror(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError("docker not found")
+
+    monkeypatch.setattr("simlab.runtime.env_lifecycle.subprocess.run", raise_oserror)
+    assert is_env_running_local(tmp_path) is False
+
+
+def test_ensure_daytona_sandbox_ready_cleans_state_when_sandbox_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sandbox already deleted out-of-band → remove stale state file, return False."""
+    (tmp_path / "daytona-state.json").write_text('{"sandbox_id": "sbx-gone"}')
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+
+    class FakeClient:
+        def get(self, _sandbox_id: str) -> None:
+            raise DaytonaNotFoundError("sandbox not found")
+
+    fake_daytona_mod = SimpleNamespace(
+        Daytona=lambda _cfg: FakeClient(),
+        DaytonaConfig=lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.import_module", lambda _name: fake_daytona_mod
+    )
+    assert ensure_daytona_sandbox_ready(tmp_path) is False
+    # State file should be removed — sandbox is gone, safe to create a new one
+    assert not (tmp_path / "daytona-state.json").exists()
+
+
+def test_ensure_daytona_sandbox_ready_preserves_state_when_lookup_is_uncertain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Transient lookup failure should keep state file to avoid losing pointer."""
+    (tmp_path / "daytona-state.json").write_text('{"sandbox_id": "sbx-1"}')
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-key")
+
+    class FakeClient:
+        def get(self, _sandbox_id: str) -> None:
+            raise TimeoutError("daytona api timeout")
+
+    fake_daytona_mod = SimpleNamespace(
+        Daytona=lambda _cfg: FakeClient(),
+        DaytonaConfig=lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "simlab.runtime.env_lifecycle.import_module", lambda _name: fake_daytona_mod
+    )
+    assert ensure_daytona_sandbox_ready(tmp_path) is False
+    assert (tmp_path / "daytona-state.json").exists()
+
+
+def test_ensure_daytona_sandbox_ready_cleans_state_when_corrupt(tmp_path: Path) -> None:
+    """Corrupt state file → remove it, return False."""
+    (tmp_path / "daytona-state.json").write_text("not json")
+    assert ensure_daytona_sandbox_ready(tmp_path) is False
+    assert not (tmp_path / "daytona-state.json").exists()

@@ -1,0 +1,63 @@
+{
+  "meta": {
+    "task_id": "vendor_performance_review",
+    "display_name": "Review vendor performance using emails and SEC EDGAR filings",
+    "difficulty": "medium"
+  },
+  "task": "You are a procurement analyst at Weaver Enterprises reviewing vendor performance for the quarterly board review. Read the inbox at `agent@weaverenterprises.com` for recent vendor issues. Then use SEC EDGAR to look up the public companies mentioned (IBM and Oracle) to assess their financial health. Produce exactly two markdown sections: `## Vendor Performance Report` and `## Action Items`. In `## Vendor Performance Report`, include a subsection for each vendor mentioned in the emails with these labeled fields: `Vendor:`, `Issue Summary:`, and `Risk Rating:` (High/Medium/Low). For public company vendors, also include a `Public Company Context:` line with data from SEC EDGAR filings (ticker, recent filing type, fiscal year end). In `## Action Items`, include at least 4 prioritized bullets formatted as `- [P1] ...`, `- [P2] ...`, or `- [P3] ...`. Base every claim on tool output from the inbox and SEC EDGAR.",
+  "apps": [
+    "Email",
+    "SEC EDGAR"
+  ],
+  "tool_servers": [
+    {
+      "name": "email-env",
+      "tool_server_url": "http://email-env:8040"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "warehouse@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "IBM server shipment delayed again",
+      "body_text": "The IBM Cloud server order is now 3 weeks late. This is the second delay this quarter. Our data center migration for Brightpath Solutions is blocked. IBM blamed supply chain constraints but no revised ETA. This puts $400K of revenue at risk if Brightpath escalates. Please flag this as a P1 vendor issue.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "finance@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Oracle licensing invoice dispute",
+      "body_text": "Oracle sent an invoice for $185,000 covering database licensing for Q1. However, our contract says $160,000 per quarter. The $25,000 overage appears to be from an unapproved true-up for 15 additional seats that engineering provisioned without procurement approval. We need to dispute the overage and also tighten our seat provisioning controls. Oracle's account rep says they will review but wants payment of the undisputed $160K by end of month.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "security@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "CloudFlare renewal and compliance gap",
+      "body_text": "CloudFlare renewed automatically last week at $72,000 annually, up 15% from last year. The auto-renewal caught us off guard because procurement was supposed to negotiate. Also, their SOC 2 Type II report expired in January and we have not received the updated version. This is a compliance gap that needs to be closed before the April audit. CloudFlare is not publicly traded so no SEC filings to review.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "cto@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Quarterly vendor review prep",
+      "body_text": "The board wants a vendor performance summary covering IBM, Oracle, and CloudFlare. Key areas: delivery reliability, cost control, and compliance. For the public companies (IBM and Oracle), include their financial context from public filings so the board can assess counterparty stability. We present this on Thursday so I need the report by Wednesday EOD.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "ops@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "IBM escalation path",
+      "body_text": "I got in touch with IBM's enterprise support. They assigned a dedicated account manager, Sarah Lin. She confirmed the server order should ship by end of next week. She also offered a 10% discount on the next order as goodwill. I think we should accept but make it contingent on meeting the revised delivery date.",
+      "body_html": null
+    }
+  ],
+  "seed_calendar_events": [],
+  "npcs": [],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "collinear.scenarios.email_ops.verifiers.vendor_performance_review"
+    }
+  ]
+}

@@ -151,7 +151,10 @@ def tool_info(name: str) -> None:
     if tool.required_env_vars:
         click.echo()
         click.echo(click.style("  Required env vars:", bold=True))
-        for var in tool.required_env_vars:
-            click.echo(f"    {var}")
+        for req in tool.required_env_vars:
+            if req.description:
+                click.echo(f"    {req.name} — {req.description}")
+            else:
+                click.echo(f"    {req.name}")
 
     click.echo()

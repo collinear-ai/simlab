@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "edgar-mcp": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "sec-edgar-mcp==1.0.8",
+        "sec-edgar-mcp"
+      ],
+      "env": {
+        "SEC_EDGAR_USER_AGENT": "SimLab LangGraph Email Agent Example (simlab@example.com)"
+      }
+    }
+  }
+}

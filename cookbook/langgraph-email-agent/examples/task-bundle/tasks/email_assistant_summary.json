@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "task_id": "email_assistant_summary",
+    "display_name": "Triages a busy inbox and adds public-company context to a sales brief",
+    "difficulty": "medium"
+  },
+  "task": "You are supporting a chief-of-staff style inbox review for `agent@weaverenterprises.com`. Only use emails sent to that mailbox, even if the email tools can see other users. Inspect the inbox and identify the most urgent threads. Return exactly three markdown sections: `## Inbox Triage`, `## Todo List`, and `## Sales Call Brief`. In `## Inbox Triage`, include exactly three bullets for the highest-priority threads and explain why each matters. In `## Todo List`, include at least four concrete bullets formatted like `- [P1] ...`, `- [P2] ...`, or `- [P3] ...`. In `## Sales Call Brief`, summarize the Microsoft renewal thread and include one `Public Company Context:` line about the counterparty. Use these exact labels in the sales brief: `Account:`, `Ticker:`, `Stage:`, `Key Pains:`, `Blockers:`, `Next Step:`, and `Public Company Context:`. Base every factual claim on available tool output, and ignore low-priority noise.",
+  "apps": [
+    "Email",
+    "SEC EDGAR"
+  ],
+  "tool_servers": [
+    {
+      "name": "email-env",
+      "tool_server_url": "http://email-env:8040"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "ceo@example.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Board follow-up for Friday",
+      "body_text": "Please prepare me for Friday's board review. I need three things this week: 1. reply with the Q2 hiring plan by Thursday at 2pm, 2. draft a short board update on the recruiting funnel, and 3. set up a 30-minute prep with finance before Friday's review.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "alex.chen@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Microsoft renewal call recap and next steps",
+      "body_text": "Quick recap from today's Microsoft renewal call. Priya Shah is still our champion, but the deal is at risk. They need SSO and an updated SOC 2 packet before security will sign off. Legal still has redlines open in the MSA. Procurement asked for a revised quote by Wednesday EOD so they can keep the renewal in this quarter. Please turn this into a crisp follow-up brief.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "mia.garcia@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Northstar pilot blocked on training plan",
+      "body_text": "The Northstar pilot will slip unless we send the admin training plan and confirm workspace permissions by tomorrow at 3pm. Their ops lead is escalating internally, so I would treat this as customer-risk, not just an FYI.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "finance@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Need prep agenda before Friday",
+      "body_text": "Happy to do the 30-minute prep before the board review, but I need an agenda first. Please send me the recruiting funnel talking points and any open budget assumptions by Thursday night.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "legal@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Microsoft legal status",
+      "body_text": "We can review the Microsoft redlines tomorrow morning. The two sticking points are the data retention clause and the liability cap. If sales wants this to close this quarter, we should not wait until Thursday.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "recruiting@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Funnel snapshot for board deck",
+      "body_text": "Current recruiting funnel snapshot: 18 open roles, 7 final-stage candidates, and time-to-fill is down versus last month. I can send a full chart later today if you need a tighter board update.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "ops@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Office access badges this week",
+      "body_text": "Reminder that facilities will reissue office badges on Thursday. Team members can stop by any time between 10am and 4pm.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "newsletter@vendor-updates.io",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Weekly SaaS metrics newsletter",
+      "body_text": "This week's industry roundup covers expansion benchmarks, retention trends, and AI adoption statistics across B2B software.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "travel@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Reminder: submit receipts",
+      "body_text": "Expense reports from last week's offsite are due next Tuesday. Please upload hotel and meal receipts when you have time.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "product@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Release notes draft",
+      "body_text": "The product team finished a draft of next week's release notes. No action needed yet unless you want to review wording before we publish.",
+      "body_html": null
+    }
+  ],
+  "seed_calendar_events": [],
+  "npcs": [],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "collinear.scenarios.email_ops.verifiers.email_assistant_summary"
+    }
+  ]
+}

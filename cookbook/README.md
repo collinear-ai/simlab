@@ -24,3 +24,6 @@ The agent will walk through each step, ask you for any required inputs (model, t
 | Recipe | Description |
 |--------|-------------|
 | [agent-baselining](agent-baselining/) | Run your agent across a set of tasks to establish baseline performance scores. |
+| [langgraph-email-agent](langgraph-email-agent/) | Standalone LangGraph email assistant cookbook with a bundled SimLab environment, local task bundle, and agent `SKILL.md`. |
+| [secure-agent-eval](secure-agent-eval/) | Evaluate agent behavior through OneCLI's credential proxy — compare correctness, audit for credential leakage, and test rate limit resilience. |
+| [simlab-auto-research](simlab-auto-research/) | Autonomous system prompt optimization using the [auto-research](https://github.com/karpathy/autoresearch) pattern. An outer agent iterates on prompts, measured by SimLab task scores. |

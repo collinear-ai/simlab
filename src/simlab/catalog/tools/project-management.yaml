@@ -1,0 +1,37 @@
+name: project-management
+display_name: Project Management
+description: In-memory project management workflow server for projects, sprints, tasks, comments, and team members.
+category: operations
+tool_server_port: 8110
+
+exposed_ports: []
+
+services:
+  project-management-env:
+    image: collinear/project-management-env:latest
+    ports:
+      - "8110"
+    environment:
+      PROJECT_MANAGEMENT_FIXED_NOW: "2026-03-20T12:00:00+00:00"
+      PROJECT_MANAGEMENT_SEED_DATA_PATH: /app/src/toolsets/project_management/project_management_seed_data.json
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8110/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+seed_services:
+  project-management-seed:
+    image: collinear/project-management-env:latest
+    ports: []
+    depends_on:
+      project-management-env:
+        condition: service_healthy
+    command:
+      - "python3"
+      - "-c"
+      - >-
+        import urllib.request; urllib.request.urlopen(
+        urllib.request.Request('http://project-management-env:8110/reset', data=b'', method='POST')
+        ).read()
