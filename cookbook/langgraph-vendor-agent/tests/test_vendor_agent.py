@@ -24,7 +24,7 @@ class FakeEnvironment(BaseEnvironment):
             ),
         ]
 
-    def list_tools(self, tool_server: str | None = None) -> list[dict[str, Any]]:
+    async def alist_tools(self, tool_server: str | None = None) -> list[dict[str, Any]]:
         return [
             {
                 "tool_server": "email-env",
@@ -48,7 +48,7 @@ class FakeEnvironment(BaseEnvironment):
             },
         ]
 
-    def call_tool(
+    async def acall_tool(
         self, tool_server: str, tool_name: str, parameters: dict[str, Any]
     ) -> ToolCallResult:
         return ToolCallResult(observation={"results": [{"name": "NovaTech"}]})
