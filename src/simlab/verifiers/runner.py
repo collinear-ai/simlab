@@ -69,6 +69,7 @@ class _DiffRecord:
     after: dict[str, Any] | None = None
     step_index: int | None = None
     tool_name: str | None = None
+    raw_data: dict[str, Any] | None = None
 
 
 class _VerifierArtifactsAdapter:
@@ -91,6 +92,7 @@ class _VerifierArtifactsAdapter:
         tool_servers: list[_ToolServerInfo],
         metadata: dict[str, Any],
         messages: list[dict[str, Any]],
+        tool_calls: list[dict[str, Any]] | None = None,
         final_observation: str | None,
         last_tool_message: str | None,
         verifier_input: str | None,
@@ -116,6 +118,7 @@ class _VerifierArtifactsAdapter:
         self.tool_servers = tool_servers
         self.metadata = metadata
         self.messages = messages
+        self.tool_calls = tool_calls or []
         self.final_observation = final_observation
         self.last_tool_message = last_tool_message
         self.verifier_input = verifier_input
@@ -182,6 +185,7 @@ def build_verifier_artifacts(
         tool_servers=tool_servers_list,
         metadata=dict(cli_artifacts.metadata),
         messages=list(cli_artifacts.messages),
+        tool_calls=list(getattr(cli_artifacts, "tool_calls", None) or []),
         final_observation=cli_artifacts.final_observation,
         last_tool_message=last_tool_message,
         verifier_input=verifier_input,

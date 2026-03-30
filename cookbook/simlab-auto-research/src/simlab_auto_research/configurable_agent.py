@@ -172,11 +172,15 @@ class ConfigurableAgent(BaseAgent):
                             "content": _to_tool_content(result),
                         }
                     )
+                    tool_server, actual_tool_name = dispatch.get(
+                        fn.name, ("unknown", fn.name)
+                    )
                     context.record_message(
                         "tool",
                         build_artifact_tool_message_content(
                             tool_call_id=tool_call.id,
-                            tool_name=fn.name,
+                            tool_server=tool_server,
+                            tool_name=actual_tool_name,
                             result=result,
                         ),
                     )

@@ -1,13 +1,19 @@
 """Main CLI entry point."""
 
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version
 
 import click
 
-from simlab import __version__
 from simlab.cli.auth import _verify_key_with_server
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_scenario_manager_api_url
+
+try:
+    __version__ = version("simulationlab")
+except PackageNotFoundError:  # pragma: no cover - local source tree fallback
+    __version__ = "0.1.0"
 
 COMMAND_IMPORT_PATHS = {
     "auth": "simlab.cli.auth:auth",

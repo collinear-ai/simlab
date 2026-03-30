@@ -219,7 +219,8 @@ def test_reference_agent_runs_tool_loop(monkeypatch) -> None:  # noqa: ANN001
     assert tool_msgs
     tool_payload = tool_msgs[0]["content"]
     assert tool_payload["tool_call_id"] == "call_1"
-    assert tool_payload["tool_name"] == "email-env__send_email"
+    assert tool_payload["tool_server"] == "email-env"
+    assert tool_payload["tool_name"] == "send_email"
     assert tool_payload["is_error"] is False
 
 

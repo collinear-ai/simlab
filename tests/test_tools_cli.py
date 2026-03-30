@@ -89,3 +89,34 @@ def test_tool_registry_loads_crm_definition() -> None:
     assert "crm-seed" in crm.seed_services
     cmd = crm.seed_services["crm-seed"].command or []
     assert "/reset" in " ".join(cmd if isinstance(cmd, list) else [cmd])
+
+
+def test_tools_info_accepts_env_local_custom_tool(tmp_path: Path) -> None:
+    env_dir = tmp_path / "environments" / "my-env"
+    custom_tools_dir = env_dir / "custom-tools"
+    custom_tools_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text("name: my-env\ntools: []\n", encoding="utf-8")
+    (custom_tools_dir / "harbor-main.yaml").write_text(
+        "\n".join(
+            [
+                "name: harbor-main",
+                "display_name: Harbor Main",
+                "description: Harbor task runtime",
+                "category: custom",
+                "tool_server_url: http://localhost:9000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        tools,
+        ["info", "harbor-main", "--env", "my-env"],
+        env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Harbor Main" in result.output
+    assert "http://localhost:9000" in result.output

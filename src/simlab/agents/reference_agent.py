@@ -141,6 +141,10 @@ class ReferenceAgent(BaseAgent):
                     fn = getattr(tool_call, "function", None)
                     if fn is None:
                         continue
+                    tool_server, actual_tool_name = dispatch.get(
+                        fn.name,
+                        ("unknown", fn.name),
+                    )
                     result = _run_async_compat(
                         _aexecute_tool_call(
                             tool_call_id=tool_call.id,
@@ -162,7 +166,8 @@ class ReferenceAgent(BaseAgent):
                         "tool",
                         build_artifact_tool_message_content(
                             tool_call_id=tool_call.id,
-                            tool_name=fn.name,
+                            tool_server=tool_server,
+                            tool_name=actual_tool_name,
                             result=result,
                         ),
                     )

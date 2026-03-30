@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import click
@@ -25,6 +24,10 @@ class _FakeRegistry:
     def __init__(self, supported_tools: set[str]) -> None:
         self._supported_tools = supported_tools
 
+    @property
+    def tool_names(self) -> list[str]:
+        return sorted(self._supported_tools)
+
     def get_tool(self, name: str) -> object | None:
         return object() if name in self._supported_tools else None
 
@@ -41,6 +44,17 @@ class _FakeRegistry:
             )()
             out.append(t)
         return out
+
+
+def _fake_compose_output(
+    *,
+    tool_endpoints: dict[str, str] | None = None,
+    env_file: str = "# No environment variables required",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        tool_endpoints=tool_endpoints or {},
+        env_file=env_file,
+    )
 
 
 def test_env_init_template_uses_server_scenario_tools(tmp_path: Path) -> None:
@@ -61,9 +75,10 @@ def test_env_init_template_uses_server_scenario_tools(tmp_path: Path) -> None:
     ]
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"spreadsheets"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"spreadsheets"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=_fake_compose_output()),
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
@@ -113,9 +128,10 @@ def test_env_init_scenario_guidance_file_overrides_template_guidance(tmp_path: P
     ]
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"spreadsheets"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"spreadsheets"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=_fake_compose_output()),
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
@@ -144,7 +160,7 @@ def test_env_init_scenario_guidance_file_missing_fails(tmp_path: Path) -> None:
     env_name = "bad-guidance-env"
     runner = CliRunner()
 
-    with patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())):
+    with patch("simlab.cli.env.build_registry", return_value=_FakeRegistry(set())):
         result = runner.invoke(
             env,
             [
@@ -180,7 +196,7 @@ def test_env_init_template_maps_service_names_to_registry_tools(tmp_path: Path) 
 
     with (
         patch(
-            "simlab.cli.env._get_registry",
+            "simlab.cli.env.build_registry",
             return_value=_FakeRegistry({"frappe-hrms", "email"}),
         ),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
@@ -226,7 +242,7 @@ def test_env_init_template_maps_google_workspace_service_name(tmp_path: Path) ->
 
     with (
         patch(
-            "simlab.cli.env._get_registry",
+            "simlab.cli.env.build_registry",
             return_value=_FakeRegistry({"google-workspace"}),
         ),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
@@ -273,7 +289,7 @@ def test_env_init_template_maps_erp_service_name(tmp_path: Path) -> None:
 
     with (
         patch(
-            "simlab.cli.env._get_registry",
+            "simlab.cli.env.build_registry",
             return_value=_FakeRegistry({"erp", "email"}),
         ),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
@@ -318,7 +334,7 @@ def test_env_init_template_maps_crm_service_name(tmp_path: Path) -> None:
     ]
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"crm"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"crm"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
     ):
@@ -359,9 +375,10 @@ def test_env_init_uses_default_registry_when_flag_omitted(tmp_path: Path) -> Non
     ]
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"spreadsheets"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"spreadsheets"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=_fake_compose_output()),
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
@@ -392,7 +409,7 @@ def test_env_init_template_unknown_from_server_fails(tmp_path: Path) -> None:
     runner = CliRunner()
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"spreadsheets"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"spreadsheets"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
     ):
@@ -425,10 +442,11 @@ def test_env_init_template_uses_global_config_for_api_client(tmp_path: Path) -> 
     ]
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"spreadsheets"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"spreadsheets"})),
         patch("simlab.cli.env.get_global_config_from_ctx") as mocked_cfg,
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://cfg"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=_fake_compose_output()),
     ):
         mocked_cfg.return_value = SimpleNamespace(
             scenario_manager_api_url="https://cfg",
@@ -459,7 +477,7 @@ def test_env_init_auto_builds_compose_files(tmp_path: Path) -> None:
     env_name = "empty-env"
     runner = CliRunner()
 
-    with patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())):
+    with patch("simlab.cli.env.build_registry", return_value=_FakeRegistry(set())):
         result = runner.invoke(
             env,
             ["init", env_name, "--non-interactive"],
@@ -485,23 +503,22 @@ def test_env_init_template_auto_builds_compose_files(tmp_path: Path) -> None:
         )
     ]
 
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {"email": "http://localhost:8040/tools"}
-    fake_compose_output.env_file = "# No environment variables required"
-    del fake_compose_output.readme  # no longer in ComposeOutput
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={"email": "http://localhost:8040/tools"}
+    )
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output") as mocked_write,
+        patch(
+            "simlab.cli.env.regenerate_env_artifacts",
+            return_value=fake_compose_output,
+        ) as mocked_regenerate,
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
         mocked_client.resolve_template_to_backend_id.return_value = "human_resource"
-        mocked_engine = mocked_engine_cls.return_value
-        mocked_engine.compose.return_value = fake_compose_output
 
         result = runner.invoke(
             env,
@@ -522,11 +539,7 @@ def test_env_init_template_auto_builds_compose_files(tmp_path: Path) -> None:
     data = yaml.safe_load(out_file.read_text())
     assert data["tools"] == ["email"]
 
-    mocked_engine.compose.assert_called_once()
-    mocked_write.assert_called_once()
-    # write_output is called with (output, env_dir)
-    call_args = mocked_write.call_args[0]
-    assert call_args[1] == env_dir
+    mocked_regenerate.assert_called_once_with(env_dir)
 
     assert "docker-compose.yml" in result.output
     assert "email" in result.output
@@ -546,22 +559,19 @@ def test_env_init_coding_template_scaffolds_customization_files(tmp_path: Path) 
             scenario_guidance_md="# Server Guidance\nUse coding skills first.\n",
         )
     ]
-    fake_compose_output = SimpleNamespace(
-        tool_endpoints={"coding": "http://localhost:8020/tools"},
-        env_file="# No environment variables required",
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={"coding": "http://localhost:8020/tools"}
     )
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"coding"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"coding"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
         mocked_client.resolve_template_to_backend_id.return_value = "coding"
-        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
 
         result = runner.invoke(
             env,
@@ -622,19 +632,15 @@ def test_env_init_with_mcp_servers_persists_and_calls_compose_with_env_dir(
         encoding="utf-8",
     )
     runner = CliRunner()
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {}
-    fake_compose_output.env_file = ""
-    del fake_compose_output.readme
+    fake_compose_output = _fake_compose_output(env_file="")
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())),
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry(set())),
+        patch(
+            "simlab.cli.env.regenerate_env_artifacts",
+            return_value=fake_compose_output,
+        ) as mocked_regenerate,
     ):
-        mocked_engine = mocked_engine_cls.return_value
-        mocked_engine.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             [
@@ -656,9 +662,7 @@ def test_env_init_with_mcp_servers_persists_and_calls_compose_with_env_dir(
     assert "notion" in data["mcpServers"]
     assert data["mcpServers"]["notion"]["url"] == "https://mcp.notion.com/mcp"
     assert "weather" in data["mcpServers"]
-    mocked_engine.compose.assert_called_once()
-    call_kwargs = mocked_engine.compose.call_args[1]
-    assert call_kwargs.get("env_dir") == env_dir
+    mocked_regenerate.assert_called_once_with(env_dir)
 
 
 def test_env_init_with_mcp_servers_interactive_skips_picker_when_user_declines_extra_tools(
@@ -672,20 +676,14 @@ def test_env_init_with_mcp_servers_interactive_skips_picker_when_user_declines_e
         encoding="utf-8",
     )
     runner = CliRunner()
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {}
-    fake_compose_output.env_file = "# No environment variables required"
-    del fake_compose_output.readme
+    fake_compose_output = _fake_compose_output()
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
         patch("simlab.cli.env.click.confirm", return_value=False) as mocked_confirm,
         patch("simlab.cli.env._interactive_select") as mocked_picker,
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
     ):
-        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             ["init", env_name, "--mcp-servers", str(mcp_file)],
@@ -711,20 +709,16 @@ def test_env_init_with_mcp_servers_interactive_can_add_extra_tools(tmp_path: Pat
         encoding="utf-8",
     )
     runner = CliRunner()
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {"email": "http://localhost:8040/tools"}
-    fake_compose_output.env_file = "# No environment variables required"
-    del fake_compose_output.readme
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={"email": "http://localhost:8040/tools"}
+    )
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
         patch("simlab.cli.env.click.confirm", return_value=True),
         patch("simlab.cli.env._interactive_select", return_value=["email"]) as mocked_picker,
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
     ):
-        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             ["init", env_name, "--mcp-servers", str(mcp_file)],
@@ -749,7 +743,7 @@ def test_env_init_interactive_cancel_aborts_before_writing_files(tmp_path: Path)
     runner = CliRunner()
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
         patch("simlab.cli.env.click.confirm", return_value=True),
         patch("simlab.cli.env._interactive_select", side_effect=click.Abort()),
     ):
@@ -770,7 +764,7 @@ def test_env_init_mcp_servers_invalid_json_fails(tmp_path: Path) -> None:
     mcp_file = tmp_path / "bad-mcp.json"
     mcp_file.write_text('{"mcpServers": {"x": {}}}', encoding="utf-8")  # missing url/command
     runner = CliRunner()
-    with patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())):
+    with patch("simlab.cli.env.build_registry", return_value=_FakeRegistry(set())):
         result = runner.invoke(
             env,
             ["init", env_name, "--mcp-servers", str(mcp_file), "--non-interactive"],
@@ -786,7 +780,7 @@ def test_env_init_mcp_servers_invalid_shape_fails_cleanly(tmp_path: Path) -> Non
     mcp_file = tmp_path / "bad-shape-mcp.json"
     mcp_file.write_text('{"mcpServers": []}', encoding="utf-8")
     runner = CliRunner()
-    with patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())):
+    with patch("simlab.cli.env.build_registry", return_value=_FakeRegistry(set())):
         result = runner.invoke(
             env,
             ["init", env_name, "--mcp-servers", str(mcp_file), "--non-interactive"],
@@ -796,6 +790,28 @@ def test_env_init_mcp_servers_invalid_shape_fails_cleanly(tmp_path: Path) -> Non
 
     assert result.exit_code == 1
     assert "mcpServers must be an object" in result.output
+
+
+def test_env_init_mcp_servers_conflicting_tool_name_fails_before_persist(tmp_path: Path) -> None:
+    env_name = "mcp-conflict"
+    mcp_file = tmp_path / "conflict-mcp.json"
+    mcp_file.write_text(
+        json.dumps({"mcpServers": {"email": {"url": "https://example.com/mcp"}}}),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    with patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})):
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--mcp-servers", str(mcp_file), "--non-interactive"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 1
+    assert "conflicts with an existing tool server" in result.output
+    assert not (tmp_path / "environments" / env_name / "mcp-servers.json").exists()
 
 
 def test_env_init_force_preserves_existing_env_yaml(tmp_path: Path) -> None:
@@ -814,18 +830,17 @@ def test_env_init_force_preserves_existing_env_yaml(tmp_path: Path) -> None:
     }
     env_yaml.write_text(yaml.dump(custom_content, default_flow_style=False, sort_keys=False))
 
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {"email": "http://localhost:8040/tools"}
-    fake_compose_output.env_file = "# No environment variables required"
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={"email": "http://localhost:8040/tools"}
+    )
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output") as mocked_write,
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
+        patch(
+            "simlab.cli.env.regenerate_env_artifacts",
+            return_value=fake_compose_output,
+        ) as mocked_regenerate,
     ):
-        mocked_engine = mocked_engine_cls.return_value
-        mocked_engine.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             ["init", env_name, "--force", "--non-interactive"],
@@ -842,10 +857,7 @@ def test_env_init_force_preserves_existing_env_yaml(tmp_path: Path) -> None:
     assert data.get("overrides") == {"email": {"CUSTOM_VAR": "user-value"}}
     assert data.get("registry") == "ghcr.io/example"
 
-    mocked_engine.compose.assert_called_once()
-    mocked_write.assert_called_once()
-    call_args = mocked_write.call_args[0]
-    assert call_args[1] == env_dir
+    mocked_regenerate.assert_called_once_with(env_dir)
 
 
 def test_env_init_force_updates_scenario_guidance_from_file(tmp_path: Path) -> None:
@@ -869,18 +881,17 @@ def test_env_init_force_updates_scenario_guidance_from_file(tmp_path: Path) -> N
     guidance_file = tmp_path / "new-guidance.md"
     guidance_file.write_text("# New Guidance\nUse the new instructions.\n", encoding="utf-8")
 
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {"email": "http://localhost:8040/tools"}
-    fake_compose_output.env_file = "# No environment variables required"
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={"email": "http://localhost:8040/tools"}
+    )
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output") as mocked_write,
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
+        patch(
+            "simlab.cli.env.regenerate_env_artifacts",
+            return_value=fake_compose_output,
+        ) as mocked_regenerate,
     ):
-        mocked_engine = mocked_engine_cls.return_value
-        mocked_engine.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             [
@@ -898,8 +909,7 @@ def test_env_init_force_updates_scenario_guidance_from_file(tmp_path: Path) -> N
     assert result.exit_code == 0, result.output
     data = yaml.safe_load(env_yaml.read_text())
     assert data["scenario_guidance_md"] == "# New Guidance\nUse the new instructions."
-    mocked_engine.compose.assert_called_once()
-    mocked_write.assert_called_once()
+    mocked_regenerate.assert_called_once_with(env_dir)
 
 
 def test_env_init_force_backfills_missing_coding_scaffold(tmp_path: Path) -> None:
@@ -936,18 +946,14 @@ def test_env_init_force_backfills_missing_coding_scaffold(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
-    fake_compose_output = SimpleNamespace(
-        tool_endpoints={"coding": "http://localhost:8020/tools"},
-        env_file="# No environment variables required",
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={"coding": "http://localhost:8020/tools"}
     )
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"coding"})),
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"coding"})),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
     ):
-        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             ["init", env_name, "--force", "--non-interactive"],
@@ -1005,18 +1011,13 @@ def test_env_init_overwrite_without_mcp_servers_clears_persisted_mcp_config(tmp_
         encoding="utf-8",
     )
 
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {}
-    fake_compose_output.env_file = "# No environment variables required"
+    fake_compose_output = _fake_compose_output()
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
         patch("simlab.cli.env._interactive_select", return_value=["email"]),
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
     ):
-        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             ["init", env_name],
@@ -1045,17 +1046,12 @@ def test_env_init_force_without_mcp_servers_clears_persisted_mcp_config(tmp_path
         encoding="utf-8",
     )
 
-    fake_compose_output = MagicMock()
-    fake_compose_output.tool_endpoints = {}
-    fake_compose_output.env_file = "# No environment variables required"
+    fake_compose_output = _fake_compose_output()
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry(set())),
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry(set())),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
     ):
-        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
-
         result = runner.invoke(
             env,
             ["init", env_name, "--force", "--non-interactive"],
@@ -1066,6 +1062,40 @@ def test_env_init_force_without_mcp_servers_clears_persisted_mcp_config(tmp_path
     assert result.exit_code == 0, result.output
     assert not mcp_file.exists()
     assert "Removed persisted MCP servers config" in result.output
+
+
+def test_env_custom_tools_add_scaffolds_enables_and_regenerates(tmp_path: Path) -> None:
+    env_name = "custom-tools-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True)
+    env_yaml = env_dir / "env.yaml"
+    env_yaml.write_text(
+        yaml.dump({"name": env_name, "tools": []}, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    with (
+        patch("simlab.env_custom_tools.build_registry", return_value=_FakeRegistry(set())),
+        patch(
+            "simlab.env_custom_tools.regenerate_env_artifacts",
+            return_value=_fake_compose_output(),
+        ) as mocked_regenerate,
+    ):
+        result = runner.invoke(
+            env,
+            ["custom-tools", "add", env_name, "harbor-main"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    tool_file = env_dir / "custom-tools" / "harbor-main.yaml"
+    assert tool_file.exists()
+    assert "name: harbor-main" in tool_file.read_text(encoding="utf-8")
+    data = yaml.safe_load(env_yaml.read_text(encoding="utf-8"))
+    assert data["tools"] == ["harbor-main"]
+    mocked_regenerate.assert_called_once_with(env_dir)
 
 
 def test_env_up_with_no_local_services_skips_docker_compose(tmp_path: Path) -> None:
@@ -1334,23 +1364,20 @@ def test_env_init_emits_telemetry(tmp_path: Path) -> None:
             tool_servers=[ScenarioToolServer(name="email-env")],
         )
     ]
-    fake_compose_output = SimpleNamespace(
-        tool_endpoints={"email": "http://localhost:8040/tools"},
-        env_file="# No environment variables required",
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={"email": "http://localhost:8040/tools"}
     )
 
     with (
-        patch("simlab.cli.env._get_registry", return_value=_FakeRegistry({"email"})),
+        patch("simlab.cli.env.build_registry", return_value=_FakeRegistry({"email"})),
         patch("simlab.cli.env.resolve_scenario_manager_api_url", return_value="https://api"),
         patch("simlab.cli.env.ScenarioManagerClient") as mocked_client_cls,
-        patch("simlab.cli.env.ComposeEngine") as mocked_engine_cls,
-        patch("simlab.cli.env.write_output"),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
         patch("simlab.cli.env.emit_cli_event") as mocked_emit,
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
         mocked_client.resolve_template_to_backend_id.return_value = "human_resource"
-        mocked_engine_cls.return_value.compose.return_value = fake_compose_output
 
         result = runner.invoke(
             env,

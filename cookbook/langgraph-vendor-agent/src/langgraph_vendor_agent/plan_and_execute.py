@@ -30,6 +30,20 @@ class PlanExecState(TypedDict):
     final_output: str
 
 
+def _message_text(content: str | dict[str, Any] | list[str | dict[str, Any]]) -> str:
+    """Normalize LangChain message content into plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = [_message_text(item) for item in content]
+        return "\n".join(part for part in text_parts if part).strip()
+
+    text = content.get("text")
+    if isinstance(text, str):
+        return text
+    return json.dumps(content, default=str)
+
+
 def _tool_names_summary(tools: list[BaseTool]) -> str:
     """Group tool names by server prefix for the planner prompt."""
     by_server: dict[str, list[str]] = {}
@@ -95,10 +109,7 @@ def build_plan_and_execute_graph(
             )
         )
         response = model.invoke([plan_prompt, HumanMessage(content=state["task"])])
-        raw = response.content
-        if isinstance(raw, list):
-            raw = raw[0] if raw else "[]"
-        text = str(raw).strip()
+        text = _message_text(response.content).strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         try:
@@ -128,10 +139,7 @@ def build_plan_and_execute_graph(
         final_text = ""
         for m in reversed(result.get("messages", [])):
             if isinstance(m, AIMessage) and m.content and not m.tool_calls:
-                content = m.content
-                if isinstance(content, list):
-                    content = content[0] if content else ""
-                final_text = str(content)
+                final_text = _message_text(m.content)
                 break
         return {"step_results": [f"Step {idx + 1}: {final_text}"]}
 
@@ -163,10 +171,7 @@ def build_plan_and_execute_graph(
                 ),
             ]
         )
-        content = response.content
-        if isinstance(content, list):
-            content = content[0] if content else ""
-        return {"final_output": str(content)}
+        return {"final_output": _message_text(response.content)}
 
     # ---- graph ----
     graph = StateGraph(PlanExecState)

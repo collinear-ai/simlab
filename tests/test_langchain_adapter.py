@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from typing import Protocol
+from typing import cast
 
 import pytest
 
@@ -9,68 +11,43 @@ pytest.importorskip("langchain_core")
 
 from simlab.agents.adapters import RunArtifactsRecorder
 from simlab.agents.adapters.langchain import build_langchain_tools
-from simlab.agents.base import BaseEnvironment
 from simlab.agents.base import RunArtifacts
 from simlab.agents.base import ToolCallResult
-from simlab.agents.base import ToolNamespace
+
+from tests.adapter_contract import ContractEnvironment
+from tests.adapter_contract import ToolAdapterHarness
+from tests.adapter_contract import assert_exposes_demo_tools
+from tests.adapter_contract import assert_records_tool_invocation
+from tests.adapter_contract import assert_rejects_duplicate_wire_names
 
 
-class FakeEnvironment(BaseEnvironment):
-    def list_tool_namespaces(self) -> list[ToolNamespace]:
-        return [
-            ToolNamespace(
-                name="email-env",
-                transport="http",
-                endpoint="http://localhost:8040",
-            ),
-            ToolNamespace(
-                name="demo",
-                transport="mcp",
-                endpoint="http://localhost:8081/mcp",
-            ),
-        ]
+class LangChainHarness(ToolAdapterHarness):
+    def build_tools(self, environment, *, recorder=None) -> list[object]:  # noqa: ANN001
+        return build_langchain_tools(environment, recorder=recorder)
 
-    async def alist_tools(self, tool_server: str | None = None) -> list[dict[str, Any]]:
-        _ = tool_server
-        return [
-            {
-                "tool_server": "email-env",
-                "name": "search_emails",
-                "description": "Search email",
-                "input_schema": {"type": "object"},
-                "transport": "http",
-            },
-            {
-                "tool_server": "demo",
-                "name": "ping",
-                "description": "Ping the demo MCP server",
-                "input_schema": {"type": "object"},
-                "transport": "mcp",
-            },
-        ]
+    def tool_name(self, tool: object) -> str:
+        return cast(LangChainToolLike, tool).name
 
-    async def acall_tool(
-        self,
-        tool_server: str,
-        tool_name: str,
-        parameters: dict[str, Any],
-    ) -> ToolCallResult:
-        return ToolCallResult(
-            observation={
-                "tool_server": tool_server,
-                "tool_name": tool_name,
-                "parameters": parameters,
-            }
-        )
+    def invoke(self, tool: object, payload: dict[str, Any]) -> str:
+        return cast(LangChainToolLike, tool).invoke(payload)
+
+
+class LangChainToolLike(Protocol):
+    name: str
+
+    def invoke(self, payload: dict[str, Any]) -> str: ...
 
 
 def test_build_langchain_tools_exposes_http_and_mcp_tools() -> None:
-    recorder = RunArtifactsRecorder(RunArtifacts(task_id="task-1", task="demo"))
-    tools = build_langchain_tools(FakeEnvironment(), recorder=recorder)
-    assert {tool.name for tool in tools} == {
-        "email-env__search_emails",
-        "demo__ping",
-    }
+    assert_exposes_demo_tools(LangChainHarness())
+
+
+def test_langchain_tool_invocation_records_artifacts() -> None:
+    assert_records_tool_invocation(LangChainHarness())
+
+
+def test_langchain_tools_reject_duplicate_wire_names() -> None:
+    assert_rejects_duplicate_wire_names(LangChainHarness())
 
 
 def test_run_artifacts_recorder_records_tool_calls() -> None:
@@ -115,7 +92,17 @@ def test_run_artifacts_recorder_records_tool_calls() -> None:
     assert artifacts.messages[2]["role"] == "tool"
     assert artifacts.messages[2]["content"] == {
         "tool_call_id": "call_1",
+        "tool_server": "demo",
         "tool_name": "ping",
         "is_error": False,
     }
     assert artifacts.messages[-1]["role"] == "assistant"
+
+
+def test_langchain_tools_accept_nested_schema_without_crashing() -> None:
+    tools = build_langchain_tools(ContractEnvironment())
+    result = tools[1].invoke({"value": 2})
+    parsed = json.loads(result)
+
+    assert parsed["tool_name"] == "ping"
+    assert parsed["parameters"] == {"value": 2}

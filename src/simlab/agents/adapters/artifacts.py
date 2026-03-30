@@ -82,6 +82,7 @@ class RunArtifactsRecorder:
             "tool",
             build_artifact_tool_message_content(
                 tool_call_id=tool_call_id,
+                tool_server=tool_server,
                 tool_name=tool_name,
                 result=result,
             ),
@@ -136,6 +137,7 @@ def build_artifact_assistant_tool_call_content(
 def build_artifact_tool_message_content(
     *,
     tool_call_id: str,
+    tool_server: str,
     tool_name: str,
     result: ToolResultLike,
 ) -> dict[str, Any]:
@@ -156,6 +158,7 @@ def build_artifact_tool_message_content(
 
     payload: dict[str, Any] = {
         "tool_call_id": tool_call_id,
+        "tool_server": tool_server,
         "tool_name": tool_name,
         "is_error": result.is_error,
     }

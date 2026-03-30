@@ -17,27 +17,16 @@ from typing import Any
 import click
 import yaml
 
-from simlab.catalog.registry import ToolRegistry
 from simlab.cli.progress import StepContext
 from simlab.cli.progress import StepProgress
 from simlab.cli.progress import StepProgressReporter
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
 from simlab.config import resolve_daytona_api_key
+from simlab.env_registry import build_registry
 from simlab.runtime.compose_ps import parse_ps_output
 from simlab.runtime.daytona_runner import DaytonaNotFoundError
 from simlab.seeder import query_tool_server
-
-# ---------------------------------------------------------------------------
-# Registry helper
-# ---------------------------------------------------------------------------
-
-
-def _get_registry() -> ToolRegistry:
-    registry = ToolRegistry()
-    registry.load_all()
-    return registry
-
 
 # ---------------------------------------------------------------------------
 # Compose introspection
@@ -84,8 +73,7 @@ def _get_profiled_service_names(
     tool_names: list[str] | None = None,
 ) -> list[str]:
     """Get profiled service names from the tool definitions in config."""
-    _ = config_path
-    registry = _get_registry()
+    registry = build_registry(env_dir=config_path.parent if config_path is not None else None)
     names: list[str] = []
     for tool_name in tool_names or config.tools:
         tool = registry.get_tool(tool_name)
@@ -173,8 +161,7 @@ def _run_profiled_services_local(
 
 def _get_tool_ports(config: EnvConfig, config_path: Path | None = None) -> dict[str, int]:
     """Get tool server ports keyed by tool name from loaded catalog entries."""
-    _ = config_path
-    registry = _get_registry()
+    registry = build_registry(env_dir=config_path.parent if config_path is not None else None)
     ports: dict[str, int] = {}
     for tool_name in config.tools:
         tool = registry.get_tool(tool_name)
@@ -236,8 +223,7 @@ def _query_tool_server(
 
 def _verify_seed_local(config: EnvConfig, config_path: Path | None = None) -> None:
     """Verify seed data by querying the frappe tool server."""
-    _ = config_path
-    registry = _get_registry()
+    registry = build_registry(env_dir=config_path.parent if config_path is not None else None)
     for tool_name in config.tools:
         tool = registry.get_tool(tool_name)
         if not tool or not tool.seed_services:
@@ -249,8 +235,7 @@ def _verify_seed_local(config: EnvConfig, config_path: Path | None = None) -> No
 
 def _verify_seed_daytona(config: EnvConfig, endpoints: dict[str, str], config_path: Path) -> None:
     """Verify seed data by querying Daytona-exposed tool endpoints."""
-    _ = config_path
-    registry = _get_registry()
+    registry = build_registry(env_dir=config_path.parent if config_path is not None else None)
     for tool_name in config.tools:
         tool = registry.get_tool(tool_name)
         if not tool or not tool.seed_services:

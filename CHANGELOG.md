@@ -2,6 +2,33 @@
 
 All notable changes to the SimLab will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Env-local custom tool definitions under `environments/<env>/custom-tools/`
+- `simlab env custom-tools add <env> <name>` to scaffold, enable, and
+  regenerate a custom tool in one command
+- `simlab tools info --env <env>` support for inspecting env-local tools
+- Documentation for env-local custom tool workflows and regeneration behavior
+
+### Changed
+
+- Generated env artifacts now detect drift from `env.yaml`,
+  `custom-tools/*.yaml`, and `mcp-servers.json`
+- Interactive `env up`, `tasks run`, and `tasks seed` now prompt to
+  regenerate stale generated files instead of running with outdated compose
+  output
+- MCP server names are now validated in the environment namespace, including
+  conflicts with built-in tools and env-local custom tools
+- Daytona build contexts for environment services must stay inside the
+  environment bundle
+
+### Fixed
+
+- SimLab no longer runs with silently stale generated env files after manual
+  edits to env config inputs
+
 ## [0.2.0] — 2026-03-26
 
 ### Added:

@@ -150,7 +150,7 @@ def test_generic_wrapped_command_posts_for_local_catalog_command(
     with (
         patch("simlab.telemetry.telemetry_state_path", return_value=tmp_path / "telemetry.json"),
         patch("simlab.telemetry.queue_telemetry_request", side_effect=fake_queue_telemetry_request),
-        patch("simlab.cli.tools._get_registry") as mocked_registry,
+        patch("simlab.cli.tools.build_registry") as mocked_registry,
     ):
         mocked_registry.return_value.get_tool.return_value = fake_tool
         result = runner.invoke(tools, ["info", "email"])

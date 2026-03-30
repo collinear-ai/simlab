@@ -14,6 +14,7 @@ from simlab.agents.adapters.artifacts import ToolEventRecorder
 from simlab.agents.adapters.core import ToolDescriptor
 from simlab.agents.adapters.core import _run_async_compat
 from simlab.agents.adapters.core import alist_tool_descriptors
+from simlab.agents.adapters.core import build_tool_dispatch
 from simlab.agents.adapters.core import stringify_observation
 from simlab.agents.base import BaseEnvironment
 from simlab.agents.base import ToolCallResult
@@ -58,7 +59,9 @@ async def abuild_langchain_tools(
 
     tools: list[Any] = []
     call_counter = count(1)
-    for descriptor in await alist_tool_descriptors(environment):
+    descriptors = await alist_tool_descriptors(environment)
+    build_tool_dispatch(descriptors)
+    for descriptor in descriptors:
         args_model = _schema_to_model(descriptor)
 
         async def ainvoke_tool(

@@ -22,6 +22,10 @@ from simlab.runtime.env_lifecycle import run_env_seed_daytona
 from simlab.runtime.env_lifecycle import run_env_seed_local
 
 
+def _patch_registry(monkeypatch: pytest.MonkeyPatch, registry: object) -> None:
+    monkeypatch.setattr(tasks_cli, "build_registry", lambda *args, **kwargs: registry)
+
+
 def test_effective_tool_servers_merges_environment_endpoints() -> None:
     rewritten_task = {
         "tool_servers": [
@@ -610,11 +614,9 @@ def test_get_daytona_endpoints_checks_status_inactive(monkeypatch) -> None:  # n
 
     monkeypatch.setattr(tasks_cli.click, "confirm", lambda *_a, **_k: False)
     monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
-    monkeypatch.setattr(
-        tasks_cli,
-        "ToolRegistry",
-        lambda: SimpleNamespace(
-            load_all=lambda: None,
+    _patch_registry(
+        monkeypatch,
+        SimpleNamespace(
             get_tool=lambda _n: SimpleNamespace(tool_server_port=8040, tool_server_url=None),
         ),
     )
@@ -663,7 +665,7 @@ def test_get_daytona_endpoints_without_state_for_url_only_mcp_returns_empty(monk
         def get_tool(self, name: str):
             _ = name
 
-    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+    _patch_registry(monkeypatch, FakeRegistry())
 
     endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
 
@@ -739,7 +741,7 @@ def test_get_daytona_endpoints_prompts_and_resumes(monkeypatch) -> None:  # noqa
             lambda *_args, **_kwargs: None,
         ),
     )
-    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+    _patch_registry(monkeypatch, FakeRegistry())
     endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
     assert endpoints["email"].startswith("https://")
     assert restart_calls == [["email-preseed"]]
@@ -812,7 +814,7 @@ def test_get_daytona_endpoints_resume_restart_failure_mentions_env_up(
             lambda *_args, **_kwargs: None,
         ),
     )
-    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+    _patch_registry(monkeypatch, FakeRegistry())
 
     with pytest.raises(SystemExit) as exc_info:
         tasks_cli._get_daytona_endpoints(str(cfg))
@@ -856,7 +858,7 @@ def test_get_daytona_endpoints_status_then_urls(monkeypatch) -> None:  # noqa: A
             return None
 
     monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
-    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+    _patch_registry(monkeypatch, FakeRegistry())
     endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
     assert endpoints["email"].startswith("https://")
     shutil.rmtree(tmp, ignore_errors=True)
@@ -908,7 +910,7 @@ def test_get_daytona_endpoints_uses_mapped_gateway_port(monkeypatch) -> None:  #
             return None
 
     monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
-    monkeypatch.setattr(tasks_cli, "ToolRegistry", FakeRegistry)
+    _patch_registry(monkeypatch, FakeRegistry())
 
     endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
 
@@ -1221,6 +1223,7 @@ def test_seed_command_waits_only_on_seed_endpoints(
         ),
     )
     monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", fake_require)
+    monkeypatch.setattr(tasks_cli, "ensure_env_artifacts_current", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks_cli, "_provision_task_group_channels", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks_cli, "_provision_task_calendar_users", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks_cli, "_ensure_task_calendar_accounts", lambda *args, **kwargs: None)
@@ -1372,6 +1375,7 @@ def test_run_command_waits_only_on_task_endpoints(
         ),
     )
     monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", fake_require)
+    monkeypatch.setattr(tasks_cli, "ensure_env_artifacts_current", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks_cli, "load_mcp_servers_from_env_dir", lambda _env_dir: None)
     monkeypatch.setattr(tasks_cli, "_build_mcp_clients", lambda *args, **kwargs: {})
     monkeypatch.setattr(tasks_cli, "_require_mcp_tools_available", lambda *args, **kwargs: None)
@@ -1699,11 +1703,9 @@ def test_get_daytona_endpoints_rejects_resume_when_disallowed(
             return FakeSandbox()
 
     monkeypatch.setattr(tasks_cli, "_get_daytona_client", lambda *_args, **_kwargs: FakeDaytona())
-    monkeypatch.setattr(
-        tasks_cli,
-        "ToolRegistry",
-        lambda: SimpleNamespace(
-            load_all=lambda: None,
+    _patch_registry(
+        monkeypatch,
+        SimpleNamespace(
             get_tool=lambda _n: SimpleNamespace(tool_server_port=8040, tool_server_url=None),
         ),
     )

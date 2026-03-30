@@ -12,6 +12,7 @@ import yaml
 from pydantic import BaseModel
 from pydantic import Field
 
+from simlab.catalog.registry import BuildDefinition
 from simlab.catalog.registry import ServiceDefinition
 from simlab.catalog.registry import ToolDefinition
 from simlab.catalog.registry import ToolRegistry
@@ -255,7 +256,7 @@ class ComposeEngine:
 
             # Emit build context so docker compose can build from source
             if svc_def.build:
-                svc["build"] = svc_def.build
+                svc["build"] = self._serialize_build(svc_def.build)
 
             # Port mappings: only tool_server and exposed_ports get host bindings
             ports = []
@@ -319,7 +320,7 @@ class ComposeEngine:
             }
 
             if svc_def.build:
-                svc["build"] = svc_def.build
+                svc["build"] = self._serialize_build(svc_def.build)
 
             env = dict(svc_def.environment)
             env.update(self._get_service_env(tool_name, svc_name, config))
@@ -471,6 +472,13 @@ class ComposeEngine:
             if vol_def.driver:
                 vol["driver"] = vol_def.driver
             volumes[vol_name] = vol
+
+    @staticmethod
+    def _serialize_build(build: str | BuildDefinition) -> str | dict[str, str]:
+        """Convert a typed build definition into docker-compose YAML data."""
+        if isinstance(build, str):
+            return build
+        return build.model_dump(exclude_none=True)
 
     def _collect_env_vars(
         self,

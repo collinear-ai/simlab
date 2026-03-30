@@ -42,6 +42,16 @@ def stringify_observation(observation: object) -> str:
         return str(observation)
 
 
+def normalize_openai_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a tool schema normalized for OpenAI-compatible tools."""
+    normalized = _normalize_openai_schema_node(schema, schema_node=True)
+    if not isinstance(normalized, dict):
+        return {"type": "object"}
+    if "type" not in normalized:
+        normalized["type"] = "object"
+    return normalized
+
+
 async def alist_tool_descriptors(environment: BaseEnvironment) -> list[ToolDescriptor]:
     """Return normalized tool descriptors for all visible environment tools."""
     descriptors: list[ToolDescriptor] = []
@@ -90,6 +100,76 @@ def build_tool_dispatch(
             descriptor.tool_name,
         )
     return dispatch
+
+
+_SCHEMA_MAPPING_KEYWORDS = {
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "patternProperties",
+    "properties",
+}
+_SCHEMA_LIST_KEYWORDS = {"allOf", "anyOf", "oneOf", "prefixItems"}
+_SCHEMA_VALUE_KEYWORDS = {
+    "additionalItems",
+    "additionalProperties",
+    "contains",
+    "contentSchema",
+    "else",
+    "if",
+    "items",
+    "not",
+    "propertyNames",
+    "then",
+    "unevaluatedProperties",
+}
+
+
+def _clone_json_value(node: object) -> object:
+    """Return a deep copy of plain JSON-like values without schema rewriting."""
+    if isinstance(node, list):
+        return [_clone_json_value(item) for item in node]
+    if isinstance(node, dict):
+        return {key: _clone_json_value(value) for key, value in node.items()}
+    return node
+
+
+def _normalize_openai_schema_node(node: object, *, schema_node: bool) -> object:
+    """Recursively normalize nested JSON Schema nodes for OpenAI compatibility."""
+    if isinstance(node, list):
+        if not schema_node:
+            return [_clone_json_value(item) for item in node]
+        return [_normalize_openai_schema_node(item, schema_node=True) for item in node]
+    if not isinstance(node, dict):
+        return node
+    if schema_node and not node:
+        return {"type": "object"}
+    if not schema_node:
+        return _clone_json_value(node)
+
+    normalized: dict[str, object] = {}
+    for key, value in node.items():
+        if key in _SCHEMA_MAPPING_KEYWORDS and isinstance(value, dict):
+            normalized[key] = {
+                child_key: _normalize_openai_schema_node(child_value, schema_node=True)
+                for child_key, child_value in value.items()
+            }
+            continue
+        if key in _SCHEMA_LIST_KEYWORDS and isinstance(value, list):
+            normalized[key] = [
+                _normalize_openai_schema_node(item, schema_node=True) for item in value
+            ]
+            continue
+        if key in _SCHEMA_VALUE_KEYWORDS and isinstance(value, dict):
+            normalized[key] = _normalize_openai_schema_node(value, schema_node=True)
+            continue
+        normalized[key] = _clone_json_value(value)
+    if "type" not in normalized:
+        if "properties" in normalized:
+            normalized["type"] = "object"
+        elif "items" in normalized:
+            normalized["type"] = "array"
+    return normalized
 
 
 def _run_async_compat(coro: Coroutine[object, object, T]) -> T:

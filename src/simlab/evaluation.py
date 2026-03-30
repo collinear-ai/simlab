@@ -216,6 +216,9 @@ def load_rollout(
     rollout_id = path.name
     if run_name and path.parent.name == run_name:
         rollout_id = f"{run_name}/{path.name}"
+    metadata: dict[str, Any] = (
+        dict(artifacts["metadata"]) if isinstance(artifacts.get("metadata"), dict) else {}
+    )
 
     return {
         "rollout_id": rollout_id,
@@ -234,10 +237,7 @@ def load_rollout(
             error=error,
         ),
         "error": error,
-        "metrics": extract_metrics(
-            dict(artifacts["metadata"]) if isinstance(artifacts.get("metadata"), dict) else {},
-            summary_entry,
-        ),
+        "metrics": extract_metrics(metadata, summary_entry),
         "criteria": criteria,
         "reward_model": reward_model,
         "tool_calls": build_tool_calls(
@@ -1450,14 +1450,14 @@ def compare_reward_model_dimensions(
     right_reward_model = right_rollout.get("reward_model")
     left_dimension_scores: list[Any] = []
     if isinstance(left_reward_model, dict):
-        raw = left_reward_model.get("dimension_scores")
-        if isinstance(raw, list):
-            left_dimension_scores = raw
+        raw_left_dimension_scores = left_reward_model.get("dimension_scores")
+        if isinstance(raw_left_dimension_scores, list):
+            left_dimension_scores = raw_left_dimension_scores
     right_dimension_scores: list[Any] = []
     if isinstance(right_reward_model, dict):
-        raw = right_reward_model.get("dimension_scores")
-        if isinstance(raw, list):
-            right_dimension_scores = raw
+        raw_right_dimension_scores = right_reward_model.get("dimension_scores")
+        if isinstance(raw_right_dimension_scores, list):
+            right_dimension_scores = raw_right_dimension_scores
     left_by_name = {
         item["dimension"]: item
         for item in left_dimension_scores

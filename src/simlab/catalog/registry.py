@@ -28,11 +28,20 @@ class EnvVarRequirement(BaseModel):
     description: str = ""
 
 
+class BuildDefinition(BaseModel):
+    """Supported docker-compose build configuration for catalog services."""
+
+    model_config = {"extra": "forbid"}
+
+    context: str
+    dockerfile: str | None = None
+
+
 class ServiceDefinition(BaseModel):
     """A single docker-compose service."""
 
     image: str = ""
-    build: str | None = None
+    build: str | BuildDefinition | None = None
     ports: list[str] = Field(default_factory=list)
     environment: dict[str, str] = Field(default_factory=dict)
     depends_on: list[str] | dict[str, Any] = Field(default_factory=list)
@@ -151,22 +160,33 @@ class ToolRegistry:
         """Initialize empty registry."""
         self._tools: dict[str, ToolDefinition] = {}
 
-    def load_all(self) -> None:
+    def _register_tool(self, tool: ToolDefinition, *, source: str) -> None:
+        """Register one tool, rejecting duplicates."""
+        if tool.name in self._tools:
+            raise ValueError(f"Duplicate tool definition for '{tool.name}' from {source}")
+        self._tools[tool.name] = tool
+
+    def load_all(self, *, env_dir: Path | None = None) -> None:
         """Load all tool YAML files from the catalog/tools package directory."""
+        self._tools = {}
         tools_pkg = resources.files("simlab.catalog") / "tools"
         for item in tools_pkg.iterdir():
             if hasattr(item, "name") and item.name.endswith(".yaml"):
                 text = item.read_text(encoding="utf-8")
                 data = yaml.safe_load(text)
                 tool = _parse_tool_yaml(data)
-                self._tools[tool.name] = tool
+                self._register_tool(tool, source=f"built-in catalog file {item.name}")
+        if env_dir is not None:
+            self.load_from_directory(env_dir / "custom-tools")
 
     def load_from_directory(self, path: Path) -> None:
         """Load tool YAMLs from an arbitrary directory (for testing)."""
+        if not path.is_dir():
+            return
         for yaml_file in sorted(path.glob("*.yaml")):
             data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
             tool = _parse_tool_yaml(data)
-            self._tools[tool.name] = tool
+            self._register_tool(tool, source=str(yaml_file))
 
     def get_tool(self, name: str) -> ToolDefinition | None:
         """Return the tool definition for the given name, or None."""

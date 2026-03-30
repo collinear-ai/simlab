@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import simlab.runtime.daytona_runner as daytona_runner_mod
 import yaml
 from simlab.runtime.daytona_runner import DaytonaRunner
@@ -80,6 +81,33 @@ services:
     assert service["volumes"] == [
         "/home/daytona/mcp-gateway-config.json:/config/mcp-gateway-config.json:ro"
     ]
+
+
+def test_prepare_compose_for_remote_rejects_external_build_context(tmp_path: Path) -> None:
+    compose_dir = tmp_path / "env"
+    compose_dir.mkdir()
+    external_dir = tmp_path / "external-build"
+    external_dir.mkdir()
+    (external_dir / "Dockerfile").write_text("FROM busybox\n", encoding="utf-8")
+    (compose_dir / "docker-compose.yml").write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "harbor-main": {
+                        "build": {
+                            "context": external_dir.as_posix(),
+                            "dockerfile": "Dockerfile",
+                        }
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="inside the environment bundle"):
+        DaytonaRunner()._prepare_compose_for_remote(compose_dir)
 
 
 def test_restart_sandbox_services_runs_preseed_then_compose_up(monkeypatch) -> None:  # noqa: ANN001

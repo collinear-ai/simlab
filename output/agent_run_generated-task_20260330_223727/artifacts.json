@@ -12,9 +12,7 @@
       "base_url": null,
       "api_key_provided": true,
       "agent_import_path": null,
-      "tool_servers": {
-        "email-env": "http://localhost:8040"
-      },
+      "tool_servers": {},
       "managed_env": false,
       "keep_alive": false
     }
@@ -23,5 +21,5 @@
   "error": null,
   "steps_taken": 0,
   "max_steps": 5,
-  "created_at": "2026-03-27T04:25:05.964270+00:00"
+  "created_at": "2026-03-30T22:37:27.878726+00:00"
 }

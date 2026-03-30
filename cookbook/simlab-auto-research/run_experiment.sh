@@ -38,10 +38,13 @@ else
         [ -n "$line" ] && TASKS+=("$line")
     done < <(
         # shellcheck disable=SC2086
+        # Skip 5 header lines (blank, title, blank, column headers, separator)
+        # and filter out the footer ("N task(s) total") and separator lines
         simlab tasks list --env "$ENV_NAME" $tasks_dir_flag 2>/dev/null \
-            | tail -n +3 \
-            | awk '{print $1}' \
-            | grep -v '^$'
+            | tail -n +6 \
+            | awk 'NF {print $1}' \
+            | grep -v '^─' \
+            | grep -v 'task(s)'
     )
 fi
 

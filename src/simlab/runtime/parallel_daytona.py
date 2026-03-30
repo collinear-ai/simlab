@@ -45,6 +45,7 @@ from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import get_mcp_gateway_host_port
 from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import load_mcp_servers_from_env_dir
+from simlab.npc_chat.activation import NpcChatSession
 from simlab.runtime.daytona_runner import _SNAPSHOT_NAME
 from simlab.runtime.daytona_runner import CreateSandboxFromSnapshotParams
 from simlab.runtime.daytona_runner import _get_daytona
@@ -484,53 +485,79 @@ class ParallelDaytonaOrchestrator:
             _require_mcp_tools_available(mcp_clients)
             rewritten = _rewrite_tool_server_urls(task_data, endpoints)
             tool_namespace_endpoints = _effective_tool_servers(rewritten, endpoints)
-            if not tool_namespace_endpoints and not mcp_clients:
-                raise RuntimeError(  # noqa: TRY301
-                    "Task has no valid tool_servers and no MCP servers after URL resolution"
-                )
 
-            unified_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
-            environment = unified_tool_env_cls(
-                tool_servers=tool_namespace_endpoints,
-                mcp_clients=mcp_clients or None,
-            )
-
-            instruction = rewritten.get("task", "")
-            skills_section = _build_skills_guidance_section(
-                _load_skills_markdown(config=config, bundle_dir=bundle_dir)
-            )
-            if skills_section:
-                instruction = f"{instruction}\n\n{skills_section}"
-            services_section = _build_services_available_section(
-                config,
-                daytona=True,
-                config_path=config_path,
-                endpoints=endpoints,
-            )
-            if services_section:
-                instruction = f"{instruction}\n\n{services_section}"
-
-            meta = task_data.get("meta", {})
-            click.echo(f"{tag} Running agent ({model} via {provider})...")
-
-            artifacts = run_with_agent_contract(
-                task_id=meta.get("task_id", ""),
-                instruction=instruction,
+            # Auto-activate NPC chat tool if any NPC has chat personality fields.
+            npc_session = NpcChatSession.from_task_data(
+                task_data,
                 model=model,
-                provider=provider,
-                max_steps=max_steps,
-                environment=environment,
-                agent_import_path=agent_import_path,
-                timeout_seconds=agent_timeout_seconds,
                 api_key=api_key,
                 base_url=base_url,
-                stop_event=self._cancel,
+                provider=provider,
             )
+            if npc_session is not None:
+                npc_url = npc_session.start()
+                tool_namespace_endpoints["npc-chat"] = npc_url
+                click.echo(f"{tag} NPC chat tool auto-activated")
+
+            artifacts = None
+            try:
+                if not tool_namespace_endpoints and not mcp_clients:
+                    raise RuntimeError(
+                        "Task has no valid tool_servers and no MCP servers after URL resolution"
+                    )
+
+                unified_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
+                environment = unified_tool_env_cls(
+                    tool_servers=tool_namespace_endpoints,
+                    mcp_clients=mcp_clients or None,
+                )
+
+                instruction = rewritten.get("task", "")
+                skills_section = _build_skills_guidance_section(
+                    _load_skills_markdown(config=config, bundle_dir=bundle_dir)
+                )
+                if skills_section:
+                    instruction = f"{instruction}\n\n{skills_section}"
+                services_section = _build_services_available_section(
+                    config,
+                    daytona=True,
+                    config_path=config_path,
+                    endpoints=endpoints,
+                )
+                if services_section:
+                    instruction = f"{instruction}\n\n{services_section}"
+
+                meta = task_data.get("meta", {})
+                click.echo(f"{tag} Running agent ({model} via {provider})...")
+
+                artifacts = run_with_agent_contract(
+                    task_id=meta.get("task_id", ""),
+                    instruction=instruction,
+                    model=model,
+                    provider=provider,
+                    max_steps=max_steps,
+                    environment=environment,
+                    agent_import_path=agent_import_path,
+                    timeout_seconds=agent_timeout_seconds,
+                    api_key=api_key,
+                    base_url=base_url,
+                    stop_event=self._cancel,
+                )
+            finally:
+                if npc_session is not None:
+                    if artifacts is not None:
+                        npc_session.attach_to_artifacts(artifacts)
+                    npc_session.stop()
+
             result.steps_taken = artifacts.steps_taken
 
             # 5. Save artifacts
             rollout_dir = run_dir / f"rollout_{rollout_idx}"
             rollout_dir.mkdir(parents=True, exist_ok=True)
+
+            if npc_session is not None:
+                npc_session.save_transcripts(rollout_dir)
+
             output_path = rollout_dir / "artifacts.json"
             artifacts.dump(output_path)
             result.artifacts_path = output_path

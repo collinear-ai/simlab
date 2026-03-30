@@ -43,6 +43,10 @@ _ENV_MAP: dict[str, list[str]] = {
     "agent_provider": ["SIMLAB_AGENT_PROVIDER"],
     "agent_base_url": ["SIMLAB_AGENT_BASE_URL"],
     "agent_api_key": ["SIMLAB_AGENT_API_KEY"],
+    "npc_chat_model": ["SIMLAB_NPC_CHAT_MODEL"],
+    "npc_chat_provider": ["SIMLAB_NPC_CHAT_PROVIDER"],
+    "npc_chat_base_url": ["SIMLAB_NPC_CHAT_BASE_URL"],
+    "npc_chat_api_key": ["SIMLAB_NPC_CHAT_API_KEY"],
 }
 
 _TOP_LEVEL_FILE_FIELDS = {
@@ -66,6 +70,12 @@ _SECTION_FIELD_MAP: dict[str, dict[str, str]] = {
         "provider": "verifier_provider",
         "base_url": "verifier_base_url",
         "api_key": "verifier_api_key",
+    },
+    "npc_chat": {
+        "model": "npc_chat_model",
+        "provider": "npc_chat_provider",
+        "base_url": "npc_chat_base_url",
+        "api_key": "npc_chat_api_key",
     },
     "telemetry": {
         "disabled": "telemetry_disabled",
@@ -139,6 +149,10 @@ class GlobalConfig(BaseModel):
     agent_provider: str | None = None
     agent_base_url: str | None = None
     agent_api_key: str | None = None
+    npc_chat_model: str | None = None
+    npc_chat_provider: str | None = None
+    npc_chat_base_url: str | None = None
+    npc_chat_api_key: str | None = None
 
 
 def env_var_list(env_vars: tuple[str, ...] | list[str]) -> str:

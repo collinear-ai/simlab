@@ -8,10 +8,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from simlab.catalog.registry import ToolRegistry
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
 from simlab.composer.engine import get_mcp_gateway_host_port
+from simlab.env_registry import build_registry
 from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import load_mcp_servers_from_env_dir
 
@@ -44,8 +44,7 @@ def get_tool_endpoints(config: EnvConfig, config_path: Path | None = None) -> di
     When config_path is set and the env has command-based MCP servers, adds the
     MCP gateway endpoint so callers can use it for the gateway URL.
     """
-    registry = ToolRegistry()
-    registry.load_all()
+    registry = build_registry(env_dir=config_path.parent if config_path is not None else None)
     endpoints: dict[str, str] = {}
     for tool_name in config.tools:
         tool = registry.get_tool(tool_name)

@@ -1,0 +1,98 @@
+# Template: Project Management
+# Pre-filled config for project management coordination (UnifiedConfig schema)
+
+[agent]
+role = "Project management coordinator"
+description = "Coordinates project planning, task assignment, milestone tracking, resource allocation, and stakeholder communication."
+
+[[toolset]]
+name = "Project Management"
+description = "Projects, tasks, sprints, milestones, resource assignments, and timelines"
+service_name = "project-management-env"
+service_url = "http://project-management-env:8110"
+operations = ["search", "read", "create", "update"]
+
+[[toolset]]
+name = "Email"
+description = "Send and read emails"
+service_name = "email-env"
+service_url = "http://email-env:8040"
+operations = ["send", "read"]
+
+[[toolset]]
+name = "Chat"
+description = "Send messages in Rocket.Chat channels and DMs"
+service_name = "rocketchat-env"
+service_url = "http://rocketchat-env:8060"
+operations = ["send", "read"]
+
+[scenario]
+name = "project_management"
+role_label = "Project management professional"
+conventions = """
+- Update task status and assignees in the project management tool before communicating changes
+- Use chat for daily standups and quick coordination, email for formal stakeholder updates
+- Document all scope changes and get stakeholder approval before implementation
+- Track blockers and risks with clear owners and resolution timelines
+"""
+policies = [
+    "Scope changes require Product Manager and Stakeholder sign-off",
+    "Resource reallocation across projects requires Stakeholder approval",
+    "Milestone deadline changes must be communicated to all stakeholders within 24 hours",
+    "Sprint commitments cannot be modified after sprint planning without Scrum Master approval",
+]
+
+[workspace]
+email_domain = "company.com"
+agent_email = "pm@company.com"
+
+[generation]
+num_tasks = 20
+complexity = { easy = 0.3, medium = 0.5, hard = 0.2 }
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+
+[[categories]]
+id = "sprint_planning"
+label = "Sprint planning"
+
+[[categories]]
+id = "task_assignment"
+label = "Task assignment"
+
+[[categories]]
+id = "milestone_tracking"
+label = "Milestone tracking"
+
+[[categories]]
+id = "resource_allocation"
+label = "Resource allocation"
+
+[[categories]]
+id = "stakeholder_updates"
+label = "Stakeholder updates"
+
+[[categories]]
+id = "risk_management"
+label = "Risk management"
+
+[[npcs]]
+role = "Product Manager"
+typical_asks = "Feature priorities, scope decisions, acceptance criteria"
+
+[[npcs]]
+role = "Tech Lead"
+typical_asks = "Technical feasibility, effort estimates, architecture decisions"
+
+[[npcs]]
+role = "Team Member"
+typical_asks = "Task clarification, blocker reporting, capacity updates"
+
+[[npcs]]
+role = "Stakeholder"
+typical_asks = "Progress updates, timeline questions, budget reviews"
+
+[[npcs]]
+role = "Scrum Master"
+typical_asks = "Process improvements, sprint retrospective items, velocity tracking"

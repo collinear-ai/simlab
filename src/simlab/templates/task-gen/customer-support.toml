@@ -1,0 +1,116 @@
+# Template: Customer Support
+# Pre-filled config matching the customer_support preset (UnifiedConfig schema)
+
+[agent]
+role = "Customer support agent"
+description = "Handles end-to-end customer support workflows: triaging incoming tickets, resolving issues using the knowledge base, managing multi-turn customer conversations across chat and email, escalating technical issues to engineering, enforcing SLA compliance, and coordinating cross-channel resolution for enterprise/VIP accounts."
+
+[[toolset]]
+name = "Helpdesk"
+description = "Customer tickets, knowledge base articles, account records, SLA policies"
+service_name = "frappe-helpdesk-env"
+service_url = "http://frappe-helpdesk-env:8030"
+operations = ["search", "read", "create", "update"]
+
+[[toolset]]
+name = "Chat"
+description = "Send messages in Rocket.Chat channels and DMs"
+service_name = "rocketchat-env"
+service_url = "http://rocketchat-env:8060"
+operations = ["send", "read"]
+
+[[toolset]]
+name = "Email"
+description = "Send and read emails"
+service_name = "email-env"
+service_url = "http://email-env:8040"
+operations = ["send", "read"]
+
+[[toolset]]
+name = "Browser"
+description = "Headless browser for verifying web-based workflows"
+service_name = "playwright-mcp"
+service_url = "http://playwright-mcp:8010"
+operations = ["navigate", "screenshot", "interact"]
+
+[scenario]
+name = "customer_support"
+role_label = "Customer support professional"
+conventions = """
+- Always check SLA deadlines before responding
+- Search knowledge base before escalating
+- Use email for customer communication, chat for internal coordination
+- Document resolution steps in the ticket
+"""
+policies = [
+    "VIP/Enterprise tickets must be acknowledged within 1 hour",
+    "Refunds over $500 require manager approval",
+    "Security incidents must be escalated to engineering immediately",
+]
+
+[workspace]
+email_domain = "weaverenterprises.com"
+agent_email = "support@weaverenterprises.com"
+
+[generation]
+num_tasks = 20
+complexity = { easy = 0.3, medium = 0.5, hard = 0.2 }
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+
+[[categories]]
+id = "ticket_triage"
+label = "Triage and route incoming tickets"
+
+[[categories]]
+id = "ticket_resolution"
+label = "Resolve tickets using KB and standard procedures"
+
+[[categories]]
+id = "billing_inquiry"
+label = "Handle billing questions and refund requests"
+
+[[categories]]
+id = "technical_escalation"
+label = "Escalate technical issues to engineering"
+
+[[categories]]
+id = "manager_escalation"
+label = "Route exception requests to support manager"
+
+[[categories]]
+id = "vip_enterprise_support"
+label = "Handle VIP and enterprise priority issues"
+
+[[categories]]
+id = "sla_compliance"
+label = "Monitor and enforce SLA compliance"
+
+[[categories]]
+id = "knowledge_base_lookup"
+label = "Search and apply knowledge base solutions"
+
+[[categories]]
+id = "cross_channel_coordination"
+label = "Coordinate resolution across chat, email, and helpdesk"
+
+[[npcs]]
+role = "Regular Customer"
+typical_asks = "Issue resolution, password resets, feature questions, billing inquiries"
+
+[[npcs]]
+role = "Frustrated Customer"
+typical_asks = "Repeated issue follow-ups, complaints about response time, escalation demands"
+
+[[npcs]]
+role = "VIP/Enterprise Customer"
+typical_asks = "Performance issues affecting teams, urgent production outages, SLA enforcement"
+
+[[npcs]]
+role = "Support Manager"
+typical_asks = "Exception approvals, process guidance, escalation decisions"
+
+[[npcs]]
+role = "Engineering Lead"
+typical_asks = "Bug triage, technical escalation review, incident support"

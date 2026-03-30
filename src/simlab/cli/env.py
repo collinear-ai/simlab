@@ -22,15 +22,20 @@ from simlab.composer.engine import DEFAULT_IMAGE_REGISTRY
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
 from simlab.composer.engine import get_mcp_gateway_host_port
-from simlab.composer.engine import write_output
 from simlab.config import get_env_dir
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_env_dir
+from simlab.env_artifacts import ensure_env_artifacts_current
+from simlab.env_artifacts import load_env_config
+from simlab.env_artifacts import regenerate_env_artifacts
+from simlab.env_custom_tools import add_custom_tool
+from simlab.env_registry import build_registry
 from simlab.mcp_config import MCP_SERVERS_FILENAME
 from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import load_mcp_servers_config
 from simlab.mcp_config import load_mcp_servers_from_env_dir
+from simlab.mcp_config import validate_mcp_server_name_conflicts
 from simlab.runtime.env_lifecycle import _compose_has_build_contexts
 from simlab.runtime.env_lifecycle import _compose_has_services
 from simlab.runtime.env_lifecycle import _get_daytona_runner
@@ -226,12 +231,6 @@ _CODING_VERIFIERS_INIT = dedent(
 )
 
 
-def _get_registry() -> ToolRegistry:
-    registry = ToolRegistry()
-    registry.load_all()
-    return registry
-
-
 def _extract_tools_from_scenario(
     registry: ToolRegistry, scenario: ScenarioSummary
 ) -> tuple[list[str], list[str]]:
@@ -371,7 +370,7 @@ def init(
     global_cfg = get_global_config_from_ctx(ctx)
     env_dir = get_env_dir(env_name, ctx=ctx)
     env_yaml = env_dir / "env.yaml"
-    registry = _get_registry()
+    registry = build_registry()
     scenario_guidance_md = (
         _load_scenario_guidance_file(str(scenario_guidance_file))
         if scenario_guidance_file is not None
@@ -485,6 +484,10 @@ def init(
     if mcp_servers_path is not None:
         try:
             mcp_config = load_mcp_servers_config(mcp_servers_path)
+            validate_mcp_server_name_conflicts(
+                mcp_config,
+                existing_tool_names=frozenset(build_registry(env_dir=env_dir).tool_names),
+            )
         except (TypeError, ValueError) as e:
             click.echo(click.style(str(e), fg="red"), err=True)
             raise SystemExit(1) from e
@@ -550,15 +553,11 @@ def init(
         if "coding" in selected_tools:
             _scaffold_coding_environment(env_dir, env_name)
 
-    # Generate docker-compose.yml and .env.
-    engine = ComposeEngine(registry)
     try:
-        compose_output = engine.compose(config, config_dir=env_yaml.parent, env_dir=env_dir)
+        compose_output = regenerate_env_artifacts(env_dir)
     except (KeyError, FileNotFoundError, ValueError) as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
-
-    write_output(compose_output, env_dir)
 
     click.echo(click.style(f"Environment generated in {env_dir}/", fg="green"))
     click.echo("  env.yaml")
@@ -743,6 +742,34 @@ def _interactive_add_more(registry: ToolRegistry, remaining: list[str]) -> list[
     return selected or []
 
 
+@env.group("custom-tools")
+def custom_tools() -> None:
+    """Manage env-local custom tool definitions."""
+
+
+@custom_tools.command("add")
+@click.argument("env_name")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Overwrite the scaffold if it already exists.")
+@click.pass_context
+def custom_tools_add(ctx: click.Context, env_name: str, name: str, force: bool) -> None:
+    """Scaffold one env-local custom tool and enable it in the environment config."""
+    env_dir = resolve_env_dir(env_name, ctx=ctx)
+    try:
+        result = add_custom_tool(env_dir, name, force=force)
+    except FileExistsError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        click.echo("Use --force to overwrite it.", err=True)
+        raise SystemExit(1) from e
+    except (KeyError, FileNotFoundError, ValueError) as e:
+        click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+
+    click.echo(click.style(f"Custom tool scaffold written to {result.tool_file}", fg="green"))
+    click.echo(f"Enabled '{name}' in {result.env_yaml}.")
+    click.echo("Edit the scaffold before using this tool in a real run.")
+
+
 @env.command()
 @click.argument("env_name")
 @click.option(
@@ -762,9 +789,9 @@ def _interactive_add_more(registry: ToolRegistry, remaining: list[str]) -> list[
 def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool, verbose: bool) -> None:
     """Start the environment."""
     env_dir = resolve_env_dir(env_name, ctx=ctx)
+    ensure_env_artifacts_current(env_dir, action_label="env up")
     config_file = env_dir / "env.yaml"
-    data = yaml.safe_load(config_file.read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
     compose_file = env_dir / "docker-compose.yml"
 
     if not compose_file.exists():
@@ -966,8 +993,7 @@ def seed(ctx: click.Context, env_name: str, daytona: bool, verify_only: bool) ->
     """Seed the environment with initial data."""
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_file = env_dir / "env.yaml"
-    data = yaml.safe_load(config_file.read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
 
     seed_svc_names = _get_seed_service_names(config, config_file)
     if not seed_svc_names:

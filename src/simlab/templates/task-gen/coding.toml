@@ -1,0 +1,103 @@
+# Template: Coding
+# Pre-filled config matching the coding preset (UnifiedConfig schema)
+
+[agent]
+role = "Software engineering assistant"
+description = "Completes end-to-end programming tasks in a sandboxed Linux workspace: reads requirements, clarifies ambiguities with stakeholders via Rocket.Chat, implements solutions across multiple files, runs tests and linters via bash, builds CLI tools / REST APIs / data-processing pipelines, and verifies web endpoints or UI changes in a headless browser."
+
+[[toolset]]
+name = "Coding"
+description = "Sandboxed filesystem with project source code, tests, and build tooling"
+service_name = "coding-env"
+service_url = "http://coding-env:8020"
+operations = ["read", "write", "execute"]
+
+[[toolset]]
+name = "Browser"
+description = "Headless browser for verifying UI changes and web endpoints"
+service_name = "playwright-mcp"
+service_url = "http://playwright-mcp:8010"
+operations = ["navigate", "screenshot", "interact"]
+
+[[toolset]]
+name = "Chat"
+description = "Send messages in Rocket.Chat channels and DMs"
+service_name = "rocketchat-env"
+service_url = "http://rocketchat-env:8060"
+operations = ["send", "read"]
+
+[scenario]
+name = "coding"
+role_label = "Software engineer"
+conventions = """
+- Run tests before and after changes
+- Clarify ambiguous requirements with stakeholders via chat
+- Follow existing code style and patterns in the project
+"""
+policies = [
+    "All code changes must have tests",
+    "Breaking API changes require tech lead approval",
+]
+
+[generation]
+num_tasks = 20
+complexity = { easy = 0.2, medium = 0.5, hard = 0.3 }
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+
+[[categories]]
+id = "cli_application"
+label = "Build CLI applications with argument parsing and persistence"
+
+[[categories]]
+id = "rest_api"
+label = "Build REST API servers with database and CRUD endpoints"
+
+[[categories]]
+id = "data_processing"
+label = "Parse, analyze, and transform data (logs, CSV, JSON)"
+
+[[categories]]
+id = "bug_fix"
+label = "Debug and fix reported bugs with regression tests"
+
+[[categories]]
+id = "feature_implementation"
+label = "Implement features in existing codebases"
+
+[[categories]]
+id = "test_framework"
+label = "Build or extend test frameworks and runners"
+
+[[categories]]
+id = "file_io_scripting"
+label = "File I/O, bash scripting, and automation tasks"
+
+[[categories]]
+id = "web_verification"
+label = "Build web services and verify via browser"
+
+[[categories]]
+id = "refactoring"
+label = "Refactor code for clarity, performance, or maintainability"
+
+[[categories]]
+id = "multi_file_project"
+label = "Set up multi-file project structures with proper packaging"
+
+[[npcs]]
+role = "Tech Lead"
+typical_asks = "Requirements clarification, architecture decisions, code review feedback"
+
+[[npcs]]
+role = "Developer"
+typical_asks = "Code context, codebase walkthroughs, handoff documentation"
+
+[[npcs]]
+role = "QA Engineer"
+typical_asks = "Test coverage requirements, bug reproduction details, edge case identification"
+
+[[npcs]]
+role = "Product Manager"
+typical_asks = "Feature priorities, acceptance criteria, user workflow context"

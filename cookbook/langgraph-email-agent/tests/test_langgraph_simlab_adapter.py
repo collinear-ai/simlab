@@ -106,6 +106,7 @@ def test_run_artifacts_recorder_records_tool_calls() -> None:
     }
     assert artifacts.messages[2]["content"] == {
         "tool_call_id": "call_1",
+        "tool_server": "demo",
         "tool_name": "ping",
         "is_error": False,
     }

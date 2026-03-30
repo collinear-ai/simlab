@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
+from simlab.catalog.registry import BuildDefinition
 from simlab.catalog.registry import EnvVarRequirement
 from simlab.catalog.registry import ServiceDefinition
 from simlab.catalog.registry import ToolDefinition
@@ -499,3 +501,52 @@ def test_google_workspace_env_vars_have_descriptions() -> None:
     assert descriptions["CREDENTIALS_CONFIG"]
     assert descriptions["CREDENTIALS_EMAIL"]
     assert descriptions["DRIVE_NAMESPACE_ROOT_FOLDER_ID"]
+
+
+def test_tool_definition_assigns_image_for_build_only_service() -> None:
+    tool = ToolDefinition(
+        name="harbor-main",
+        display_name="Harbor Main",
+        description="Harbor task runtime",
+        category="custom",
+        tool_server_port=9000,
+        services={
+            "harbor-main-env": ServiceDefinition(
+                build=BuildDefinition(
+                    context="./gateway",
+                    dockerfile="Dockerfile",
+                ),
+                ports=["9000"],
+            )
+        },
+    )
+
+    assert tool.services["harbor-main-env"].build == BuildDefinition(
+        context="./gateway",
+        dockerfile="Dockerfile",
+    )
+    assert tool.services["harbor-main-env"].image == "harbor-main-env:latest"
+
+
+def test_registry_load_all_rejects_env_local_duplicate_tool_name(tmp_path: Path) -> None:
+    env_dir = tmp_path / "env"
+    custom_tools_dir = env_dir / "custom-tools"
+    custom_tools_dir.mkdir(parents=True)
+    (custom_tools_dir / "email.yaml").write_text(
+        "\n".join(
+            [
+                "name: email",
+                "display_name: Shadow Email",
+                "description: Duplicate tool name",
+                "category: custom",
+                "tool_server_url: http://localhost:9000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="Duplicate tool definition for 'email'"):
+        registry.load_all(env_dir=env_dir)

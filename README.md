@@ -29,11 +29,14 @@ SimLab is the data layer for adaptively composing RL simulations and evaluating 
 
 ### Install
 ```bash
+# Recommended: install with all extras
+uv pip install "simulationlab[npc,daytona,langchain]"
+
+# Or install only what you need:
 uv tool install simulationlab
-# or, if you want Daytona support:
-uv tool install "simulationlab[daytona]"
-# or, if you are building a LangChain/LangGraph-based custom agent:
-uv tool install "simulationlab[langchain]"
+uv tool install "simulationlab[npc]"        # NPC chat simulation
+uv tool install "simulationlab[daytona]"    # Remote sandbox execution
+uv tool install "simulationlab[langchain]"  # LangChain/LangGraph agents
 
 # pipx works too:
 pipx install simulationlab
@@ -113,6 +116,8 @@ No `DAYTONA_API_KEY` required. First run may take several minutes while images a
 
 For the full walkthrough — configuration, custom agents, task generation, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/QUICKSTART.md)**. For framework adapters and custom agent integration patterns, see **[Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/agent-integrations.md)**.
 
+For environment-scoped tool definitions, see **[Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/custom-tools.md)**.
+
 ## API Keys
 
 | Key | Required | How to get it |
@@ -141,6 +146,10 @@ api_key = "dtn_..."
 [verifier]
 model = "claude-sonnet-4-6"
 api_key = "sk-ant-..."
+
+[npc_chat]
+model = "gpt-4o-mini"       # LLM model for NPC chat responses (default: gpt-4o-mini)
+api_key = "sk-..."           # API key (falls back to agent key, then provider env vars)
 ```
 
 ### Environment Variables
@@ -155,6 +164,8 @@ api_key = "sk-ant-..."
 | `SIMLAB_SCENARIO_MANAGER_API_URL` | Override Scenario Manager API URL |
 | `SIMLAB_VERIFIER_MODEL` | Verifier model |
 | `SIMLAB_VERIFIER_API_KEY` | Verifier API key |
+| `SIMLAB_NPC_CHAT_MODEL` | NPC chat LLM model (default: `gpt-4o-mini`) |
+| `SIMLAB_NPC_CHAT_API_KEY` | NPC chat API key (falls back to agent key) |
 | `SIMLAB_ENVIRONMENTS_DIR` | Root directory for environments |
 | `SIMLAB_DISABLE_TELEMETRY` | Set to `1` to disable CLI telemetry |
 
@@ -163,7 +174,7 @@ api_key = "sk-ant-..."
 | Command | Description |
 |---------|-------------|
 | `simlab env init <name>` | Create a new environment (from template or interactive) |
-| `simlab env up <name>` | Start environment containers (local Docker or `--daytona`) |
+| `simlab env custom-tools add <env> <name>` | Scaffold and enable an env-local custom tool |
 | `simlab env down <name>` | Stop and remove environment containers |
 | `simlab env seed <name>` | Seed initial data into a running environment |
 | `simlab tasks list` | List available tasks for an environment |
@@ -181,6 +192,7 @@ Run `simlab --help` for full usage details.
 ## Documentation
 
 - [Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/QUICKSTART.md) — full setup and usage walkthrough
+- [Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/custom-tools.md) — add custom tool definitions under one environment
 - [Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/agent-integrations.md) — adapter architecture and custom framework integration guide
 - [Docs](https://docs.collinear.ai) — complete documentation
 - [Collinear Platform](https://platform.collinear.ai) — get your API key

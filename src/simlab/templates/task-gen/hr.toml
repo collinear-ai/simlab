@@ -1,0 +1,130 @@
+# Template: HR
+# Pre-filled config covering recruiting and people management (UnifiedConfig schema)
+
+[agent]
+role = "HR coordinator"
+description = "Handles end-to-end HR workflows spanning both recruiting (scheduling interviews, managing candidate pipelines, coordinating offers) and people management (onboarding, performance management, compensation and benefits, employee relations, offboarding)."
+
+[[toolset]]
+name = "HRIS"
+description = "Query/update employee records, job requisitions, candidate profiles, enrollment records, HR policies"
+service_name = "frappe-hrms-env"
+service_url = "http://frappe-hrms-env:8030"
+operations = ["search", "read", "create", "update"]
+
+[[toolset]]
+name = "Email"
+description = "Send and read emails"
+service_name = "email-env"
+service_url = "http://email-env:8040"
+operations = ["send", "read"]
+
+[[toolset]]
+name = "Calendar"
+description = "View and manage calendar events"
+service_name = "chronos-server"
+service_url = "http://chronos-server:8050"
+operations = ["list", "create", "update", "delete"]
+
+[[toolset]]
+name = "Chat"
+description = "Send messages in Rocket.Chat channels and DMs"
+service_name = "rocketchat-env"
+service_url = "http://rocketchat-env:8060"
+operations = ["send", "read"]
+
+[scenario]
+name = "hr"
+role_label = "HR professional"
+conventions = """
+- Always check all participants' calendars before scheduling
+- Never share compensation details in group channels
+- Document all candidate and employee interactions in HRIS
+- Get manager approval before extending offers
+- Verify employee data in HRIS before taking action
+- Follow escalation paths for disciplinary actions
+"""
+policies = [
+    "Interviews must include at least one diverse panel member",
+    "Offers require VP approval for >$200k total comp",
+    "Candidate data must not be shared outside recruiting team",
+    "PIPs require HR review and manager sign-off",
+    "Compensation adjustments over 15% require VP approval",
+    "Offboarding must include IT access revocation checklist",
+    "Medical accommodations require documented approval chain",
+]
+
+[workspace]
+email_domain = "weaver.com"
+agent_email = "hr@weaver.com"
+
+[generation]
+num_tasks = 20
+complexity = { easy = 0.3, medium = 0.5, hard = 0.2 }
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+
+[[categories]]
+id = "job_requisition"
+label = "Job requisition"
+
+[[categories]]
+id = "schedule_interviews"
+label = "Schedule the interviews"
+
+[[categories]]
+id = "consolidate_feedback"
+label = "Consolidate feedback"
+
+[[categories]]
+id = "send_offers_or_rejections"
+label = "Send out offers or rejections"
+
+[[categories]]
+id = "employee_onboarding"
+label = "Employee onboarding"
+
+[[categories]]
+id = "performance_management"
+label = "Performance management"
+
+[[categories]]
+id = "compensation_and_benefits"
+label = "Compensation & benefits"
+
+[[categories]]
+id = "employee_relations"
+label = "Employee relations"
+
+[[categories]]
+id = "offboarding"
+label = "Offboarding"
+
+[[categories]]
+id = "learning_and_development"
+label = "Learning & development"
+
+[[npcs]]
+role = "Hiring Manager"
+typical_asks = "Scheduling preferences, candidate feedback, offer approvals"
+
+[[npcs]]
+role = "Direct Manager"
+typical_asks = "Performance feedback, team updates, approval requests"
+
+[[npcs]]
+role = "Employee"
+typical_asks = "Benefits questions, policy clarifications, accommodations"
+
+[[npcs]]
+role = "Candidate"
+typical_asks = "Interview logistics, offer details, timeline questions"
+
+[[npcs]]
+role = "HR Business Partner"
+typical_asks = "Compliance checks, escalations, workforce planning"
+
+[[npcs]]
+role = "Recruiter Lead"
+typical_asks = "Pipeline updates, escalations, compliance checks"

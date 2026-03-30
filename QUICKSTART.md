@@ -117,6 +117,7 @@ Each environment directory contains:
 - `env.yaml` — template, tools, overrides
 - `docker-compose.yml` — generated compose file
 - `.env` — generated env file
+- `custom-tools/` — (optional) env-local tool definitions
 - `mcp-servers.json` — (optional) custom MCP server config when using `--mcp-servers` at init
 - `mcp-gateway-config.json` — (optional) generated for the MCP gateway when you have command-based MCP servers
 - `daytona-state.json` — (when using `--daytona`) Daytona sandbox state
@@ -139,7 +140,7 @@ simlab tasks list --tasks-dir ./generated-tasks   # or a local bundle
 
 ## 1) Initialize an Environment
 
-**`env init`** creates the env dir, writes `env.yaml`, and generates `docker-compose.yml` and `.env`. You do not need to run `env up` separately — `tasks run` automatically starts the environment, seeds data, and tears it down when done. To regenerate compose after editing `env.yaml`, run **`simlab env init my-env --force`**.
+**`env init`** creates the env dir, writes `env.yaml`, and generates `docker-compose.yml` and `.env`. You do not need to run `env up` separately — `tasks run` automatically starts the environment, seeds data, and tears it down when done. To regenerate generated files after editing `env.yaml`, `custom-tools/*.yaml`, or `mcp-servers.json`, run **`simlab env init my-env --force`**. Interactive `env up`, `tasks run`, and `tasks seed` will also prompt if generated files are stale.
 
 ### A) Use a template
 
@@ -258,6 +259,39 @@ If multiple MCP servers use the same env var name, use the scoped form instead:
 ```bash
 # environments/my-mcp-env/.env
 SIMLAB_MCP_WEATHER__API_KEY=weather-key
+
+### D) Env-local custom tools
+
+You can scaffold environment-specific tool definitions without editing the
+built-in catalog:
+
+```bash
+simlab env custom-tools add my-env harbor-main
+```
+
+That command will:
+
+- create `environments/my-env/custom-tools/harbor-main.yaml`
+- add `harbor-main` to `env.yaml`
+- regenerate the generated environment files immediately
+
+Use `--force` to overwrite an existing scaffold:
+
+```bash
+simlab env custom-tools add my-env harbor-main --force
+```
+
+After editing the YAML by hand, run:
+
+```bash
+simlab env init my-env --force
+```
+
+To inspect an env-local tool:
+
+```bash
+simlab tools info harbor-main --env my-env
+```
 SIMLAB_MCP_DOCS__API_KEY=docs-key
 ```
 

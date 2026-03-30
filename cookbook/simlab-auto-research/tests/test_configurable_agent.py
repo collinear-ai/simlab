@@ -103,3 +103,52 @@ def test_records_metadata(tmp_path, monkeypatch) -> None:
     assert meta["system_prompt_length"] == len("Test system prompt for coding tasks.")
     assert meta["tool_count"] == 1
     assert artifacts.final_observation == "Task completed successfully."
+
+
+def test_tool_call_path(tmp_path, monkeypatch) -> None:
+    """Ensure the agent correctly handles a tool-call response followed by a final reply."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are a coding assistant.")
+    monkeypatch.setenv("SYSTEM_PROMPT_PATH", str(prompt_file))
+    monkeypatch.setenv("SIMLAB_AGENT_API_KEY", "test-key")
+
+    # First response: a tool call
+    mock_fn = MagicMock()
+    mock_fn.name = "coding-env__execute_bash"
+    mock_fn.arguments = '{"command": "echo hello"}'
+
+    mock_tc = MagicMock()
+    mock_tc.id = "call_123"
+    mock_tc.function = mock_fn
+
+    tool_call_message = MagicMock()
+    tool_call_message.content = "Let me run that."
+    tool_call_message.tool_calls = [mock_tc]
+
+    # Second response: final text (no tool calls)
+    final_message = MagicMock()
+    final_message.content = "Done! Output was hello."
+    final_message.tool_calls = None
+
+    mock_resp_1 = MagicMock()
+    mock_resp_1.choices = [MagicMock(message=tool_call_message)]
+
+    mock_resp_2 = MagicMock()
+    mock_resp_2.choices = [MagicMock(message=final_message)]
+
+    import litellm  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        litellm, "completion", MagicMock(side_effect=[mock_resp_1, mock_resp_2])
+    )
+
+    artifacts = RunArtifacts(task_id="test-task", task="test", model="gpt-4o-mini")
+    agent = ConfigurableAgent()
+    agent.run("Run echo hello", FakeEnvironment(), artifacts)
+
+    # Should have recorded tool call and completed successfully
+    assert len(artifacts.tool_calls) == 1
+    assert artifacts.tool_calls[0].tool_name == "execute_bash"
+    assert artifacts.steps_taken == 1
+    assert artifacts.final_observation == "Done! Output was hello."
+    assert artifacts.error is None

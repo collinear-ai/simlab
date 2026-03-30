@@ -311,6 +311,7 @@ def test_tasks_run_supports_local_bundle_without_template(tmp_path: Path) -> Non
             "simlab.cli.tasks.resolve_scenario_manager_api_url",
             return_value="https://api.example.com",
         ),
+        patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch("simlab.cli.tasks.ScenarioManagerClient") as mocked_client_cls,
         patch(
             "simlab.cli.tasks._resolve_endpoints",
@@ -403,6 +404,7 @@ def test_tasks_run_custom_agent_does_not_require_reference_agent_credentials(
             "simlab.cli.tasks.resolve_scenario_manager_api_url",
             return_value="https://api.example.com",
         ),
+        patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch(
             "simlab.cli.tasks._resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
@@ -488,6 +490,7 @@ def test_tasks_run_custom_agent_ignores_global_reference_agent_metadata(
             "simlab.cli.tasks.resolve_scenario_manager_api_url",
             return_value="https://api.example.com",
         ),
+        patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch(
             "simlab.cli.tasks._resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
@@ -612,6 +615,7 @@ def test_tasks_run_passes_mcp_verifier_tool_urls_when_http_tool_servers_are_abse
             "simlab.cli.tasks.resolve_scenario_manager_api_url",
             return_value="https://api.example.com",
         ),
+        patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch("simlab.cli.tasks._resolve_endpoints", return_value=({}, False)),
         patch("simlab.cli.tasks._provision_task_calendar_users"),
         patch("simlab.cli.tasks._ensure_task_calendar_accounts"),

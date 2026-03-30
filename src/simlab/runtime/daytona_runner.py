@@ -133,6 +133,13 @@ def _prepare_compose_for_remote(
         context_path = Path(build_context)
         if not context_path.is_absolute():
             context_path = (compose_dir / context_path).resolve()
+        try:
+            context_path.relative_to(compose_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Daytona only supports Docker build contexts inside the environment bundle: "
+                f"{context_path}"
+            ) from exc
         image_tag = str(service.get("image", f"{service_name}:latest"))
         service["image"] = image_tag
         if context_path.is_dir():
