@@ -24,3 +24,4 @@ The agent will walk through each step, ask you for any required inputs (model, t
 | Recipe | Description |
 |--------|-------------|
 | [agent-baselining](agent-baselining/) | Run your agent across a set of tasks to establish baseline performance scores. |
+| [tinker-sft](tinker-sft/) | Fine-tune a model on expert agent trajectories using SimLab + Tinker SFT. |
