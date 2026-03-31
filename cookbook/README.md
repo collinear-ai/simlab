@@ -28,4 +28,4 @@ The agent will walk through each step, ask you for any required inputs (model, t
 | [openai-agents-sdk](openai-agents-sdk/) | Customer-style OpenAI Agents SDK cookbook showing how to keep an existing agent app and add a thin SimLab adapter. |
 | [secure-agent-eval](secure-agent-eval/) | Evaluate agent behavior through OneCLI's credential proxy — compare correctness, audit for credential leakage, and test rate limit resilience. |
 | [simlab-auto-research](simlab-auto-research/) | Autonomous system prompt optimization using the [auto-research](https://github.com/karpathy/autoresearch) pattern. An outer agent iterates on prompts, measured by SimLab task scores. |
-| [tinker-sft](tinker-sft/) | Fine-tune a model on expert agent trajectories using SimLab + Tinker SFT. |
+| [tinker-sft](tinker-sft/) | Fine-tune a model on expert agent trajectories using SimLab + Tinker SFT. Includes `run.sh` for end-to-end execution. |
