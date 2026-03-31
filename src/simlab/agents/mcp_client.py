@@ -65,7 +65,7 @@ async def _async_call_tool(
 
 
 class MCPClientHandle:
-    """Sync handle to an MCP server: list_tools and call_tool run via asyncio.run()."""
+    """Async handle to an MCP server."""
 
     def __init__(self, url: str, server_name: str, tool_prefix: str | None = None) -> None:
         """Store URL and server name for this MCP server handle."""
@@ -73,9 +73,9 @@ class MCPClientHandle:
         self._server_name = server_name
         self._tool_prefix = tool_prefix
 
-    def list_tools(self) -> list[dict[str, Any]]:
+    async def alist_tools(self) -> list[dict[str, Any]]:
         """Return tools from this MCP server (name, description, input_schema, tool_server)."""
-        tools = asyncio.run(_async_list_tools(self._url))
+        tools = await _async_list_tools(self._url)
         if self._tool_prefix:
             tools = [
                 {**t, "name": str(t.get("name", ""))[len(self._tool_prefix) :]}
@@ -86,11 +86,11 @@ class MCPClientHandle:
             t["tool_server"] = self._server_name
         return tools
 
-    def call_tool(self, tool_name: str, parameters: dict[str, Any]) -> ToolCallResult:
+    async def acall_tool(self, tool_name: str, parameters: dict[str, Any]) -> ToolCallResult:
         """Call a tool on this MCP server."""
         actual_name = (
             f"{self._tool_prefix}{tool_name}"
             if self._tool_prefix and not tool_name.startswith(self._tool_prefix)
             else tool_name
         )
-        return asyncio.run(_async_call_tool(self._url, actual_name, parameters))
+        return await _async_call_tool(self._url, actual_name, parameters)

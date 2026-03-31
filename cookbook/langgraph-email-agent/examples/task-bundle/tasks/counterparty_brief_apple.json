@@ -1,0 +1,63 @@
+{
+  "meta": {
+    "task_id": "counterparty_brief_apple",
+    "display_name": "Prepare a public-company renewal brief for Apple",
+    "difficulty": "medium"
+  },
+  "task": "You are helping sales prepare a follow-up brief for `agent@weaverenterprises.com`. Only use emails sent to that mailbox, even if the email tools can see other users. Return exactly two markdown sections: `## Todo List` and `## Sales Call Brief`. In `## Todo List`, include at least four concrete bullets formatted like `- [P1] ...`, `- [P2] ...`, or `- [P3] ...`. In `## Sales Call Brief`, summarize the Apple renewal thread and include one `Public Company Context:` line about the counterparty. Use these exact labels in the sales brief: `Account:`, `Ticker:`, `Stage:`, `Key Pains:`, `Blockers:`, `Next Step:`, and `Public Company Context:`. Base every factual claim on available tool output and ignore unrelated inbox noise.",
+  "apps": [
+    "Email",
+    "SEC EDGAR"
+  ],
+  "tool_servers": [
+    {
+      "name": "email-env",
+      "tool_server_url": "http://email-env:8040"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "sasha.rivera@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Apple renewal call notes",
+      "body_text": "Recap from the Apple renewal call: Dana Kim remains our champion, but the renewal is still fragile. Security needs our mobile device management controls and an updated SOC 2 bridge letter. Procurement asked for a revised quote by Friday noon. They also want a concise executive summary they can circulate internally.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "legal@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Apple redlines status",
+      "body_text": "We can review the Apple paper tomorrow morning. The remaining sticking points are audit rights and indemnity language. If sales wants the renewal closed this month, we should get on the phone with their counsel this week.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "security@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Apple security package",
+      "body_text": "I can send the mobile device management controls and the new SOC 2 bridge letter, but I need confirmation on the contact and whether Procurement wants them bundled with the pricing response.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "ops@weaverenterprises.com",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Quarterly swag order",
+      "body_text": "Please review the quarterly swag order by next week if you want any changes.",
+      "body_html": null
+    },
+    {
+      "from_profile_id": "newsletter@vendor-updates.io",
+      "to_addr": "agent@weaverenterprises.com",
+      "subject": "Weekly SaaS metrics newsletter",
+      "body_text": "This week's industry roundup covers expansion benchmarks, retention trends, and AI adoption statistics across B2B software.",
+      "body_html": null
+    }
+  ],
+  "seed_calendar_events": [],
+  "npcs": [],
+  "verifiers": [
+    {
+      "func": "python_module",
+      "module": "collinear.scenarios.email_ops.verifiers.counterparty_brief_apple"
+    }
+  ]
+}

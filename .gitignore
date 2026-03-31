@@ -17,3 +17,6 @@ environments
 /simlab
 /src/simlab/verifier_runtime
 daytona-state.json
+cookbook/langgraph-email-agent/examples/langgraph-email/docker-compose.yml
+cookbook/langgraph-email-agent/examples/langgraph-email/mcp-gateway-config.json
+cookbook/langgraph-email-agent/examples/langgraph-email/gateway/

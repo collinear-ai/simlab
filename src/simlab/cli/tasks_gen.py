@@ -50,6 +50,21 @@ _STEP_NAMES = [
 _AVAILABLE_PRESETS = list(PRESETS.keys())
 
 
+def _resolve_template(name: str) -> Path | None:
+    """Resolve template TOML path from the packaged templates directory."""
+    tdir = _templates_dir()
+    if tdir is None:
+        return None
+    p = tdir / f"{name}.toml"
+    return p if p.exists() else None
+
+
+def _templates_dir() -> Path | None:
+    """Find the task-gen templates directory (inside the simlab package)."""
+    d = Path(__file__).parent.parent / "templates" / "task-gen"
+    return d if d.is_dir() else None
+
+
 @click.group("tasks-gen")
 def tasks_gen() -> None:
     """Task generation — init, validate, run, and status."""
@@ -76,12 +91,55 @@ def task_gen_capture_config(
 # ---------------------------------------------------------------------------
 
 
+@tasks_gen.command("templates")
+def list_templates() -> None:
+    """List available task generation templates."""
+    tdir = _templates_dir()
+    if not tdir:
+        click.secho("No templates directory found.", fg="red")
+        raise SystemExit(1)
+
+    toml_files = sorted(tdir.glob("*.toml"))
+    if not toml_files:
+        click.secho("No templates available.", fg="yellow")
+        return
+
+    click.secho("Available templates:", fg="cyan", bold=True)
+    click.echo()
+    for f in toml_files:
+        with f.open("rb") as fh:
+            data = tomllib.load(fh)
+        agent = data.get("agent", {})
+        scenario = data.get("scenario", {})
+        toolset = data.get("toolset", [])
+        tools = [t.get("name", "") for t in toolset] if toolset else []
+        desc = agent.get("description", scenario.get("name", ""))
+        role = agent.get("role", "")
+
+        click.secho(f"  {f.stem}", fg="green", bold=True)
+        if role:
+            click.echo(f"    Role:  {role}")
+        if desc:
+            click.echo(f"    Desc:  {desc[:100]}{'...' if len(desc) > 100 else ''}")
+        if tools:
+            click.echo(f"    Tools: {', '.join(tools)}")
+        click.echo()
+
+    click.echo("Use: simlab tasks-gen init --template <name>")
+
+
 @tasks_gen.command()
 @click.option(
     "--preset",
     type=click.Choice(_AVAILABLE_PRESETS),
     default=None,
     help="Use a preset to skip interactive prompts",
+)
+@click.option(
+    "--template",
+    type=str,
+    default=None,
+    help="Template name (e.g., hr, coding, crm, blank)",
 )
 @click.option(
     "--output-dir",
@@ -91,23 +149,34 @@ def task_gen_capture_config(
     help="Directory to write the generated config.toml",
 )
 @with_command_telemetry("tasks-gen init", resolver=task_gen_capture_config)
-def init(preset: str | None, output_dir: str) -> None:
+def init(preset: str | None, template: str | None, output_dir: str) -> None:
     r"""Generate an editable config.toml for task generation.
 
-    Use --preset for a quick start with sensible defaults, or run
-    without it to create a minimal template.
+    Use --preset for a quick start with sensible defaults, --template to copy
+    a template TOML file, or run without either to create a minimal template.
 
     \b
     Examples:
-      simlab tasks-gen init --preset recruiting --output-dir ./taskgen
+      simlab tasks-gen init --preset hr --output-dir ./taskgen
+      simlab tasks-gen init --template coding --output-dir ./taskgen
       simlab tasks-gen init --output-dir ./taskgen
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     config_path = output_path / "config.toml"
 
-    if preset and preset in PRESETS:
+    if template:
+        template_path = _resolve_template(template)
+        if template_path is None:
+            click.secho(f"Template '{template}' not found.", fg="red")
+            sys.exit(1)
+        import shutil  # noqa: PLC0415
+
+        shutil.copy(template_path, config_path)
+    elif preset and preset in PRESETS:
         config_dict = {**PRESETS[preset], "preset": preset}
+        with config_path.open("wb") as f:
+            tomli_w.dump(config_dict, f)
     else:
         config_dict = {
             "agent": {
@@ -135,9 +204,8 @@ def init(preset: str | None, output_dir: str) -> None:
                 "model": "claude-haiku-4-5",
             },
         }
-
-    with config_path.open("wb") as f:
-        tomli_w.dump(config_dict, f)
+        with config_path.open("wb") as f:
+            tomli_w.dump(config_dict, f)
 
     click.echo()
     click.secho("Setup complete!", fg="green", bold=True)
@@ -216,6 +284,19 @@ def validate(config_path: str) -> None:
     help="Path to config TOML with toolset, agent, scenario, etc.",
 )
 @click.option(
+    "--describe",
+    type=str,
+    default=None,
+    help="Vague description of what to test",
+)
+@click.option(
+    "--from-schema",
+    "schema_path",
+    type=click.Path(exists=True),
+    default=None,
+    help='Tool schema JSON (OpenAI format: {"tools": [...]}, or plain list of tool defs)',
+)
+@click.option(
     "--tools",
     "tools_path",
     type=click.Path(exists=True),
@@ -253,6 +334,8 @@ def validate(config_path: str) -> None:
 def run(
     ctx: click.Context,
     config_path: str | None,
+    describe: str | None,
+    schema_path: str | None,
     tools_path: str | None,
     output_dir: str,
     num_tasks: int | None,
@@ -261,11 +344,41 @@ def run(
 ) -> None:
     """Submit a task generation request and stream progress until done.
 
-    Provide either --config (TOML with full scenario config) or --tools (JSON
-    array of MCP tool definitions). CLI flags override config values.
+    Provide either --config (TOML with full scenario config), --tools (JSON
+    array of MCP tool definitions), or --from-schema (tool schema JSON).
+    CLI flags override config values.
     """
-    # 1. Load config TOML or tools JSON
-    request_kwargs = _load_request_inputs(config_path, tools_path)
+    # 1. Load config TOML, tools JSON, or schema JSON
+    if schema_path:
+        with Path(schema_path).open() as f:
+            tool_data = json.load(f)
+        # Normalize to list of tool defs
+        if isinstance(tool_data, dict) and "tools" in tool_data:
+            tool_defs = [t.get("function", t) for t in tool_data["tools"]]
+        elif isinstance(tool_data, list):
+            tool_defs = tool_data
+        else:
+            tool_defs = [tool_data]
+
+        # Validate that each tool def has at least a name
+        for i, td in enumerate(tool_defs):
+            if not isinstance(td, dict) or "name" not in td:
+                raise click.BadParameter(
+                    f"Tool #{i} must be a dict with a 'name' key, got: {td!r:.80}",
+                    param_hint="--from-schema",
+                )
+
+        request_kwargs: dict[str, Any] = {
+            "toolset": tool_defs,
+            "num_tasks": num_tasks or 20,
+            "model": model or "claude-haiku-4-5-20251001",
+        }
+    else:
+        request_kwargs = _load_request_inputs(config_path, tools_path)
+
+    # Inject description if provided via --describe
+    if describe:
+        request_kwargs["description"] = describe
 
     # CLI flags override config values.
     if num_tasks is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import importlib
 import json
@@ -25,7 +26,6 @@ from simlab.api.client import ScenarioManagerApiError
 from simlab.api.client import ScenarioManagerClient
 from simlab.api.client import resolve_scenario_manager_api_url
 from simlab.api.schemas import ScenarioTask
-from simlab.catalog.registry import ToolRegistry
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
 from simlab.composer.engine import get_mcp_gateway_host_port
@@ -34,9 +34,22 @@ from simlab.config import resolve_agent_api_key
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_daytona_api_key
 from simlab.config import resolve_env_dir
+from simlab.env_artifacts import ensure_env_artifacts_current
+from simlab.env_artifacts import load_env_config
+from simlab.env_registry import build_registry
 from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import get_mcp_server_urls
 from simlab.mcp_config import load_mcp_servers_from_env_dir
+from simlab.npc_chat.activation import NpcChatSession
+from simlab.runtime.env_lifecycle import ensure_daytona_sandbox_ready
+from simlab.runtime.env_lifecycle import ensure_env_started_daytona
+from simlab.runtime.env_lifecycle import ensure_env_started_local
+from simlab.runtime.env_lifecycle import env_down_daytona
+from simlab.runtime.env_lifecycle import env_down_local
+from simlab.runtime.env_lifecycle import env_has_local_services
+from simlab.runtime.env_lifecycle import is_env_running_local
+from simlab.runtime.env_lifecycle import run_env_seed_daytona
+from simlab.runtime.env_lifecycle import run_env_seed_local
 from simlab.seeder import get_tool_endpoints
 from simlab.seeder import query_tool_server
 from simlab.telemetry import TelemetryCaptureConfig
@@ -55,6 +68,7 @@ _SERVICE_TO_TOOL = {
     "frappe-hrms-env": "frappe-hrms",
     "google-workspace-tool-server": "google-workspace",
     "playwright-mcp": "playwright",
+    "project-management-env": "project-management",
     "rocketchat-env": "rocketchat",
     "sec-edgar-env": "sec-edgar",
     "twelve-data-env": "twelve-data",
@@ -96,8 +110,8 @@ _CALENDAR_DEFAULT_PASSWORD = "admin"  # noqa: S105 - seeded test credential for 
 
 def get_env_runtime_helpers() -> tuple[Any, Any]:
     """Return the environment helpers used for profiled service orchestration."""
-    from simlab.cli.env import _get_profiled_service_names
-    from simlab.cli.env import _run_profiled_services_local
+    from simlab.runtime.env_lifecycle import _get_profiled_service_names
+    from simlab.runtime.env_lifecycle import _run_profiled_services_local
 
     return _get_profiled_service_names, _run_profiled_services_local
 
@@ -117,11 +131,11 @@ def get_rubric_judge_runner() -> Any:
 
 
 def get_agent_runtime_helpers() -> tuple[Any, Any]:
-    """Return the reference-agent runtime helpers only when tasks run."""
-    from simlab.agents import HttpToolEnvironment
+    """Return the external-agent runtime helpers only when tasks run."""
+    from simlab.agents import UnifiedToolEnvironment
     from simlab.agents import run_with_agent_contract
 
-    return HttpToolEnvironment, run_with_agent_contract
+    return UnifiedToolEnvironment, run_with_agent_contract
 
 
 def get_verifier_runtime_helpers() -> tuple[Any, Any, Any]:
@@ -244,6 +258,22 @@ def _build_mcp_clients(
     return clients
 
 
+def _collect_mcp_tool_failures(
+    mcp_clients: dict[str, MCPClientHandle],
+) -> list[str]:
+    """Return discovery failures for configured MCP clients."""
+    failures: list[str] = []
+    for server_name, client in mcp_clients.items():
+        try:
+            tools = asyncio.run(client.alist_tools())
+        except Exception as exc:
+            failures.append(f"{server_name}: tool discovery failed ({exc})")
+            continue
+        if not tools:
+            failures.append(f"{server_name}: exposed no tools")
+    return failures
+
+
 def _require_mcp_tools_available(
     mcp_clients: dict[str, MCPClientHandle],
 ) -> None:
@@ -251,15 +281,7 @@ def _require_mcp_tools_available(
     if not mcp_clients:
         return
 
-    failures: list[str] = []
-    for server_name, client in mcp_clients.items():
-        try:
-            tools = client.list_tools()
-        except Exception as exc:
-            failures.append(f"{server_name}: tool discovery failed ({exc})")
-            continue
-        if not tools:
-            failures.append(f"{server_name}: exposed no tools")
+    failures = _collect_mcp_tool_failures(mcp_clients)
 
     if failures:
         click.echo(
@@ -279,6 +301,28 @@ def _require_mcp_tools_available(
             err=True,
         )
         raise SystemExit(1)
+
+
+def _wait_for_mcp_tools_available(
+    mcp_clients: dict[str, MCPClientHandle],
+    *,
+    timeout: int = 120,
+    poll_interval: int = 5,
+    log_prefix: str = "",
+) -> None:
+    """Poll MCP tool discovery until every configured client exposes tools."""
+    if not mcp_clients:
+        return
+
+    prefix = f"{log_prefix} " if log_prefix else ""
+    deadline = time.monotonic() + timeout
+    failures = _collect_mcp_tool_failures(mcp_clients)
+    while failures:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{prefix}Timed out waiting for MCP tools: {'; '.join(failures)}")
+        click.echo(f"{prefix}Waiting for MCP tools...")
+        time.sleep(poll_interval)
+        failures = _collect_mcp_tool_failures(mcp_clients)
 
 
 def tasks_source_label(tasks_dir: str | None) -> str:
@@ -530,6 +574,35 @@ def _task_uses_calendar(task: dict[str, Any]) -> bool:
         if _SERVICE_TO_TOOL.get(tool_server.get("name", "")) == "calendar":
             return True
     return False
+
+
+def needed_task_endpoints(
+    task: dict[str, Any],
+    endpoints: dict[str, str],
+    *,
+    include_tool_servers: bool,
+) -> dict[str, str]:
+    """Return only the endpoints a task seed or run path will actually call."""
+    needed: dict[str, str] = {}
+    if task.get("seed_emails") and "email" in endpoints:
+        needed["email"] = endpoints["email"]
+
+    if (
+        task.get("seed_calendar_events")
+        or (_task_uses_calendar(task) and _collect_task_calendar_accounts(task))
+    ) and "calendar" in endpoints:
+        needed["calendar"] = endpoints["calendar"]
+
+    if not include_tool_servers:
+        return needed
+
+    for tool_server in task.get("tool_servers", []):
+        if not isinstance(tool_server, dict):
+            continue
+        tool_name = _SERVICE_TO_TOOL.get(str(tool_server.get("name") or "").strip())
+        if tool_name and tool_name in endpoints:
+            needed[tool_name] = endpoints[tool_name]
+    return needed
 
 
 def _profile_display_name(profile_id: str, profile: dict[str, Any]) -> str:
@@ -1115,6 +1188,31 @@ def _effective_tool_servers(
     return merged
 
 
+def _verifier_tool_servers(
+    rewritten_task: dict[str, Any],
+    endpoints: dict[str, str],
+    mcp_clients: dict[str, MCPClientHandle] | None = None,
+) -> dict[str, str]:
+    """Return verifier-facing tool URLs across HTTP and MCP namespaces.
+
+    Verifiers historically expect an HTTP-style base URL. For MCP endpoints, use the
+    HTTP base when the client URL ends with ``/mcp`` so existing verifiers can keep
+    constructing ``/step`` URLs when the underlying server supports both transports.
+    TODO: replace this compatibility shim once verifiers can consume MCP-native tool
+    calls directly instead of assuming the legacy HTTP ``/step`` contract.
+    """
+    merged = _effective_tool_servers(rewritten_task, endpoints)
+    for server_name, client in (mcp_clients or {}).items():
+        url = getattr(client, "_url", None)
+        if not isinstance(url, str) or not url:
+            continue
+        merged.setdefault(
+            server_name,
+            url.removesuffix("/mcp"),
+        )
+    return merged
+
+
 def _compose_service_host_port(compose_data: dict[str, Any], service_name: str) -> int | None:
     """Extract mapped host port for a docker-compose service, if available."""
     services = compose_data.get("services", {})
@@ -1309,6 +1407,8 @@ def _resume_daytona_sandbox_interactively(
 def _get_daytona_endpoints(
     config_path: str,
     daytona_api_key: str | None = None,
+    *,
+    allow_resume: bool = True,
 ) -> dict[str, str]:
     """Get tool endpoint URLs from a running Daytona sandbox via Python SDK."""
     config_file = Path(config_path)
@@ -1316,12 +1416,11 @@ def _get_daytona_endpoints(
         click.echo(click.style(f"Config not found: {config_file}", fg="red"), err=True)
         raise SystemExit(1)
 
-    data = yaml.safe_load(config_file.read_text())
-    config = EnvConfig(**data)
+    config = load_env_config(config_file.parent)
     local_endpoints = get_tool_endpoints(config, config_path=config_file)
     env_dir = config_file.parent
     mcp_config = load_mcp_servers_from_env_dir(env_dir)
-    if not _requires_daytona_sandbox(config, mcp_config):
+    if not _requires_daytona_sandbox(config, mcp_config, env_dir=env_dir):
         return local_endpoints
 
     state_file = Path(config_path).parent / "daytona-state.json"
@@ -1340,11 +1439,49 @@ def _get_daytona_endpoints(
     daytona = _get_daytona_client(daytona_api_key=daytona_api_key)
     sandbox = daytona.get(sandbox_id)
     status = _sandbox_status(sandbox)
+    resumed = False
     if not _is_active_sandbox_status(status):
+        if not allow_resume:
+            click.echo(
+                click.style(
+                    f"Daytona sandbox is '{status}' and --skip-env-setup prevents auto-resume. "
+                    "Start it manually with `simlab env up <env-name> --daytona`.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
         sandbox = _resume_daytona_sandbox_interactively(daytona, sandbox, sandbox_id, status)
+        resumed = True
+    if resumed:
+        get_profiled_service_names, _ = get_env_runtime_helpers()
+        preseed_svc_names = get_profiled_service_names(config, "preseed", config_file)
+        DaytonaRunner = get_daytona_runner_class()
+        runner = DaytonaRunner(daytona_api_key=daytona_api_key)
+        try:
+            runner.restart_sandbox_services(
+                sandbox,
+                preseed_svc_names=preseed_svc_names,
+            )
+        except RuntimeError as exc:
+            click.echo(
+                click.style(
+                    "Unable to restart services in the resumed Daytona sandbox.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            click.echo(click.style(str(exc), fg="red"), err=True)
+            click.echo(
+                click.style(
+                    f"Run `simlab env up {config.name} --daytona` to rebuild and restart it.",
+                    fg="yellow",
+                ),
+                err=True,
+            )
+            raise SystemExit(1) from exc
 
-    registry = ToolRegistry()
-    registry.load_all()
+    registry = build_registry(env_dir=env_dir)
 
     urls: dict[str, str] = {}
     for tool_name in config.tools:
@@ -1367,10 +1504,11 @@ def _get_daytona_endpoints(
 def _requires_daytona_sandbox(
     config: EnvConfig,
     mcp_config: dict[str, Any] | None,
+    *,
+    env_dir: Path,
 ) -> bool:
     """Return True when the env needs a Daytona sandbox for tool execution."""
-    registry = ToolRegistry()
-    registry.load_all()
+    registry = build_registry(env_dir=env_dir)
     for tool_name in config.tools:
         tool = registry.get_tool(tool_name)
         if tool is not None and tool.tool_server_port is not None:
@@ -1524,10 +1662,16 @@ def _resolve_endpoints(
     config: EnvConfig,
     daytona_requested: bool,
     daytona_api_key: str | None = None,
+    allow_resume: bool = True,
 ) -> tuple[dict[str, str], bool]:
     """Resolve endpoints for the explicitly requested execution backend."""
     if daytona_requested:
-        return _get_daytona_endpoints(config_path, daytona_api_key=daytona_api_key), True
+        return (
+            _get_daytona_endpoints(
+                config_path, daytona_api_key=daytona_api_key, allow_resume=allow_resume
+            ),
+            True,
+        )
 
     return get_tool_endpoints(config, config_path=Path(config_path)), False
 
@@ -1544,8 +1688,7 @@ def _require_config_with_template(config_path: str | None, config: EnvConfig | N
         if not path.exists():
             click.echo(click.style(f"Config not found: {path}", fg="red"), err=True)
             raise SystemExit(1)
-        data = yaml.safe_load(path.read_text()) or {}
-        config = EnvConfig(**data)
+        config = load_env_config(path.parent)
     if not config:
         click.echo(
             click.style(
@@ -1630,8 +1773,7 @@ def list_tasks(
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_path = str(env_dir / "env.yaml")
     global_cfg = get_global_config_from_ctx(ctx)
-    data = yaml.safe_load(Path(config_path).read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
     template = _require_config_with_template(config_path, config)
     base_url = resolve_scenario_manager_api_url(
         config_path=Path(config_path),
@@ -1939,8 +2081,7 @@ def info(
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_path = str(env_dir / "env.yaml")
     global_cfg = get_global_config_from_ctx(ctx)
-    data = yaml.safe_load(Path(config_path).read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
     template = _require_config_with_template(config_path, config)
     base_url = resolve_scenario_manager_api_url(
         config_path=Path(config_path),
@@ -2008,10 +2149,10 @@ def seed(
     """Inject task-specific seed data (emails, calendar events). Requires --env."""
     global_cfg = get_global_config_from_ctx(ctx)
     env_dir = resolve_env_dir(env_name, ctx=ctx)
+    ensure_env_artifacts_current(env_dir, action_label="tasks seed")
     config_path = str(env_dir / "env.yaml")
     config_file = Path(config_path)
-    data = yaml.safe_load(config_file.read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
     if tasks_dir:
         bundle_dir = Path(tasks_dir)
         task_dict, profiles, _ = _load_local_task(bundle_dir, task_id)
@@ -2065,15 +2206,19 @@ def seed(
         daytona_requested=daytona,
         daytona_api_key=global_cfg.daytona_api_key,
     )
-    needed_seed_endpoints = {
-        tool: endpoints[tool] for tool in ("email", "calendar") if tool in endpoints
-    }
-    _require_reachable_endpoints(
-        endpoints=needed_seed_endpoints or endpoints,
-        action="task seeding",
-        using_daytona=using_daytona,
-        config_path=config_path,
+    needed_seed_endpoints = needed_task_endpoints(
+        task_dict,
+        endpoints,
+        include_tool_servers=False,
     )
+    if needed_seed_endpoints:
+        _require_reachable_endpoints(
+            endpoints=needed_seed_endpoints,
+            action="task seeding",
+            using_daytona=using_daytona,
+            config_path=config_path,
+            wait=using_daytona,
+        )
     if using_daytona:
         click.echo(click.style("Using Daytona tool endpoints.", fg="cyan"))
     _provision_task_group_channels(
@@ -2217,7 +2362,19 @@ def _print_parallel_summary(summary: Any) -> None:
     show_default=True,
     help="Hard timeout for agent setup+run lifecycle.",
 )
-@click.option("--no-seed", is_flag=True, help="Skip task data seeding before run.")
+@click.option(
+    "--no-seed",
+    is_flag=True,
+    help="Skip all seeding and provisioning (env seed, task data, channels, calendar).",
+)
+@click.option(
+    "--keep-alive", is_flag=True, help="Do not tear down the environment after the run completes."
+)
+@click.option(
+    "--skip-env-setup",
+    is_flag=True,
+    help="Skip automatic environment startup (assume env is already running).",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed agent logs.")
 @click.option(
     "--daytona", is_flag=True, help="Run against a Daytona sandbox instead of local Docker."
@@ -2252,6 +2409,8 @@ def run(
     agent_import_path: str | None,
     agent_timeout_seconds: float,
     no_seed: bool,
+    keep_alive: bool,
+    skip_env_setup: bool,
     verbose: bool,
     daytona: bool,
     rollout_count: int,
@@ -2259,15 +2418,17 @@ def run(
 ) -> None:
     """Seed task data and run external agent contract.
 
-    Requires the environment to be running (simlab env up <env-name>).
+    Automatically starts the environment if it is not already running,
+    and tears it down after the run completes (unless --keep-alive).
+    Use --skip-env-setup to assume the env is already running.
     Requires --env. Optionally use --tasks-dir for a local task bundle.
     """
     global_cfg = get_global_config_from_ctx(ctx)
     env_dir = resolve_env_dir(env_name, ctx=ctx)
+    ensure_env_artifacts_current(env_dir, action_label="tasks run")
     config_path = str(env_dir / "env.yaml")
     config_file = Path(config_path)
-    data = yaml.safe_load(config_file.read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
     base_url_api = resolve_scenario_manager_api_url(
         config_path=config_file,
         config=config,
@@ -2291,6 +2452,8 @@ def run(
             click.echo(click.style(f"Task not found: {task_id}", fg="red"), err=True)
             raise SystemExit(1)
         task_data, profiles = _api_task_to_local(api_task.model_dump())
+    requested_model = model
+    requested_provider = provider
     model, provider, api_key, base_url = _resolve_agent_runtime_settings(
         global_cfg,
         model,
@@ -2298,7 +2461,7 @@ def run(
         api_key,
         base_url,
     )
-    if not model:
+    if not agent_import_path and not model:
         click.echo(
             click.style(
                 "Agent model required via --agent-model or SIMLAB_AGENT_MODEL / global config.",
@@ -2307,6 +2470,9 @@ def run(
             err=True,
         )
         raise SystemExit(1)
+    if agent_import_path:
+        model = requested_model or "custom-agent"
+        provider = requested_provider or "custom-agent"
 
     # --- Parallel rollouts branch ---
     if rollout_count < 1:
@@ -2346,7 +2512,7 @@ def run(
             )
             raise SystemExit(1)
 
-        from simlab.cli.env import _validate_daytona_coding_assets
+        from simlab.runtime.env_lifecycle import _validate_daytona_coding_assets
         from simlab.runtime.parallel_daytona import ParallelDaytonaOrchestrator
 
         _validate_daytona_coding_assets(config, env_dir)
@@ -2366,8 +2532,7 @@ def run(
                     err=True,
                 )
 
-        registry = ToolRegistry()
-        registry.load_all()
+        registry = build_registry(env_dir=env_dir)
         tool_ports: dict[str, int] = {}
         extra_tool_urls: dict[str, str] = {}
         for tool_name in config.tools:
@@ -2380,8 +2545,10 @@ def run(
                 extra_tool_urls[tool_name] = tool.tool_server_url
 
         get_profiled_service_names, _ = get_env_runtime_helpers()
-        preseed_svc_names = get_profiled_service_names(config, profile="preseed")
-        seed_svc_names = get_profiled_service_names(config, profile="seed")
+        preseed_svc_names = get_profiled_service_names(
+            config, profile="preseed", config_path=config_file
+        )
+        seed_svc_names = get_profiled_service_names(config, profile="seed", config_path=config_file)
 
         orchestrator = ParallelDaytonaOrchestrator(
             rollout_count=rollout_count,
@@ -2424,49 +2591,235 @@ def run(
     meta = task_data.get("meta", {})
     display = meta.get("display_name", meta.get("task_id", task_id))
 
-    # --- Resolve endpoints ---
+    # --- Phase 0: Auto-start environment if needed ---
+    managed_env = False  # True only when *this* run started the env
+    has_local_services = env_has_local_services(env_dir)
+
+    try:
+        # --- Phase 0: Auto-start environment if needed ---
+        if not skip_env_setup and has_local_services:
+            if daytona:
+                env_was_running = ensure_daytona_sandbox_ready(
+                    env_dir, daytona_api_key=global_cfg.daytona_api_key
+                )
+            else:
+                env_was_running = is_env_running_local(env_dir)
+
+            if not env_was_running:
+                if daytona and (env_dir / "daytona-state.json").exists():
+                    click.echo(
+                        click.style(
+                            "An existing daytona-state.json could not be safely "
+                            "reconciled with Daytona.\n"
+                            "Verify/clean up the referenced sandbox, then retry:\n"
+                            f"  rm {env_dir / 'daytona-state.json'}",
+                            fg="red",
+                        ),
+                        err=True,
+                    )
+                    raise SystemExit(1)
+
+                managed_env = True
+                click.echo(click.style("\nStarting environment...", bold=True))
+                if daytona:
+                    ensure_env_started_daytona(
+                        env_dir,
+                        config,
+                        env_dir / "env.yaml",
+                        daytona_api_key=global_cfg.daytona_api_key,
+                        verbose=verbose,
+                    )
+                    if not no_seed:
+                        run_env_seed_daytona(
+                            env_dir,
+                            config,
+                            env_dir / "env.yaml",
+                            daytona_api_key=global_cfg.daytona_api_key,
+                        )
+                else:
+                    ensure_env_started_local(
+                        env_dir,
+                        config,
+                        env_dir / "env.yaml",
+                    )
+                    if not no_seed:
+                        run_env_seed_local(env_dir, config, env_dir / "env.yaml")
+                click.echo(click.style("Environment started.", fg="green"))
+
+        # --- Phases 1-3: Seed, run agent, verify ---
+        _run_single_rollout(
+            env_dir=env_dir,
+            config=config,
+            config_path=config_path,
+            global_cfg=global_cfg,
+            task_data=task_data,
+            task_id=task_id,
+            profiles=profiles,
+            meta=meta,
+            display=display,
+            model=model,
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            max_steps=max_steps,
+            agent_import_path=agent_import_path,
+            agent_timeout_seconds=agent_timeout_seconds,
+            no_seed=no_seed,
+            verbose=verbose,
+            daytona=daytona,
+            tasks_dir=tasks_dir,
+            bundle_dir=bundle_dir,
+            backend_id=backend_id,
+            base_url_api=base_url_api,
+            scenario_manager_api_key=scenario_manager_api_key,
+            managed_env=managed_env,
+            keep_alive=keep_alive,
+            skip_env_setup=skip_env_setup,
+        )
+    finally:
+        # --- Phase 4: Teardown ---
+        if managed_env and not keep_alive:
+            click.echo(click.style("\nTearing down environment...", bold=True))
+            try:
+                if daytona:
+                    env_down_daytona(env_dir, daytona_api_key=global_cfg.daytona_api_key)
+                else:
+                    env_down_local(env_dir)
+            except (Exception, SystemExit):
+                click.echo(
+                    click.style("Warning: environment teardown failed.", fg="yellow"),
+                    err=True,
+                )
+
+
+def _print_run_summary(
+    artifacts: Any,
+    npc_session: Any | None,
+    run_dir: Path,
+) -> None:
+    """Print a concise post-run summary to the terminal."""
+    from simlab.run_summary import extract_run_summary
+
+    summary = extract_run_summary(artifacts)
+
+    if summary.error:
+        status = click.style(f"failed: {summary.error}", fg="red")
+    else:
+        status = click.style("completed", fg="green")
+
+    click.echo(click.style("Run summary", bold=True))
+    click.echo(f"  Status:       {status}")
+    click.echo(f"  Steps:        {summary.steps}")
+    if summary.tool_counts:
+        parts = [f"{srv} ({cnt})" for srv, cnt in sorted(summary.tool_counts.items())]
+        click.echo(f"  Tool calls:   {', '.join(parts)}")
+    if summary.npc_msg_count:
+        click.echo(f"  NPC msgs:     {summary.npc_msg_count}")
+    elif npc_session is not None:
+        click.echo(
+            click.style(
+                "  NPC msgs:     0 (NPC chat available but agent did not use it)",
+                fg="yellow",
+            )
+        )
+
+    if summary.final_observation:
+        preview = summary.final_observation[:200].replace("\n", " ")
+        if len(summary.final_observation) > 200:
+            preview += "..."
+        click.echo(f"  Final answer: {preview}")
+
+    click.echo(f"  Output:       {run_dir}")
+    click.echo()
+
+
+def _run_single_rollout(
+    *,
+    env_dir: Path,
+    config: EnvConfig,
+    config_path: str,
+    global_cfg: Any,
+    task_data: dict[str, Any],
+    task_id: str,
+    profiles: dict[str, dict[str, Any]],
+    meta: dict[str, Any],
+    display: str,
+    model: str,
+    provider: str,
+    api_key: str | None,
+    base_url: str | None,
+    max_steps: int,
+    agent_import_path: str | None,
+    agent_timeout_seconds: float,
+    no_seed: bool,
+    verbose: bool,
+    daytona: bool,
+    tasks_dir: str | None,
+    bundle_dir: Path | None,
+    backend_id: str | None,
+    base_url_api: str,
+    scenario_manager_api_key: str | None,
+    managed_env: bool,
+    keep_alive: bool,
+    skip_env_setup: bool,
+) -> None:
+    """Execute a single task rollout: resolve endpoints, seed, run agent, verify."""
+    # --- Phase 1: Resolve endpoints ---
     endpoints, using_daytona = _resolve_endpoints(
         config_path=config_path,
         config=config,
         daytona_requested=daytona,
         daytona_api_key=global_cfg.daytona_api_key,
+        allow_resume=not skip_env_setup,
     )
     # --- Load MCP servers (if any) and build MCP client handles ---
     mcp_config = load_mcp_servers_from_env_dir(env_dir)
     mcp_clients = _build_mcp_clients(mcp_config, endpoints)
-    if endpoints:
+    needed_run_endpoints = needed_task_endpoints(
+        task_data,
+        endpoints,
+        include_tool_servers=True,
+    )
+    if needed_run_endpoints:
         _require_reachable_endpoints(
-            endpoints=endpoints,
+            endpoints=needed_run_endpoints,
             action="task run",
             using_daytona=using_daytona,
             config_path=config_path,
+            wait=using_daytona,
         )
     _require_mcp_tools_available(mcp_clients)
-    run_env_seed_services(
-        config,
-        config_path,
-        using_daytona=using_daytona,
-        daytona_api_key=global_cfg.daytona_api_key,
-    )
-    _provision_task_group_channels(
-        task_data,
-        profiles,
-        config,
-        config_path,
-        using_daytona=using_daytona,
-        daytona_api_key=global_cfg.daytona_api_key,
-    )
-    _provision_task_calendar_users(
-        task_data,
-        config,
-        config_path,
-        using_daytona=using_daytona,
-        daytona_api_key=global_cfg.daytona_api_key,
-    )
-    _ensure_task_calendar_accounts(task_data, profiles, endpoints, config)
 
-    # --- Seed task data ---
+    # --- Phase 2: Seeding ---
     if not no_seed:
+        # Env-level mutable-state reset — skip if we just did it during startup
+        if not managed_env:
+            run_env_seed_services(
+                config,
+                config_path,
+                using_daytona=using_daytona,
+                daytona_api_key=global_cfg.daytona_api_key,
+            )
+
+        # Task-level provisioning
+        _provision_task_group_channels(
+            task_data,
+            profiles,
+            config,
+            config_path,
+            using_daytona=using_daytona,
+            daytona_api_key=global_cfg.daytona_api_key,
+        )
+        _provision_task_calendar_users(
+            task_data,
+            config,
+            config_path,
+            using_daytona=using_daytona,
+            daytona_api_key=global_cfg.daytona_api_key,
+        )
+        _ensure_task_calendar_accounts(task_data, profiles, endpoints, config)
+
+        # Task data seeding
         emails = task_data.get("seed_emails", [])
         cal_events = task_data.get("seed_calendar_events", [])
         group_channels = task_data.get("seed_group_channels", [])
@@ -2480,86 +2833,126 @@ def run(
             else:
                 click.echo(click.style(f"\n  {ok} item(s) seeded.\n", fg="green"))
 
-    # --- Build environment + run ---
+    # --- Phase 3: Build environment + run ---
     rewritten = _rewrite_tool_server_urls(task_data, endpoints)
-    tool_servers = _effective_tool_servers(rewritten, endpoints)
-    if not tool_servers and not mcp_clients:
-        click.echo(
-            click.style(
-                "Task has no valid tool_servers and no MCP servers. "
-                "Add tools to the env or use --mcp-servers at env init.",
-                fg="red",
-            )
-        )
-        raise SystemExit(1)
-    if not agent_import_path and not api_key:
-        click.echo(
-            click.style(
-                "Reference agent requires --agent-api-key or SIMLAB_AGENT_API_KEY (or OPENAI_API_KEY for OpenAI). "
-                "Custom agents (--agent-import-path) use their own credentials.",
-                fg="red",
-            ),
-            err=True,
-        )
-        raise SystemExit(1)
+    tool_namespace_endpoints = _effective_tool_servers(rewritten, endpoints)
 
-    click.echo(click.style(f"\nRunning task: {display}", bold=True))
-    click.echo(f"  Model:            {model} ({provider})")
-    click.echo(f"  Max steps:        {max_steps}")
-    click.echo(f"  Agent import:     {agent_import_path or 'builtin:ReferenceAgent'}")
-    click.echo(f"  Agent timeout (s): {agent_timeout_seconds:g}")
-    click.echo(f"  Endpoint mode:    {'daytona' if using_daytona else 'local'}")
-    if verbose:
-        click.echo(f"  Tool servers:     {', '.join(sorted(tool_servers))}")
-    click.echo()
-
-    HttpToolEnvironment, run_with_agent_contract = get_agent_runtime_helpers()
-    environment = HttpToolEnvironment(tool_servers=tool_servers)
-    instruction = rewritten.get("task", "")
-    skills_section = _build_skills_guidance_section(
-        _load_skills_markdown(config=config, bundle_dir=bundle_dir)
-    )
-    if skills_section:
-        instruction = f"{instruction}\n\n{skills_section}"
-    services_section = _build_services_available_section(
-        config,
-        daytona=using_daytona,
-        config_path=config_path,
-        endpoints=endpoints,
-    )
-    if services_section:
-        instruction = f"{instruction}\n\n{services_section}"
-
-    artifacts = run_with_agent_contract(
-        task_id=meta.get("task_id", task_id),
-        instruction=instruction,
+    # Auto-activate NPC chat tool if any NPC has chat personality fields.
+    # Fail fast if the server cannot start — continuing without npc-chat
+    # would produce a silently wrong rollout.
+    npc_session = NpcChatSession.from_task_data(
+        task_data,
         model=model,
-        provider=provider,
-        max_steps=max_steps,
-        environment=environment,
-        agent_import_path=agent_import_path,
-        timeout_seconds=agent_timeout_seconds,
         api_key=api_key,
         base_url=base_url,
-        mcp_clients=mcp_clients or None,
+        provider=provider,
     )
+    if npc_session is not None:
+        npc_url = npc_session.start()
+        tool_namespace_endpoints["npc-chat"] = npc_url
+        click.echo(click.style("  NPC chat tool auto-activated", fg="cyan"))
+
+    # Wrap everything after NPC chat start in try/finally so the server is
+    # always stopped — even if validation, environment setup, or the agent
+    # run itself fails.
+    artifacts = None
+    try:
+        if not tool_namespace_endpoints and not mcp_clients:
+            click.echo(
+                click.style(
+                    "Task has no valid tool_servers and no MCP servers. "
+                    "Add tools to the env or use --mcp-servers at env init.",
+                    fg="red",
+                )
+            )
+            raise SystemExit(1)
+        if not agent_import_path and not api_key:
+            click.echo(
+                click.style(
+                    "Reference agent requires --agent-api-key or SIMLAB_AGENT_API_KEY (or OPENAI_API_KEY for OpenAI). "
+                    "Custom agents (--agent-import-path) use their own credentials.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
+
+        click.echo(click.style(f"\nRunning task: {display}", bold=True))
+        click.echo(f"  Model:            {model} ({provider})")
+        click.echo(f"  Max steps:        {max_steps}")
+        click.echo(f"  Agent import:     {agent_import_path or 'builtin:ReferenceAgent'}")
+        click.echo(f"  Agent timeout (s): {agent_timeout_seconds:g}")
+        click.echo(f"  Endpoint mode:    {'daytona' if using_daytona else 'local'}")
+        click.echo(f"  Managed env:      {managed_env}")
+        if verbose:
+            click.echo(f"  Tool servers:     {', '.join(sorted(tool_namespace_endpoints))}")
+        click.echo()
+
+        unified_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
+        environment = unified_tool_env_cls(
+            tool_servers=tool_namespace_endpoints,
+            mcp_clients=mcp_clients or None,
+        )
+        instruction = rewritten.get("task", "")
+        skills_section = _build_skills_guidance_section(
+            _load_skills_markdown(config=config, bundle_dir=bundle_dir)
+        )
+        if skills_section:
+            instruction = f"{instruction}\n\n{skills_section}"
+        services_section = _build_services_available_section(
+            config,
+            daytona=using_daytona,
+            config_path=config_path,
+            endpoints=endpoints,
+        )
+        if services_section:
+            instruction = f"{instruction}\n\n{services_section}"
+
+        artifacts = run_with_agent_contract(
+            task_id=meta.get("task_id", task_id),
+            instruction=instruction,
+            model=model,
+            provider=provider,
+            max_steps=max_steps,
+            environment=environment,
+            agent_import_path=agent_import_path,
+            timeout_seconds=agent_timeout_seconds,
+            api_key=api_key,
+            base_url=base_url,
+        )
+    finally:
+        # Always stop the NPC chat server, even on early failures.
+        if npc_session is not None:
+            if artifacts is not None:
+                npc_session.attach_to_artifacts(artifacts)
+            npc_session.stop()
+
     artifacts.metadata.setdefault("cli_runtime", {})
     artifacts.metadata["cli_runtime"].update(
         {
             "base_url": base_url,
             "api_key_provided": bool(api_key),
             "agent_import_path": agent_import_path,
-            "tool_servers": tool_servers,
+            "tool_servers": tool_namespace_endpoints,
+            "managed_env": managed_env,
+            "keep_alive": keep_alive,
         }
     )
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_id = f"agent_run_{meta.get('task_id', task_id)}_{ts}"
     run_dir = Path("output") / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    if npc_session is not None:
+        npc_session.save_transcripts(run_dir)
+
     output_path = run_dir / "artifacts.json"
     artifacts.dump(output_path)
 
-    click.echo(f"Saved run artifacts: {output_path}")
+    # --- Run summary ---
+    click.echo()
+    _print_run_summary(artifacts, npc_session, run_dir)
+
     run_error = artifacts.error
     if run_error:
         emit_cli_event(
@@ -2569,9 +2962,11 @@ def run(
                 "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
                 "mode": "daytona" if using_daytona else "local",
                 "seed_requested": not no_seed,
-                "tool_server_count": len(tool_servers),
+                "tool_server_count": len(tool_namespace_endpoints),
                 "had_custom_agent": bool(agent_import_path),
                 "max_steps": max_steps,
+                "managed_env": managed_env,
+                "keep_alive": keep_alive,
             },
         )
         click.echo(click.style(f"Run failed: {run_error}", fg="yellow"), err=True)
@@ -2592,7 +2987,11 @@ def run(
             json.dump(task_data, f, indent=2)
             task_file = Path(f.name)
         try:
-            adapter = build_verifier_artifacts(artifacts, task_file, tool_servers)
+            adapter = build_verifier_artifacts(
+                artifacts,
+                task_file,
+                _verifier_tool_servers(rewritten, endpoints, mcp_clients),
+            )
             verifier_results: list[dict[str, Any]] = []
             click.echo(click.style("\nRunning verifiers...", bold=True))
             original_env, applied_env = _apply_verifier_env_overrides(global_cfg)
@@ -2674,10 +3073,12 @@ def run(
                         "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
                         "mode": "daytona" if using_daytona else "local",
                         "seed_requested": not no_seed,
-                        "tool_server_count": len(tool_servers),
+                        "tool_server_count": len(tool_namespace_endpoints),
                         "had_custom_agent": bool(agent_import_path),
                         "max_steps": max_steps,
                         "verifier_count": len(evaluators),
+                        "managed_env": managed_env,
+                        "keep_alive": keep_alive,
                     },
                 )
                 click.echo(click.style("\nVerification failed.", fg="red"), err=True)
@@ -2696,7 +3097,7 @@ def run(
             "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
             "mode": "daytona" if using_daytona else "local",
             "seed_requested": not no_seed,
-            "tool_server_count": len(tool_servers),
+            "tool_server_count": len(tool_namespace_endpoints),
             "had_custom_agent": bool(agent_import_path),
             "max_steps": max_steps,
             "steps_taken": artifacts.steps_taken,
@@ -2704,6 +3105,8 @@ def run(
             "verifier_count": len(evaluators or []),
             "verifier_passed": verification_passed,
             "reward": reward,
+            "managed_env": managed_env,
+            "keep_alive": keep_alive,
         },
     )
 

@@ -14,6 +14,7 @@ from simlab.mcp_config import get_mcp_server_urls
 from simlab.mcp_config import load_mcp_servers_config
 from simlab.mcp_config import load_mcp_servers_from_env_dir
 from simlab.mcp_config import resolve_gateway_server_env
+from simlab.mcp_config import validate_mcp_server_name_conflicts
 from simlab.mcp_config import validate_mcp_servers_config
 
 
@@ -44,23 +45,33 @@ def test_validate_mcp_servers_rejects_invalid_server_name() -> None:
         )
 
 
-def test_validate_mcp_servers_rejects_builtin_tool_name() -> None:
-    with pytest.raises(ValueError, match="conflicts with a built-in tool server"):
-        validate_mcp_servers_config({"mcpServers": {"email": {"url": "https://example.com"}}})
+def test_validate_mcp_servers_allows_builtin_tool_name_without_env_context() -> None:
+    validate_mcp_servers_config({"mcpServers": {"email": {"url": "https://example.com"}}})
 
 
 def test_validate_mcp_servers_allows_non_catalog_names() -> None:
     validate_mcp_servers_config({"mcpServers": {"email-env": {"url": "https://example.com/mcp"}}})
 
 
-def test_load_mcp_servers_config_rejects_builtin_tool_name(tmp_path: Path) -> None:
+def test_validate_mcp_server_name_conflicts_rejects_existing_tool_name() -> None:
+    with pytest.raises(ValueError, match="conflicts with an existing tool server"):
+        validate_mcp_server_name_conflicts(
+            {"mcpServers": {"coding": {"url": "https://example.com/mcp"}}},
+            existing_tool_names=frozenset({"coding"}),
+        )
+
+
+def test_load_mcp_servers_config_allows_builtin_tool_name_without_env_context(
+    tmp_path: Path,
+) -> None:
     config_file = tmp_path / "mcp.json"
     config_file.write_text(
         json.dumps({"mcpServers": {"coding": {"url": "https://example.com/mcp"}}})
     )
 
-    with pytest.raises(ValueError, match="conflicts with a built-in tool server"):
-        load_mcp_servers_config(config_file)
+    data = load_mcp_servers_config(config_file)
+
+    assert data["mcpServers"]["coding"]["url"] == "https://example.com/mcp"
 
 
 def test_validate_mcp_servers_rejects_names_that_collapse_to_same_env_prefix() -> None:
@@ -237,3 +248,38 @@ def test_load_mcp_servers_from_env_dir_loads_file(tmp_path: Path) -> None:
     data = load_mcp_servers_from_env_dir(tmp_path)
     assert data is not None
     assert get_mcp_server_urls(data) == {"notion": "https://example.com/mcp"}
+
+
+def test_load_mcp_servers_from_env_dir_rejects_tool_name_conflict(tmp_path: Path) -> None:
+    (tmp_path / "mcp-servers.json").write_text(
+        json.dumps({"mcpServers": {"email": {"url": "https://example.com/mcp"}}})
+    )
+
+    with pytest.raises(ValueError, match="conflicts with an existing tool server"):
+        load_mcp_servers_from_env_dir(tmp_path)
+
+
+def test_load_mcp_servers_from_env_dir_rejects_env_local_custom_tool_conflict(
+    tmp_path: Path,
+) -> None:
+    custom_tools_dir = tmp_path / "custom-tools"
+    custom_tools_dir.mkdir()
+    (custom_tools_dir / "harbor-main.yaml").write_text(
+        "\n".join(
+            [
+                "name: harbor-main",
+                "display_name: Harbor Main",
+                "description: Harbor task runtime",
+                "category: custom",
+                "tool_server_url: http://localhost:9000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "mcp-servers.json").write_text(
+        json.dumps({"mcpServers": {"harbor-main": {"url": "https://example.com/mcp"}}})
+    )
+
+    with pytest.raises(ValueError, match="conflicts with an existing tool server"):
+        load_mcp_servers_from_env_dir(tmp_path)

@@ -39,8 +39,19 @@ Repository = "https://github.com/collinear-ai/simlab"
 Changelog = "https://github.com/collinear-ai/simlab/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
+npc = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
 daytona = [
     "daytona>=0.149.0",
+]
+langchain = [
+    "langchain-core>=0.3.0",
+    "langgraph>=0.3.0",
+]
+openai-agents = [
+    "openai-agents>=0.9.0",
 ]
 
 [project.scripts]
@@ -77,3 +88,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+explicit_package_bases = true

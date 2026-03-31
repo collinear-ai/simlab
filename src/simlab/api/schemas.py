@@ -77,6 +77,10 @@ class TaskGenRequest(BaseModel):
     preset: str | None = Field(
         default=None, description='Use a built-in preset, e.g. "recruiting" or "people_mgmt"'
     )
+    description: str | None = Field(
+        default=None,
+        description="Vague description of what to test (triggers Step 0a intent interpretation)",
+    )
 
 
 class TaskGenJob(BaseModel):

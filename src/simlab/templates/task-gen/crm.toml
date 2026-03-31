@@ -1,0 +1,94 @@
+# Template: CRM
+# Pre-filled config for CRM sales coordination (UnifiedConfig schema)
+
+[agent]
+role = "CRM sales coordinator"
+description = "Manages customer relationships, sales pipeline, lead qualification, deal tracking, and customer communications."
+
+[[toolset]]
+name = "CRM"
+description = "Leads, contacts, deals, accounts, pipeline stages, and sales activity records"
+service_name = "crm-env"
+service_url = "http://crm-env:8045"
+operations = ["search", "read", "create", "update"]
+
+[[toolset]]
+name = "Email"
+description = "Send and read emails"
+service_name = "email-env"
+service_url = "http://email-env:8040"
+operations = ["send", "read"]
+
+[[toolset]]
+name = "Chat"
+description = "Send messages in Rocket.Chat channels and DMs"
+service_name = "rocketchat-env"
+service_url = "http://rocketchat-env:8060"
+operations = ["send", "read"]
+
+[scenario]
+name = "crm"
+role_label = "CRM sales professional"
+conventions = """
+- Log all customer interactions in the CRM immediately
+- Use email for external customer communication, chat for internal coordination
+- Qualify leads using BANT criteria before advancing pipeline stage
+- Update deal stages and expected close dates after every meaningful interaction
+"""
+policies = [
+    "Discounts over 20% require Sales Manager approval",
+    "Enterprise deals (>$100k) must have documented approval chain",
+    "Customer data must not be shared outside the sales organization",
+    "Lead reassignment requires Sales Manager notification",
+]
+
+[workspace]
+email_domain = "company.com"
+agent_email = "sales@company.com"
+
+[generation]
+num_tasks = 20
+complexity = { easy = 0.3, medium = 0.5, hard = 0.2 }
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+
+[[categories]]
+id = "lead_qualification"
+label = "Lead qualification"
+
+[[categories]]
+id = "deal_management"
+label = "Deal management"
+
+[[categories]]
+id = "customer_outreach"
+label = "Customer outreach"
+
+[[categories]]
+id = "pipeline_reporting"
+label = "Pipeline reporting"
+
+[[categories]]
+id = "account_management"
+label = "Account management"
+
+[[categories]]
+id = "follow_up_coordination"
+label = "Follow-up coordination"
+
+[[npcs]]
+role = "Sales Manager"
+typical_asks = "Pipeline reviews, discount approvals, deal strategy guidance"
+
+[[npcs]]
+role = "Account Executive"
+typical_asks = "Lead handoff details, deal context, customer history"
+
+[[npcs]]
+role = "Marketing Lead"
+typical_asks = "Campaign performance, lead source quality, content requests"
+
+[[npcs]]
+role = "Customer Success Manager"
+typical_asks = "Renewal risks, upsell opportunities, customer health updates"

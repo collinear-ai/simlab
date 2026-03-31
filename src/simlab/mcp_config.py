@@ -6,11 +6,10 @@ import json
 import re
 import shlex
 from collections import Counter
-from functools import cache
 from pathlib import Path
 from typing import Any
 
-from simlab.catalog.registry import ToolRegistry
+from simlab.env_registry import build_registry
 
 MCP_SERVERS_FILENAME = "mcp-servers.json"
 MCP_SERVER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -21,14 +20,6 @@ MCP_GATEWAY_ENV_PREFIX = "SIMLAB_MCP_"
 def _normalize_gateway_server_name(server_name: str) -> str:
     """Normalize a server name into the gateway env-var namespace segment."""
     return re.sub(r"[^A-Za-z0-9]+", "_", server_name).upper()
-
-
-@cache
-def _builtin_tool_server_names() -> frozenset[str]:
-    """Return built-in tool server names from the catalog registry."""
-    registry = ToolRegistry()
-    registry.load_all()
-    return frozenset(registry.tool_names)
 
 
 def validate_mcp_servers_config(data: dict[str, Any]) -> None:
@@ -47,11 +38,6 @@ def validate_mcp_servers_config(data: dict[str, Any]) -> None:
         if not MCP_SERVER_NAME_PATTERN.fullmatch(name):
             raise ValueError(
                 f"mcpServers.{name}: server names may contain only letters, numbers, '_' and '-'"
-            )
-        if name in _builtin_tool_server_names():
-            raise ValueError(
-                f"mcpServers.{name}: name conflicts with a built-in tool server; "
-                "choose a different MCP server name"
             )
         normalized_name = _normalize_gateway_server_name(name)
         existing_name = normalized_names.get(normalized_name)
@@ -88,6 +74,23 @@ def validate_mcp_servers_config(data: dict[str, Any]) -> None:
                 raise ValueError(f"mcpServers.{name}.url must be a non-empty string")
 
 
+def validate_mcp_server_name_conflicts(
+    data: dict[str, Any],
+    *,
+    existing_tool_names: set[str] | frozenset[str],
+) -> None:
+    """Validate MCP server names against an existing tool namespace."""
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return
+    for name in servers:
+        if name in existing_tool_names:
+            raise ValueError(
+                f"mcpServers.{name}: name conflicts with an existing tool server; "
+                "choose a different MCP server name"
+            )
+
+
 def load_mcp_servers_config(path: Path) -> dict[str, Any]:
     """Load and validate MCP servers JSON from a file. Returns the full document."""
     text = path.read_text(encoding="utf-8")
@@ -104,7 +107,12 @@ def load_mcp_servers_from_env_dir(env_dir: Path) -> dict[str, Any] | None:
     config_file = env_dir / MCP_SERVERS_FILENAME
     if not config_file.is_file():
         return None
-    return load_mcp_servers_config(config_file)
+    data = load_mcp_servers_config(config_file)
+    validate_mcp_server_name_conflicts(
+        data,
+        existing_tool_names=frozenset(build_registry(env_dir=env_dir).tool_names),
+    )
+    return data
 
 
 def get_mcp_server_urls(config: dict[str, Any]) -> dict[str, str]:

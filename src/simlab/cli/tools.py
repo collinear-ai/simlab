@@ -9,21 +9,15 @@ from simlab.api.client import ScenarioManagerClient
 from simlab.api.client import resolve_scenario_manager_api_url
 from simlab.api.schemas import ScenarioSummary
 from simlab.api.schemas import ScenarioToolServer
-from simlab.catalog.registry import ToolRegistry
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_env_dir
+from simlab.env_registry import build_registry
 from simlab.telemetry import TelemetryCaptureConfig
 from simlab.telemetry import emit_cli_event
 from simlab.telemetry import normalize_config_path
 from simlab.telemetry import resolve_scenario_manager_capture_config
 from simlab.telemetry import with_command_telemetry
-
-
-def _get_registry() -> ToolRegistry:
-    registry = ToolRegistry()
-    registry.load_all()
-    return registry
 
 
 def list_tools_from_scenarios(scenarios: list[ScenarioSummary]) -> int:
@@ -114,10 +108,17 @@ def list_tools(ctx: click.Context, env_name: str | None) -> None:
 
 @tools.command("info")
 @click.argument("name")
+@click.option(
+    "--env",
+    "env_name",
+    default=None,
+    help="Environment name (include that env's custom tools when resolving the tool).",
+)
 @with_command_telemetry("tools info", resolver=tools_info_capture_config)
-def tool_info(name: str) -> None:
+def tool_info(name: str, env_name: str | None) -> None:
     """Show detailed info about a specific tool server."""
-    registry = _get_registry()
+    env_dir = resolve_env_dir(env_name, ctx=None) if env_name else None
+    registry = build_registry(env_dir=env_dir)
 
     tool = registry.get_tool(name)
     if tool is None:
@@ -151,7 +152,10 @@ def tool_info(name: str) -> None:
     if tool.required_env_vars:
         click.echo()
         click.echo(click.style("  Required env vars:", bold=True))
-        for var in tool.required_env_vars:
-            click.echo(f"    {var}")
+        for req in tool.required_env_vars:
+            if req.description:
+                click.echo(f"    {req.name} — {req.description}")
+            else:
+                click.echo(f"    {req.name}")
 
     click.echo()

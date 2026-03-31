@@ -5,7 +5,8 @@ category: communication
 tool_server_port: 8060
 
 required_env_vars:
-  - OPENAI_API_KEY
+  - name: OPENAI_API_KEY
+    description: "OpenAI API key for NPC chat simulation (https://platform.openai.com/api-keys)"
 
 exposed_ports:
   - port: 3000
@@ -48,8 +49,8 @@ services:
     environment:
       ROCKETCHAT_HOSTNAME: rocketchat
       ROCKETCHAT_PORT: "3000"
-      ROCKETCHAT_AGENT_USERNAME: admin
-      ROCKETCHAT_AGENT_PASSWORD: admin123
+      ROCKETCHAT_AGENT_USERNAME: agent
+      ROCKETCHAT_AGENT_PASSWORD: agent123
     depends_on:
       rocketchat:
         condition: service_healthy
@@ -72,8 +73,8 @@ services:
       ROCKETCHAT_PORT: "3000"
       ROCKETCHAT_ADMIN_CONFIG__USERNAME: admin
       ROCKETCHAT_ADMIN_CONFIG__PASSWORD: admin123
-      ROCKETCHAT_AGENT_CONFIG__USERNAME: admin
-      ROCKETCHAT_AGENT_CONFIG__PASSWORD: admin123
+      ROCKETCHAT_AGENT_CONFIG__USERNAME: agent
+      ROCKETCHAT_AGENT_CONFIG__PASSWORD: agent123
     depends_on:
       rocketchat:
         condition: service_healthy
@@ -93,8 +94,8 @@ seed_services:
       ROCKETCHAT_PORT: "3000"
       ROCKETCHAT_ADMIN_CONFIG__USERNAME: admin
       ROCKETCHAT_ADMIN_CONFIG__PASSWORD: admin123
-      ROCKETCHAT_AGENT_CONFIG__USERNAME: admin
-      ROCKETCHAT_AGENT_CONFIG__PASSWORD: admin123
+      ROCKETCHAT_AGENT_CONFIG__USERNAME: agent
+      ROCKETCHAT_AGENT_CONFIG__PASSWORD: agent123
     depends_on:
       rocketchat:
         condition: service_healthy

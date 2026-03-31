@@ -7,7 +7,8 @@ tool_server_port: 8080
 exposed_ports: []
 
 required_env_vars:
-  - TWELVE_DATA_API_KEY
+  - name: TWELVE_DATA_API_KEY
+    description: "API key from twelvedata.com (free tier: https://twelvedata.com/apikey)"
 
 services:
   twelve-data-env:

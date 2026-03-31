@@ -12,14 +12,14 @@
       "base_url": null,
       "api_key_provided": true,
       "agent_import_path": null,
-      "tool_servers": {
-        "email-env": "http://localhost:8040"
-      }
+      "tool_servers": {},
+      "managed_env": false,
+      "keep_alive": false
     }
   },
   "final_observation": null,
   "error": null,
   "steps_taken": 0,
   "max_steps": 5,
-  "created_at": "2026-03-24T02:43:50.518352+00:00"
+  "created_at": "2026-03-30T22:37:27.878726+00:00"
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,3 +57,45 @@ def test_templates_list_accepts_env_name(tmp_path: Path) -> None:
         )
     assert result.exit_code == 0, result.output
     assert "0 templates available" in result.output
+
+
+def test_templates_list_wraps_long_names_and_descriptions() -> None:
+    fake_scenarios = [
+        ScenarioSummary(
+            scenario_id="enterprise_customer_operations",
+            name=("Enterprise Customer Operations and Multi Region Escalation Management"),
+            description=(
+                "Coordinate a multi-team escalation that spans support, billing, "
+                "success, and product operations while preserving the complete "
+                "handoff narrative for the next reviewer."
+            ),
+            tool_servers=[
+                ScenarioToolServer(name="crm"),
+                ScenarioToolServer(name="email"),
+                ScenarioToolServer(name="calendar"),
+            ],
+        )
+    ]
+    runner = CliRunner()
+    with (
+        patch(
+            "simlab.cli.templates.resolve_scenario_manager_api_url",
+            return_value="https://api",
+        ),
+        patch("simlab.cli.templates.ScenarioManagerClient") as mocked_client_cls,
+        patch(
+            "simlab.cli.templates.shutil.get_terminal_size",
+            return_value=os.terminal_size((80, 20)),
+        ),
+    ):
+        mocked_client_cls.return_value.list_scenarios.return_value = fake_scenarios
+        result = runner.invoke(templates, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert "Name: Enterprise Customer Operations and Multi Region Escalation" in result.output
+    assert "Management" in result.output
+    assert "Description: Coordinate a multi-team escalation" in result.output
+    assert "complete" in result.output
+    assert "handoff narrative for the next reviewer." in result.output
+    assert "Tools: crm, email, calendar" in result.output
+    assert "…" not in result.output

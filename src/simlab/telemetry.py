@@ -34,6 +34,7 @@ from simlab.config import telemetry_disabled
 from simlab.config import telemetry_state_path
 
 SIMLAB_COMMAND_HEADER = "X-SimLab-Command"
+SIMLAB_INSTALL_HEADER = "X-SimLab-Install-Id"
 SIMLAB_SESSION_HEADER = "X-SimLab-Session-Id"
 SIMLAB_VERSION_HEADER = "X-SimLab-Version"
 
@@ -206,19 +207,23 @@ def load_state(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def save_state(path: Path, state: dict[str, Any]) -> None:
+def save_state(path: Path, state: dict[str, Any]) -> bool:
     """Persist telemetry state to disk."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
-        return
+        return False
+    return True
 
 
 def ensure_session(state: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     """Fill missing session fields and rotate idle sessions."""
     now_value = now or utc_now()
     notice_shown = bool(state.get("notice_shown", False))
+    install_id = str(state.get("install_id") or state.get("anonymous_id") or "").strip()
+    if not install_id:
+        install_id = str(uuid.uuid4())
     session_id = str(state.get("session_id", "")).strip()
     session_started_at = parse_timestamp(state.get("session_started_at"))
     last_seen = parse_timestamp(state.get("last_seen_at"))
@@ -232,6 +237,7 @@ def ensure_session(state: dict[str, Any], *, now: datetime | None = None) -> dic
 
     state.clear()
     state["notice_shown"] = notice_shown
+    state["install_id"] = install_id
     state["session_id"] = session_id
     state["session_started_at"] = (session_started_at or now_value).isoformat()
     state["last_seen_at"] = now_value.isoformat()
@@ -406,6 +412,7 @@ class TelemetryService:
             "command": command_name,
             "command_group": command_group_from_name(command_name),
             "command_name": leaf_command_from_name(command_name),
+            "install_id": self.install_id,
             "session_id": self.session_id,
             "simlab_version": self.version,
             "python_version": platform.python_version(),
@@ -444,12 +451,18 @@ class TelemetryService:
         """Return the current CLI session identifier."""
         return str(self.state.get("session_id", ""))
 
+    @property
+    def install_id(self) -> str:
+        """Return the current CLI install identifier."""
+        return str(self.state.get("install_id", ""))
+
     @contextmanager
     def command_context(self, command_name: str) -> Iterator[None]:
         """Set per-command headers for outbound Scenario Manager API requests."""
         self.touch()
         headers = {
             SIMLAB_COMMAND_HEADER: command_name,
+            SIMLAB_INSTALL_HEADER: self.install_id,
             SIMLAB_SESSION_HEADER: self.session_id,
             SIMLAB_VERSION_HEADER: self.version,
         }

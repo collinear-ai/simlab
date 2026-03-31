@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
+from simlab.catalog.registry import BuildDefinition
+from simlab.catalog.registry import EnvVarRequirement
 from simlab.catalog.registry import ServiceDefinition
 from simlab.catalog.registry import ToolDefinition
 from simlab.catalog.registry import ToolRegistry
@@ -89,6 +92,36 @@ def test_compose_loads_erp_catalog_tool() -> None:
     assert services["erp-seed"]["depends_on"]["erp-env"]["condition"] == "service_healthy"
     reset_command = services["erp-seed"]["command"][-1]
     assert "http://erp-env:8100/reset" in reset_command
+    assert "method='POST'" in reset_command
+
+
+def test_compose_loads_project_management_catalog_tool() -> None:
+    registry = ToolRegistry()
+    registry.load_all()
+
+    output = ComposeEngine(registry).compose(EnvConfig(tools=["project-management"]))
+    compose = yaml.safe_load(output.compose_yaml)
+    services = compose["services"]
+
+    assert services["project-management-env"]["image"] == (
+        "ghcr.io/collinear-ai/collinear/project-management-env:latest"
+    )
+    assert services["project-management-env"]["environment"]["PROJECT_MANAGEMENT_FIXED_NOW"] == (
+        "2026-03-20T12:00:00+00:00"
+    )
+    assert (
+        services["project-management-env"]["environment"]["PROJECT_MANAGEMENT_SEED_DATA_PATH"]
+        == "/app/src/toolsets/project_management/project_management_seed_data.json"
+    )
+    assert services["project-management-seed"]["image"] == (
+        "ghcr.io/collinear-ai/collinear/project-management-env:latest"
+    )
+    assert (
+        services["project-management-seed"]["depends_on"]["project-management-env"]["condition"]
+        == "service_healthy"
+    )
+    reset_command = services["project-management-seed"]["command"][-1]
+    assert "http://project-management-env:8110/reset" in reset_command
     assert "method='POST'" in reset_command
 
 
@@ -394,3 +427,126 @@ def test_compose_resolves_gateway_port_conflicts(tmp_path: Path) -> None:
     assert compose["services"]["mcp-gateway"]["ports"] == ["8081:8080"]
     assert output.mcp_gateway_port == 8081
     assert output.tool_endpoints["mcp-gateway"] == "http://localhost:8081/mcp"
+
+
+def test_generate_env_file_includes_descriptions() -> None:
+    """Env var descriptions from tool YAMLs appear as comments in the .env file."""
+    registry = ToolRegistry()
+    registry._tools["gws"] = ToolDefinition(
+        name="gws",
+        display_name="Google Workspace",
+        description="Google tools",
+        category="productivity",
+        tool_server_port=8090,
+        required_env_vars=[
+            EnvVarRequirement(name="CREDENTIALS_CONFIG", description="Base64-encoded OAuth creds"),
+            EnvVarRequirement(name="CREDENTIALS_EMAIL", description="Google account email"),
+        ],
+        services={
+            "gws-env": ServiceDefinition(
+                image="collinear/gws-env:latest",
+                ports=["8090"],
+                environment={
+                    "CREDENTIALS_CONFIG": "${CREDENTIALS_CONFIG}",
+                    "CREDENTIALS_EMAIL": "${CREDENTIALS_EMAIL}",
+                },
+            )
+        },
+    )
+
+    output = ComposeEngine(registry).compose(EnvConfig(tools=["gws"]))
+
+    assert "# Base64-encoded OAuth creds\nCREDENTIALS_CONFIG=" in output.env_file
+    assert "# Google account email\nCREDENTIALS_EMAIL=" in output.env_file
+
+
+def test_generate_env_file_omits_comment_for_undescribed_vars() -> None:
+    """Env vars without descriptions are emitted without preceding comments."""
+    registry = ToolRegistry()
+    registry._tools["simple"] = ToolDefinition(
+        name="simple",
+        display_name="Simple",
+        description="Simple tool",
+        category="test",
+        tool_server_port=9000,
+        required_env_vars=[
+            EnvVarRequirement(name="API_KEY"),
+        ],
+        services={
+            "simple-env": ServiceDefinition(
+                image="collinear/simple:latest",
+                ports=["9000"],
+                environment={"API_KEY": "${API_KEY}"},
+            )
+        },
+    )
+
+    output = ComposeEngine(registry).compose(EnvConfig(tools=["simple"]))
+
+    assert "API_KEY=" in output.env_file
+    lines = output.env_file.splitlines()
+    api_key_idx = next(i for i, line in enumerate(lines) if line.startswith("API_KEY="))
+    # The line before the variable should be blank, not a description comment
+    assert lines[api_key_idx - 1] == ""
+
+
+def test_google_workspace_env_vars_have_descriptions() -> None:
+    """Verify google-workspace.yaml loads descriptions into EnvVarRequirement objects."""
+    registry = ToolRegistry()
+    registry.load_all()
+
+    tool = registry.get_tool("google-workspace")
+    assert tool is not None
+    descriptions = {req.name: req.description for req in tool.required_env_vars}
+    assert descriptions["CREDENTIALS_CONFIG"]
+    assert descriptions["CREDENTIALS_EMAIL"]
+    assert descriptions["DRIVE_NAMESPACE_ROOT_FOLDER_ID"]
+
+
+def test_tool_definition_assigns_image_for_build_only_service() -> None:
+    tool = ToolDefinition(
+        name="harbor-main",
+        display_name="Harbor Main",
+        description="Harbor task runtime",
+        category="custom",
+        tool_server_port=9000,
+        services={
+            "harbor-main-env": ServiceDefinition(
+                build=BuildDefinition(
+                    context="./gateway",
+                    dockerfile="Dockerfile",
+                ),
+                ports=["9000"],
+            )
+        },
+    )
+
+    assert tool.services["harbor-main-env"].build == BuildDefinition(
+        context="./gateway",
+        dockerfile="Dockerfile",
+    )
+    assert tool.services["harbor-main-env"].image == "harbor-main-env:latest"
+
+
+def test_registry_load_all_rejects_env_local_duplicate_tool_name(tmp_path: Path) -> None:
+    env_dir = tmp_path / "env"
+    custom_tools_dir = env_dir / "custom-tools"
+    custom_tools_dir.mkdir(parents=True)
+    (custom_tools_dir / "email.yaml").write_text(
+        "\n".join(
+            [
+                "name: email",
+                "display_name: Shadow Email",
+                "description: Duplicate tool name",
+                "category: custom",
+                "tool_server_url: http://localhost:9000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="Duplicate tool definition for 'email'"):
+        registry.load_all(env_dir=env_dir)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,7 +13,10 @@ from simlab.api.client import ScenarioManagerClient
 from simlab.cli.tools import tools
 from simlab.telemetry import BackgroundRequestPoster
 from simlab.telemetry import QueuedTelemetryRequest
+from simlab.telemetry import TelemetryService
+from simlab.telemetry import ensure_session
 from simlab.telemetry import request_headers_var
+from simlab.telemetry import utc_now
 
 
 def test_command_telemetry_posts_started_and_finished_events(
@@ -59,6 +63,10 @@ def test_command_telemetry_posts_started_and_finished_events(
     assert finish_call["payload"]["event"] == "cli_command_finished"
     assert start_call["payload"]["properties"]["command"] == "tools list"
     assert finish_call["payload"]["properties"]["command"] == "tools list"
+    install_id = start_call["payload"]["properties"]["install_id"]
+    assert install_id
+    assert specific_call["payload"]["properties"]["install_id"] == install_id
+    assert finish_call["payload"]["properties"]["install_id"] == install_id
 
 
 def test_command_telemetry_posts_for_local_scenario_manager_url(
@@ -142,7 +150,7 @@ def test_generic_wrapped_command_posts_for_local_catalog_command(
     with (
         patch("simlab.telemetry.telemetry_state_path", return_value=tmp_path / "telemetry.json"),
         patch("simlab.telemetry.queue_telemetry_request", side_effect=fake_queue_telemetry_request),
-        patch("simlab.cli.tools._get_registry") as mocked_registry,
+        patch("simlab.cli.tools.build_registry") as mocked_registry,
     ):
         mocked_registry.return_value.get_tool.return_value = fake_tool
         result = runner.invoke(tools, ["info", "email"])
@@ -280,6 +288,7 @@ def test_api_client_includes_active_cli_headers() -> None:
     token = request_headers_var.set(
         {
             "X-SimLab-Command": "tools list",
+            "X-SimLab-Install-Id": "install-123",
             "X-SimLab-Session-Id": "session-456",
             "X-SimLab-Version": "0.1.0",
         }
@@ -292,8 +301,59 @@ def test_api_client_includes_active_cli_headers() -> None:
 
     headers = mocked.call_args.kwargs["headers"]
     assert headers["X-SimLab-Command"] == "tools list"
+    assert headers["X-SimLab-Install-Id"] == "install-123"
     assert headers["X-SimLab-Session-Id"] == "session-456"
     assert headers["X-SimLab-Version"] == "0.1.0"
+
+
+def test_ensure_session_preserves_install_id_when_session_rotates() -> None:
+    now = utc_now()
+    expired = now - timedelta(minutes=31)
+    state = {
+        "install_id": "install-123",
+        "session_id": "session-old",
+        "session_started_at": expired.isoformat(),
+        "last_seen_at": expired.isoformat(),
+    }
+
+    updated = ensure_session(state, now=now)
+
+    assert updated["install_id"] == "install-123"
+    assert updated["session_id"] != "session-old"
+
+
+def test_telemetry_service_ignores_local_simlab_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    local_state_path = tmp_path / "simlab" / "simlab.json"
+    local_state_path.parent.mkdir(parents=True, exist_ok=True)
+    local_state_path.write_text(
+        json.dumps(
+            {
+                "install_id": "legacy-install",
+                "session_id": "legacy-session",
+                "session_started_at": "2026-03-20T00:00:00+00:00",
+                "last_seen_at": "2026-03-20T00:05:00+00:00",
+                "notice_shown": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / ".config" / "simlab" / "simlab.json"
+
+    with patch("simlab.telemetry.stderr_supports_notice", return_value=False):
+        telemetry = TelemetryService(
+            base_url="https://api.example.com",
+            api_key="ck_test_internal",
+            state_path=state_path,
+        )
+
+    assert local_state_path.exists()
+    saved_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved_state["install_id"] == telemetry.install_id
+    assert saved_state["install_id"] != "legacy-install"
 
 
 def test_background_request_poster_waits_for_pending_requests(

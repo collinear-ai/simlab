@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+import simlab.runtime.daytona_runner as daytona_runner_mod
 import yaml
 from simlab.runtime.daytona_runner import DaytonaRunner
 
@@ -79,3 +81,97 @@ services:
     assert service["volumes"] == [
         "/home/daytona/mcp-gateway-config.json:/config/mcp-gateway-config.json:ro"
     ]
+
+
+def test_prepare_compose_for_remote_rejects_external_build_context(tmp_path: Path) -> None:
+    compose_dir = tmp_path / "env"
+    compose_dir.mkdir()
+    external_dir = tmp_path / "external-build"
+    external_dir.mkdir()
+    (external_dir / "Dockerfile").write_text("FROM busybox\n", encoding="utf-8")
+    (compose_dir / "docker-compose.yml").write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "harbor-main": {
+                        "build": {
+                            "context": external_dir.as_posix(),
+                            "dockerfile": "Dockerfile",
+                        }
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="inside the environment bundle"):
+        DaytonaRunner()._prepare_compose_for_remote(compose_dir)
+
+
+def test_restart_sandbox_services_runs_preseed_then_compose_up(monkeypatch) -> None:  # noqa: ANN001
+    session_commands: list[str] = []
+    exec_commands: list[str] = []
+
+    class FakeProcess:
+        def create_session(self, name: str) -> None:
+            session_commands.append(f"create:{name}")
+
+        def execute_session_command(
+            self,
+            session_name: str,
+            request: SimpleNamespace,
+            timeout: int | None = None,
+        ) -> SimpleNamespace:
+            _ = timeout
+            session_commands.append(f"{session_name}:{request.command}")
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+        def exec(
+            self,
+            command: str,
+            *,
+            cwd: str | None = None,
+            timeout: int | None = None,
+        ) -> SimpleNamespace:
+            _ = cwd, timeout
+            exec_commands.append(command)
+            return SimpleNamespace(exit_code=0, result="ok")
+
+    sandbox = SimpleNamespace(process=FakeProcess())
+    preseed_calls: list[tuple[list[str], str]] = []
+
+    def fake_session_execute_request(**kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(
+        daytona_runner_mod,
+        "SessionExecuteRequest",
+        fake_session_execute_request,
+    )
+
+    def fake_run_profiled_services(
+        _sandbox: object,
+        services: list[str],
+        *,
+        profile: str,
+        **_kwargs: object,
+    ) -> str:
+        preseed_calls.append((list(services), profile))
+        return ""
+
+    monkeypatch.setattr(
+        daytona_runner_mod,
+        "_run_profiled_services_in_sandbox",
+        fake_run_profiled_services,
+    )
+
+    DaytonaRunner().restart_sandbox_services(
+        sandbox,
+        preseed_svc_names=["email-preseed"],
+    )
+
+    assert session_commands[:2] == ["create:init", "init:docker info"]
+    assert preseed_calls == [(["email-preseed"], "preseed")]
+    assert exec_commands == ["docker compose up -d"]

@@ -133,6 +133,13 @@ def _prepare_compose_for_remote(
         context_path = Path(build_context)
         if not context_path.is_absolute():
             context_path = (compose_dir / context_path).resolve()
+        try:
+            context_path.relative_to(compose_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Daytona only supports Docker build contexts inside the environment bundle: "
+                f"{context_path}"
+            ) from exc
         image_tag = str(service.get("image", f"{service_name}:latest"))
         service["image"] = image_tag
         if context_path.is_dir():
@@ -251,6 +258,89 @@ def _run_profiled_services_in_sandbox(
     return "\n".join(output_parts)
 
 
+def _ensure_docker_daemon_ready_in_sandbox(
+    sandbox: Any,  # noqa: ANN401
+    *,
+    log_prefix: str = "",
+) -> None:
+    """Wait for the sandbox Docker daemon and start it manually if needed."""
+    prefix = f"{log_prefix} " if log_prefix else ""
+
+    with contextlib.suppress(Exception):
+        sandbox.process.create_session("init")
+
+    click.echo(f"{prefix}Waiting for Docker daemon...")
+    daemon_ready = False
+    resp = None
+    for attempt in range(20):
+        resp = sandbox.process.execute_session_command(
+            "init",
+            SessionExecuteRequest(command="docker info"),
+            timeout=5,
+        )
+        if resp.exit_code == 0:
+            click.echo(f"{prefix}Docker daemon ready.")
+            daemon_ready = True
+            break
+        if attempt == 0:
+            click.echo(f"{prefix}  Docker daemon still starting; retrying...")
+        time.sleep(3)
+
+    if not daemon_ready:
+        click.echo(f"{prefix}Attempting to start Docker daemon manually...")
+        sandbox.process.execute_session_command(
+            "init",
+            SessionExecuteRequest(command="nohup dockerd &", run_async=True),
+        )
+        for _ in range(20):
+            resp = sandbox.process.execute_session_command(
+                "init",
+                SessionExecuteRequest(command="docker info"),
+                timeout=5,
+            )
+            if resp.exit_code == 0:
+                click.echo(f"{prefix}Docker daemon ready (manual start).")
+                daemon_ready = True
+                break
+            time.sleep(3)
+
+    if daemon_ready:
+        return
+
+    stdout = getattr(resp, "stdout", "") if resp else ""
+    stderr = getattr(resp, "stderr", "") if resp else ""
+    raise RuntimeError(f"Docker daemon failed to start in sandbox. stdout={stdout} stderr={stderr}")
+
+
+def restart_sandbox_environment(
+    sandbox: Any,  # noqa: ANN401
+    *,
+    preseed_svc_names: list[str] | None = None,
+    log_prefix: str = "",
+) -> None:
+    """Restart compose services inside an already existing sandbox."""
+    prefix = f"{log_prefix} " if log_prefix else ""
+
+    _ensure_docker_daemon_ready_in_sandbox(sandbox, log_prefix=log_prefix)
+
+    if preseed_svc_names:
+        _run_profiled_services_in_sandbox(
+            sandbox,
+            preseed_svc_names,
+            profile="preseed",
+            log_prefix=log_prefix,
+        )
+
+    click.echo(f"{prefix}Restarting services...")
+    resp = sandbox.process.exec(
+        "docker compose up -d",
+        cwd=_COMPOSE_DIR,
+        timeout=120,
+    )
+    if resp.exit_code != 0:
+        raise RuntimeError(f"docker compose up failed:\n{resp.result}")
+
+
 def setup_sandbox_environment(
     sandbox: Any,  # noqa: ANN401
     compose_dir: Path,
@@ -279,48 +369,7 @@ def setup_sandbox_environment(
     """
     prefix = f"{log_prefix} " if log_prefix else ""
 
-    # Use session API so we get separate stdout/stderr
-    sandbox.process.create_session("init")
-
-    # Wait for Docker daemon (started automatically by snapshot entrypoint)
-    click.echo(f"{prefix}Waiting for Docker daemon...")
-    daemon_ready = False
-    resp = None
-    for attempt in range(20):
-        resp = sandbox.process.execute_session_command(
-            "init", SessionExecuteRequest(command="docker info"), timeout=5
-        )
-        if resp.exit_code == 0:
-            click.echo(f"{prefix}Docker daemon ready.")
-            daemon_ready = True
-            break
-        if attempt == 0:
-            click.echo(f"{prefix}  Docker daemon still starting; retrying...")
-        time.sleep(3)
-
-    if not daemon_ready:
-        # Try starting dockerd manually as a fallback
-        click.echo(f"{prefix}Attempting to start Docker daemon manually...")
-        sandbox.process.execute_session_command(
-            "init",
-            SessionExecuteRequest(command="nohup dockerd &", run_async=True),
-        )
-        for _ in range(20):
-            resp = sandbox.process.execute_session_command(
-                "init", SessionExecuteRequest(command="docker info"), timeout=5
-            )
-            if resp.exit_code == 0:
-                click.echo(f"{prefix}Docker daemon ready (manual start).")
-                daemon_ready = True
-                break
-            time.sleep(3)
-
-    if not daemon_ready:
-        stdout = getattr(resp, "stdout", "") if resp else ""
-        stderr = getattr(resp, "stderr", "") if resp else ""
-        raise RuntimeError(
-            f"Docker daemon failed to start in sandbox. stdout={stdout} stderr={stderr}"
-        )
+    _ensure_docker_daemon_ready_in_sandbox(sandbox, log_prefix=log_prefix)
 
     # Upload compose files.  Bundle assets are packed into a single tarball
     # to minimise HTTP requests through Daytona's proxy (many small uploads
@@ -641,6 +690,20 @@ class DaytonaRunner:
             preview = sandbox.get_preview_link(port)
             urls[tool_name] = preview.url
         return urls
+
+    def restart_sandbox_services(
+        self,
+        sandbox: Any,  # noqa: ANN401
+        *,
+        preseed_svc_names: list[str] | None = None,
+        log_prefix: str = "",
+    ) -> None:
+        """Restart compose services inside a resumed Daytona sandbox."""
+        restart_sandbox_environment(
+            sandbox,
+            preseed_svc_names=preseed_svc_names,
+            log_prefix=log_prefix,
+        )
 
     def down(self, compose_dir: Path) -> None:
         """Tear down the Daytona sandbox."""

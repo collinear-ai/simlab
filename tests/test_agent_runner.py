@@ -1,27 +1,37 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from typing import Self
 
 import pytest
 import simlab.agents.mcp_client as mcp_client_module
 from simlab.agents import BaseAgent
 from simlab.agents import BaseEnvironment
+from simlab.agents import HttpToolEnvironment
 from simlab.agents import ToolCallResult
+from simlab.agents import ToolNamespace
+from simlab.agents import UnifiedToolEnvironment
 from simlab.agents import load_agent_class
 from simlab.agents import reference_agent
 from simlab.agents import run_with_agent_contract
+from simlab.agents.base import RunArtifacts
 
 
 class FakeEnvironment(BaseEnvironment):
+    def list_tool_namespaces(self) -> list[ToolNamespace]:
+        return [ToolNamespace(name="email-env", transport="http", endpoint="http://localhost:8040")]
+
     @property
     def tool_servers(self) -> dict[str, str]:
         return {"email-env": "http://localhost:8040"}
 
-    def list_tools(self, tool_server: str | None = None) -> list[dict]:
+    async def alist_tools(self, tool_server: str | None = None) -> list[dict]:
         _ = tool_server
         return [
             {
@@ -32,7 +42,9 @@ class FakeEnvironment(BaseEnvironment):
             }
         ]
 
-    def call_tool(self, tool_server: str, tool_name: str, parameters: dict) -> ToolCallResult:
+    async def acall_tool(
+        self, tool_server: str, tool_name: str, parameters: dict
+    ) -> ToolCallResult:
         _ = tool_server, tool_name, parameters
         return ToolCallResult(observation={"ok": True}, is_error=False)
 
@@ -64,6 +76,23 @@ class FailingAgent(BaseAgent):
     def run(self, instruction: str, environment: BaseEnvironment, context) -> None:  # noqa: ANN001
         _ = instruction, environment, context
         raise RuntimeError("boom")
+
+
+class AsyncRecordingAgent(BaseAgent):
+    def setup(self, environment: BaseEnvironment) -> Any:
+        return self._asetup(environment)
+
+    async def _asetup(self, environment: BaseEnvironment) -> None:
+        _ = environment
+
+    def run(self, instruction: str, environment: BaseEnvironment, context) -> Any:  # noqa: ANN001
+        return self._arun(instruction, environment, context)
+
+    async def _arun(self, instruction: str, environment: BaseEnvironment, context) -> None:  # noqa: ANN001
+        _ = environment
+        context.record_message("user", instruction)
+        context.final_observation = "async-done"
+        context.metadata["async_custom"] = True
 
 
 def test_run_with_agent_contract_success() -> None:
@@ -182,61 +211,261 @@ def test_reference_agent_runs_tool_loop(monkeypatch) -> None:  # noqa: ANN001
         None,
     )
     assert tool_call_msg is not None
-    assert tool_call_msg["content"]["tool_calls"][0]["name"] == "email-env__send_email"
-    assert tool_call_msg["content"]["tool_calls"][0]["arguments"] == {"to_addr": "a@example.com"}
+    assert tool_call_msg["content"]["tool_calls"][0]["function"]["name"] == "email-env__send_email"
+    assert json.loads(tool_call_msg["content"]["tool_calls"][0]["function"]["arguments"]) == {
+        "to_addr": "a@example.com"
+    }
     tool_msgs = [m for m in artifacts.messages if m["role"] == "tool"]
     assert tool_msgs
     tool_payload = tool_msgs[0]["content"]
     assert tool_payload["tool_call_id"] == "call_1"
-    assert tool_payload["tool_name"] == "email-env__send_email"
+    assert tool_payload["tool_server"] == "email-env"
+    assert tool_payload["tool_name"] == "send_email"
     assert tool_payload["is_error"] is False
 
 
-def test_reference_agent_raises_when_mcp_server_fails_tool_listing() -> None:
-    class HealthyMCPHandle:
-        def list_tools(self) -> list[dict]:
-            return [
-                {
-                    "tool_server": "healthy-mcp",
-                    "name": "lookup_weather",
-                    "description": "Weather lookup",
-                    "input_schema": {"type": "object"},
-                }
-            ]
+def test_run_with_agent_contract_supports_async_agent_inside_running_event_loop() -> None:
+    async def _run_inside_event_loop() -> RunArtifacts:
+        return run_with_agent_contract(
+            task_id="t-async-custom",
+            instruction="do task",
+            model="gpt-test",
+            provider="openai",
+            max_steps=5,
+            environment=FakeEnvironment(),
+            agent_import_path=f"{__name__}:AsyncRecordingAgent",
+            timeout_seconds=1.0,
+        )
 
-    class FailingMCPHandle:
-        def list_tools(self) -> list[dict]:
-            raise RuntimeError("unauthorized")
+    artifacts = asyncio.run(_run_inside_event_loop())
 
-    mcp_clients: Any = {
-        "healthy-mcp": HealthyMCPHandle(),
-        "broken-mcp": FailingMCPHandle(),
-    }
+    assert artifacts.error is None
+    assert artifacts.final_observation == "async-done"
+    assert artifacts.metadata["async_custom"] is True
+
+
+def test_reference_agent_supports_running_event_loop_hosts(monkeypatch) -> None:  # noqa: ANN001
+    def fake_completion(**kwargs):
+        messages = kwargs["messages"]
+        has_tool_result = any(m.get("role") == "tool" for m in messages)
+        if not has_tool_result:
+            tool_call = SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(
+                    name="email-env__send_email",
+                    arguments='{"to_addr":"a@example.com"}',
+                ),
+            )
+            message = SimpleNamespace(content="", tool_calls=[tool_call])
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        message = SimpleNamespace(content="task complete", tool_calls=[])
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    import litellm  # noqa: PLC0415
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    async def _run_inside_event_loop() -> RunArtifacts:
+        return run_with_agent_contract(
+            task_id="t-ref-async-host",
+            instruction="send an email",
+            model="gpt-test",
+            provider="openai",
+            max_steps=5,
+            environment=FakeEnvironment(),
+            timeout_seconds=1.0,
+            api_key="sk-test",
+            base_url=None,
+        )
+
+    artifacts = asyncio.run(_run_inside_event_loop())
+
+    assert artifacts.error is None
+    assert artifacts.final_observation == "task complete"
+    assert artifacts.steps_taken == 1
+
+
+def test_reference_agent_raises_when_environment_mcp_tool_listing_fails() -> None:
+    class FailingEnvironment(FakeEnvironment):
+        async def alist_tools(self, tool_server: str | None = None) -> list[dict]:
+            _ = tool_server
+            raise RuntimeError("broken-mcp: unauthorized")
 
     with pytest.raises(RuntimeError, match="broken-mcp: unauthorized"):
-        reference_agent._build_openai_tools(
-            FakeEnvironment(),
-            mcp_clients,
-        )
+        asyncio.run(reference_agent._abuild_openai_tools(FailingEnvironment()))
 
 
 def test_reference_agent_raises_on_duplicate_wire_name() -> None:
-    class CollidingMCPHandle:
-        def list_tools(self) -> list[dict]:
-            return [
-                {
-                    "tool_server": "email-env",
-                    "name": "send_email",
-                    "description": "Duplicate send email",
-                    "input_schema": {"type": "object"},
-                }
-            ]
+    async def _duplicate_tools(self: object, tool_server: str | None = None) -> list[dict]:
+        _ = self, tool_server
+        return [
+            {
+                "tool_server": "email-env",
+                "name": "send_email",
+                "description": "Send email",
+                "input_schema": {"type": "object"},
+            },
+            {
+                "tool_server": "email-env",
+                "name": "send_email",
+                "description": "Duplicate send email",
+                "input_schema": {"type": "object"},
+            },
+        ]
 
     with pytest.raises(RuntimeError, match="Duplicate tool wire name detected"):
-        reference_agent._build_openai_tools(
-            FakeEnvironment(),
-            {"email-env": CollidingMCPHandle()},  # type: ignore[dict-item]
+        asyncio.run(
+            reference_agent._abuild_openai_tools(
+                type(
+                    "CollidingEnvironment",
+                    (FakeEnvironment,),
+                    {"alist_tools": _duplicate_tools},
+                )()
+            )
         )
+
+
+def test_http_tool_environment_merges_http_and_mcp_tools(monkeypatch) -> None:  # noqa: ANN001
+    async def fake_list_tools(_url: str, **kwargs: Any) -> list[dict]:
+        _ = kwargs
+        return [{"name": "ping", "description": "Ping", "input_schema": {"type": "object"}}]
+
+    async def fake_call_tool(_url: str, tool_name: str, parameters: dict, **kwargs: Any):
+        _ = kwargs
+        return ToolCallResult(
+            observation={"tool_name": tool_name, "parameters": parameters, "transport": "mcp"}
+        )
+
+    class FakeHttpResponse:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self._payload = json.dumps(payload).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            _ = exc_type, exc, tb
+
+    def fake_urlopen(request, timeout=30.0):  # noqa: ANN001, ARG001
+        full_url = request.full_url
+        if full_url.endswith("/tools"):
+            return FakeHttpResponse(
+                {
+                    "tools": [
+                        {
+                            "name": "send_email",
+                            "description": "Send email",
+                            "input_schema": {"type": "object"},
+                        }
+                    ]
+                }
+            )
+        return FakeHttpResponse({"ok": True})
+
+    monkeypatch.setattr(mcp_client_module, "_async_list_tools", fake_list_tools)
+    monkeypatch.setattr(mcp_client_module, "_async_call_tool", fake_call_tool)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    environment = UnifiedToolEnvironment(
+        tool_servers={"email-env": "http://localhost:8040"},
+        mcp_clients={
+            "demo": mcp_client_module.MCPClientHandle("http://localhost:8081/mcp", "demo")
+        },
+    )
+
+    namespaces = environment.list_tool_namespaces()
+    assert {(namespace.name, namespace.transport) for namespace in namespaces} == {
+        ("email-env", "http"),
+        ("demo", "mcp"),
+    }
+    tools = asyncio.run(environment.alist_tools())
+    assert {tool["tool_server"] for tool in tools} == {"email-env", "demo"}
+    assert {tool["transport"] for tool in tools} == {"http", "mcp"}
+
+    mcp_result = asyncio.run(environment.acall_tool("demo", "ping", {"value": 1}))
+    assert mcp_result.observation == {
+        "tool_name": "ping",
+        "parameters": {"value": 1},
+        "transport": "mcp",
+    }
+
+
+def test_unified_tool_environment_supports_mcp_calls_inside_running_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_list_tools(_url: str, **kwargs: Any) -> list[dict]:
+        _ = kwargs
+        return [{"name": "ping", "description": "Ping", "input_schema": {"type": "object"}}]
+
+    async def fake_call_tool(_url: str, tool_name: str, parameters: dict, **kwargs: Any):
+        _ = kwargs
+        return ToolCallResult(
+            observation={"tool_name": tool_name, "parameters": parameters, "transport": "mcp"}
+        )
+
+    monkeypatch.setattr(mcp_client_module, "_async_list_tools", fake_list_tools)
+    monkeypatch.setattr(mcp_client_module, "_async_call_tool", fake_call_tool)
+
+    environment = UnifiedToolEnvironment(
+        tool_servers={},
+        mcp_clients={
+            "demo": mcp_client_module.MCPClientHandle("http://localhost:8081/mcp", "demo")
+        },
+    )
+
+    async def _exercise_environment() -> tuple[list[dict[str, Any]], ToolCallResult]:
+        with pytest.deprecated_call(match="removed in 0.4.0"):
+            tools = environment.list_tools()
+        with pytest.deprecated_call(match="removed in 0.4.0"):
+            result = environment.call_tool("demo", "ping", {"value": 1})
+        return tools, result
+
+    tools, result = asyncio.run(_exercise_environment())
+
+    assert tools == [
+        {
+            "tool_server": "demo",
+            "transport": "mcp",
+            "name": "ping",
+            "description": "Ping",
+            "input_schema": {"type": "object"},
+        }
+    ]
+    assert result.observation == {
+        "tool_name": "ping",
+        "parameters": {"value": 1},
+        "transport": "mcp",
+    }
+
+
+def test_unified_tool_environment_rejects_duplicate_http_and_mcp_namespaces() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Tool namespace names must be unique across HTTP and MCP transports: shared",
+    ):
+        UnifiedToolEnvironment(
+            tool_servers={"shared": "http://localhost:8040"},
+            mcp_clients={
+                "shared": mcp_client_module.MCPClientHandle(
+                    "http://localhost:8081/mcp",
+                    "shared",
+                )
+            },
+        )
+
+
+def test_http_tool_environment_is_deprecated() -> None:
+    with pytest.deprecated_call(match="removed in 0.4.0"):
+        HttpToolEnvironment(tool_servers={"email-env": "http://localhost:8040"})
+
+
+def test_unified_tool_environment_tool_servers_property_is_deprecated() -> None:
+    environment = UnifiedToolEnvironment(tool_servers={"email-env": "http://localhost:8040"})
+    with pytest.deprecated_call(match="removed in 0.4.0"):
+        assert environment.tool_servers == {"email-env": "http://localhost:8040"}
 
 
 def test_mcp_client_handle_filters_and_prefixes_namespaced_gateway_tools(monkeypatch) -> None:  # noqa: ANN001
@@ -260,7 +489,7 @@ def test_mcp_client_handle_filters_and_prefixes_namespaced_gateway_tools(monkeyp
         tool_prefix="weather_",
     )
 
-    tools = handle.list_tools()
+    tools = asyncio.run(handle.alist_tools())
     assert tools == [
         {
             "name": "search",
@@ -270,8 +499,38 @@ def test_mcp_client_handle_filters_and_prefixes_namespaced_gateway_tools(monkeyp
         }
     ]
 
-    result = handle.call_tool("search", {"query": "sf"})
+    result = asyncio.run(handle.acall_tool("search", {"query": "sf"}))
     assert result.observation == {
         "tool_name": "weather_search",
         "parameters": {"query": "sf"},
     }
+
+
+def test_base_environment_sync_tool_methods_are_deprecated() -> None:
+    environment = FakeEnvironment()
+    with pytest.deprecated_call(match="removed in 0.4.0"):
+        tools = environment.list_tools()
+    with pytest.deprecated_call(match="removed in 0.4.0"):
+        result = environment.call_tool("email-env", "send_email", {})
+    assert tools[0]["name"] == "send_email"
+    assert result.is_error is False
+
+
+def test_unified_tool_environment_sync_tool_methods_are_deprecated(monkeypatch) -> None:  # noqa: ANN001
+    async def fake_list_tools(_url: str, **kwargs: Any) -> list[dict]:
+        _ = kwargs
+        return [{"name": "ping", "description": "Ping", "input_schema": {"type": "object"}}]
+
+    monkeypatch.setattr(mcp_client_module, "_async_list_tools", fake_list_tools)
+
+    environment = UnifiedToolEnvironment(
+        tool_servers={},
+        mcp_clients={
+            "demo": mcp_client_module.MCPClientHandle("http://localhost:8081/mcp", "demo")
+        },
+    )
+
+    with pytest.deprecated_call(match="removed in 0.4.0"):
+        tools = environment.list_tools()
+
+    assert tools[0]["name"] == "ping"

@@ -1,0 +1,87 @@
+# Template: ERP
+# Pre-filled config for ERP operations management (UnifiedConfig schema)
+
+[agent]
+role = "ERP operations manager"
+description = "Handles inventory management, order fulfillment, supplier coordination, invoicing, and customer account management for a mid-size company."
+
+[[toolset]]
+name = "ERP"
+description = "Inventory records, purchase orders, sales orders, invoices, supplier and customer accounts"
+service_name = "erp-env"
+service_url = "http://erp-env:8100"
+operations = ["search", "read", "create", "update"]
+
+[[toolset]]
+name = "Email"
+description = "Send and read emails"
+service_name = "email-env"
+service_url = "http://email-env:8040"
+operations = ["send", "read"]
+
+[scenario]
+name = "erp"
+role_label = "ERP operations professional"
+conventions = """
+- Verify stock levels before confirming order fulfillment
+- Always attach purchase order references when communicating with suppliers
+- Document all inventory adjustments with reason codes
+- Reconcile invoices against delivery receipts before approval
+"""
+policies = [
+    "Purchase orders over $50k require Finance Director approval",
+    "Inventory write-offs must be documented and approved by Warehouse Manager",
+    "Customer credit terms changes require Finance Director sign-off",
+    "Supplier onboarding requires procurement review and compliance check",
+]
+
+[workspace]
+email_domain = "company.com"
+agent_email = "operations@company.com"
+
+[generation]
+num_tasks = 20
+complexity = { easy = 0.3, medium = 0.5, hard = 0.2 }
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+
+[[categories]]
+id = "inventory_management"
+label = "Inventory management"
+
+[[categories]]
+id = "order_fulfillment"
+label = "Order fulfillment"
+
+[[categories]]
+id = "supplier_procurement"
+label = "Supplier procurement"
+
+[[categories]]
+id = "financial_operations"
+label = "Financial operations"
+
+[[categories]]
+id = "customer_account_management"
+label = "Customer account management"
+
+[[npcs]]
+role = "Warehouse Manager"
+typical_asks = "Stock level updates, inventory discrepancies, fulfillment priorities"
+
+[[npcs]]
+role = "Procurement Lead"
+typical_asks = "Supplier negotiations, purchase order approvals, delivery tracking"
+
+[[npcs]]
+role = "Finance Director"
+typical_asks = "Invoice approvals, budget reviews, credit term decisions"
+
+[[npcs]]
+role = "Customer Account Manager"
+typical_asks = "Order status inquiries, account adjustments, billing questions"
+
+[[npcs]]
+role = "Sales Representative"
+typical_asks = "Rush order requests, customer pricing questions, delivery timelines"

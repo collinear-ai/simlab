@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import itertools
 import json
-import random
-import shlex
 import subprocess
-import sys
 import time
-from collections.abc import Callable
-from importlib import import_module
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
@@ -23,21 +17,41 @@ from simlab.api.client import ScenarioManagerClient
 from simlab.api.client import resolve_scenario_manager_api_url
 from simlab.api.schemas import ScenarioSummary
 from simlab.catalog.registry import ToolRegistry
-from simlab.cli.progress import StepContext
 from simlab.cli.progress import StepProgress
-from simlab.cli.progress import StepProgressReporter
 from simlab.composer.engine import DEFAULT_IMAGE_REGISTRY
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
-from simlab.composer.engine import write_output
+from simlab.composer.engine import get_mcp_gateway_host_port
 from simlab.config import get_env_dir
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_env_dir
+from simlab.env_artifacts import ensure_env_artifacts_current
+from simlab.env_artifacts import load_env_config
+from simlab.env_artifacts import regenerate_env_artifacts
+from simlab.env_custom_tools import add_custom_tool
+from simlab.env_registry import build_registry
 from simlab.mcp_config import MCP_SERVERS_FILENAME
+from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import load_mcp_servers_config
-from simlab.runtime.compose_ps import parse_ps_output
-from simlab.seeder import query_tool_server
+from simlab.mcp_config import load_mcp_servers_from_env_dir
+from simlab.mcp_config import validate_mcp_server_name_conflicts
+from simlab.runtime.env_lifecycle import _compose_has_build_contexts
+from simlab.runtime.env_lifecycle import _compose_has_services
+from simlab.runtime.env_lifecycle import _get_daytona_runner
+from simlab.runtime.env_lifecycle import _get_preseed_service_names
+from simlab.runtime.env_lifecycle import _get_seed_service_names
+from simlab.runtime.env_lifecycle import _get_tool_ports
+from simlab.runtime.env_lifecycle import _run_profiled_services_local
+from simlab.runtime.env_lifecycle import _seed_local
+from simlab.runtime.env_lifecycle import _verify_seed_daytona
+from simlab.runtime.env_lifecycle import _verify_seed_local
+from simlab.runtime.env_lifecycle import ensure_env_started_daytona
+from simlab.runtime.env_lifecycle import ensure_env_started_local
+from simlab.runtime.env_lifecycle import env_down_daytona
+from simlab.runtime.env_lifecycle import env_down_local
+from simlab.runtime.env_lifecycle import run_env_seed_daytona
+from simlab.runtime.env_lifecycle import run_env_seed_local
 from simlab.telemetry import TelemetryCaptureConfig
 from simlab.telemetry import emit_cli_event
 from simlab.telemetry import normalize_config_path
@@ -217,12 +231,6 @@ _CODING_VERIFIERS_INIT = dedent(
 )
 
 
-def _get_registry() -> ToolRegistry:
-    registry = ToolRegistry()
-    registry.load_all()
-    return registry
-
-
 def _extract_tools_from_scenario(
     registry: ToolRegistry, scenario: ScenarioSummary
 ) -> tuple[list[str], list[str]]:
@@ -236,6 +244,7 @@ def _extract_tools_from_scenario(
         "frappe-hrms-env": "frappe-hrms",
         "google-workspace-tool-server": "google-workspace",
         "playwright-mcp": "playwright",
+        "project-management-env": "project-management",
         "rocketchat-env": "rocketchat",
         "sec-edgar-env": "sec-edgar",
         "twelve-data-env": "twelve-data",
@@ -361,7 +370,7 @@ def init(
     global_cfg = get_global_config_from_ctx(ctx)
     env_dir = get_env_dir(env_name, ctx=ctx)
     env_yaml = env_dir / "env.yaml"
-    registry = _get_registry()
+    registry = build_registry()
     scenario_guidance_md = (
         _load_scenario_guidance_file(str(scenario_guidance_file))
         if scenario_guidance_file is not None
@@ -475,6 +484,10 @@ def init(
     if mcp_servers_path is not None:
         try:
             mcp_config = load_mcp_servers_config(mcp_servers_path)
+            validate_mcp_server_name_conflicts(
+                mcp_config,
+                existing_tool_names=frozenset(build_registry(env_dir=env_dir).tool_names),
+            )
         except (TypeError, ValueError) as e:
             click.echo(click.style(str(e), fg="red"), err=True)
             raise SystemExit(1) from e
@@ -540,15 +553,11 @@ def init(
         if "coding" in selected_tools:
             _scaffold_coding_environment(env_dir, env_name)
 
-    # Generate docker-compose.yml and .env.
-    engine = ComposeEngine(registry)
     try:
-        compose_output = engine.compose(config, config_dir=env_yaml.parent, env_dir=env_dir)
+        compose_output = regenerate_env_artifacts(env_dir)
     except (KeyError, FileNotFoundError, ValueError) as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
-
-    write_output(compose_output, env_dir)
 
     click.echo(click.style(f"Environment generated in {env_dir}/", fg="green"))
     click.echo("  env.yaml")
@@ -705,25 +714,6 @@ def _scaffold_coding_environment(env_dir: Path, env_name: str) -> None:
     _write_text_if_missing(env_dir / "README.md", _generate_coding_env_readme(env_name))
 
 
-def _validate_daytona_coding_assets(config: EnvConfig, config_dir: Path) -> None:
-    """Fail early when Daytona-backed coding envs reference files outside the env dir."""
-    external_asset_paths = ComposeEngine.get_external_coding_asset_paths(config, config_dir)
-    if not external_asset_paths:
-        return
-
-    click.echo(
-        click.style(
-            "Daytona mode only supports coding assets located inside the environment "
-            f"directory ({config_dir}).",
-            fg="red",
-        ),
-        err=True,
-    )
-    for path in external_asset_paths:
-        click.echo(f"  - {path}", err=True)
-    raise SystemExit(1)
-
-
 def _interactive_add_more(registry: ToolRegistry, remaining: list[str]) -> list[str]:
     """Ask user if they want to add more tools beyond the template."""
     if questionary is None:
@@ -752,19 +742,32 @@ def _interactive_add_more(registry: ToolRegistry, remaining: list[str]) -> list[
     return selected or []
 
 
-def _compose_has_build_contexts(compose_file: Path) -> bool:
-    """Return True if the compose file defines any service with a build context."""
-    existing = yaml.safe_load(compose_file.read_text())
-    if not existing or "services" not in existing:
-        return False
-    return any("build" in svc for svc in existing["services"].values())
+@env.group("custom-tools")
+def custom_tools() -> None:
+    """Manage env-local custom tool definitions."""
 
 
-def _compose_has_services(compose_file: Path) -> bool:
-    """Return True if the compose file defines at least one service."""
-    existing = yaml.safe_load(compose_file.read_text())
-    services = existing.get("services") if isinstance(existing, dict) else None
-    return isinstance(services, dict) and bool(services)
+@custom_tools.command("add")
+@click.argument("env_name")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Overwrite the scaffold if it already exists.")
+@click.pass_context
+def custom_tools_add(ctx: click.Context, env_name: str, name: str, force: bool) -> None:
+    """Scaffold one env-local custom tool and enable it in the environment config."""
+    env_dir = resolve_env_dir(env_name, ctx=ctx)
+    try:
+        result = add_custom_tool(env_dir, name, force=force)
+    except FileExistsError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        click.echo("Use --force to overwrite it.", err=True)
+        raise SystemExit(1) from e
+    except (KeyError, FileNotFoundError, ValueError) as e:
+        click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+
+    click.echo(click.style(f"Custom tool scaffold written to {result.tool_file}", fg="green"))
+    click.echo(f"Enabled '{name}' in {result.env_yaml}.")
+    click.echo("Edit the scaffold before using this tool in a real run.")
 
 
 @env.command()
@@ -786,9 +789,9 @@ def _compose_has_services(compose_file: Path) -> bool:
 def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool, verbose: bool) -> None:
     """Start the environment."""
     env_dir = resolve_env_dir(env_name, ctx=ctx)
+    ensure_env_artifacts_current(env_dir, action_label="env up")
     config_file = env_dir / "env.yaml"
-    data = yaml.safe_load(config_file.read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
     compose_file = env_dir / "docker-compose.yml"
 
     if not compose_file.exists():
@@ -840,11 +843,9 @@ def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool, verbose:
                 click.echo(result.stderr, err=True)
                 raise SystemExit(1)
         _up_local(
-            compose_file,
             env_dir,
             config,
             config_file,
-            has_builds,
             verbose=verbose,
             has_services=has_services,
         )
@@ -862,11 +863,9 @@ def up(ctx: click.Context, env_name: str, rebuild: bool, daytona: bool, verbose:
 
 
 def _up_local(
-    compose_file: Path,
     out_dir: Path,
     config: EnvConfig,
     config_path: Path | None = None,
-    has_builds: bool = False,
     verbose: bool = False,
     has_services: bool = True,
 ) -> None:
@@ -874,100 +873,47 @@ def _up_local(
     progress = StepProgress(verbose=verbose)
     t0 = time.time()
 
-    preseed_svc_names = _get_preseed_service_names(config, config_path)
-    if preseed_svc_names:
-        with progress.step("Environment preseeded") as ctx:
-            _run_profiled_services_local(
-                out_dir, preseed_svc_names, profile="preseed", quiet=True, step_ctx=ctx
-            )
-
     if not has_services:
+        # Preseed may still exist for external-only envs (e.g. schema setup).
+        preseed_svc_names = _get_preseed_service_names(config, config_path)
+        if preseed_svc_names:
+            with progress.step("Environment preseeded") as ctx:
+                _run_profiled_services_local(
+                    out_dir, preseed_svc_names, profile="preseed", quiet=True, step_ctx=ctx
+                )
         click.echo("No local services defined; environment uses external endpoints only.")
         click.echo(click.style("Environment ready.", fg="green", bold=True))
         return
 
     with progress.step("Services started") as ctx:
-        up_cmd = ["docker", "compose", "-f", str(compose_file), "up", "-d"]
-        if has_builds:
-            up_cmd.append("--build")
-        result = subprocess.run(up_cmd, capture_output=True, text=True)
-        if result.stdout:
-            ctx.detail(result.stdout.strip())
-        if result.returncode != 0:
-            ctx.detail(result.stderr.strip() if result.stderr else "")
-            raise SystemExit(1)
+        ensure_env_started_local(out_dir, config, config_path)
+        _ = ctx  # available for future detail messages
 
-    # Health polling has its own animated display — run it outside step()
-    click.echo()
-    _poll_health(
-        _local_health_fetcher(compose_file),
-        timeout=180,
-    )
-
-    # Auto-seed if tools have seed services
-    seed_svc_names = _get_seed_service_names(config, config_path)
-    if seed_svc_names:
-        with progress.step("Environment seeded") as ctx:
-            _run_profiled_services_local(
-                out_dir, seed_svc_names, profile="seed", quiet=True, step_ctx=ctx
-            )
-        _verify_seed_local(config, config_path)
+    with progress.step("Environment seeded") as ctx:
+        run_env_seed_local(out_dir, config, config_path)
+        _ = ctx
 
     tool_ports = _get_tool_ports(config, config_path)
     endpoints = {name: f"http://localhost:{port}" for name, port in tool_ports.items()}
+    endpoints = _add_mcp_gateway_endpoint(endpoints, env_dir=out_dir)
     progress.finish(time.time() - t0, endpoints=endpoints or None)
 
 
-def _get_daytona_runner(daytona_api_key: str | None = None):  # noqa: ANN202
-    """Import Daytona runner lazily so base CLI works without optional deps."""
-    try:
-        daytona_runner_module = import_module("simlab.runtime.daytona_runner")
-    except ModuleNotFoundError as exc:
-        click.echo(
-            click.style(
-                "Daytona support is unavailable in this installation. "
-                "Install simulationlab[daytona] or run without --daytona.",
-                fg="red",
-            ),
-            err=True,
-        )
-        raise SystemExit(1) from exc
+def _add_mcp_gateway_endpoint(
+    endpoints: dict[str, str],
+    *,
+    env_dir: Path,
+) -> dict[str, str]:
+    """Add the MCP gateway endpoint when the env has command-based MCP servers."""
+    mcp_config = load_mcp_servers_from_env_dir(env_dir)
+    if not mcp_config or not get_mcp_command_servers(mcp_config):
+        return endpoints
 
-    return daytona_runner_module.DaytonaRunner(daytona_api_key=daytona_api_key)
-
-
-def _get_tool_ports(config: EnvConfig, config_path: Path | None = None) -> dict[str, int]:
-    """Get tool server ports keyed by tool name from loaded catalog entries."""
-    _ = config_path
-    registry = _get_registry()
-    ports: dict[str, int] = {}
-    for tool_name in config.tools:
-        tool = registry.get_tool(tool_name)
-        if tool and tool.tool_server_port is not None:
-            ports[tool_name] = tool.tool_server_port
-    return ports
-
-
-def _verify_seed_daytona(config: EnvConfig, endpoints: dict[str, str], config_path: Path) -> None:
-    """Verify seed data by querying Daytona-exposed tool endpoints."""
-    _ = config_path
-    registry = _get_registry()
-    for tool_name in config.tools:
-        tool = registry.get_tool(tool_name)
-        if not tool or not tool.seed_services:
-            continue
-        if tool.name == "frappe-hrms":
-            url = endpoints.get(tool_name)
-            if not url:
-                click.echo(
-                    click.style(
-                        "Could not resolve Daytona endpoint for frappe-hrms.",
-                        fg="yellow",
-                    ),
-                    err=True,
-                )
-                continue
-            _print_frappe_verification(url)
+    gateway_port = get_mcp_gateway_host_port(env_dir)
+    return {
+        **endpoints,
+        ComposeEngine.MCP_GATEWAY_SERVICE_NAME: f"http://localhost:{gateway_port}/mcp",
+    }
 
 
 def _up_daytona(
@@ -978,31 +924,22 @@ def _up_daytona(
     verbose: bool = False,
 ) -> None:
     """Start services on a remote Daytona sandbox."""
-    _validate_daytona_coding_assets(config, config_path.parent)
     progress = StepProgress(verbose=verbose)
-    reporter = StepProgressReporter(progress)
     t0 = time.time()
 
-    runner = _get_daytona_runner(daytona_api_key=daytona_api_key)
-    tool_ports = _get_tool_ports(config, config_path)
-    preseed_svc_names = _get_preseed_service_names(config, config_path)
-    endpoints = runner.up(
-        out_dir, tool_ports, preseed_svc_names=preseed_svc_names, reporter=reporter
+    endpoints = ensure_env_started_daytona(
+        out_dir, config, config_path, daytona_api_key=daytona_api_key, verbose=verbose
     )
 
-    # Health polling has its own animated display
-    click.echo()
-    _poll_health(
-        lambda: runner.get_health(out_dir),
-        timeout=180,
-    )
-
-    seed_svc_names = _get_seed_service_names(config, config_path)
-    if seed_svc_names:
-        with progress.step("Environment seeded") as ctx:
-            runner.seed(out_dir, seed_svc_names)
-            _ = ctx  # available for future detail messages
-        _verify_seed_daytona(config, endpoints, config_path)
+    with progress.step("Environment seeded") as ctx:
+        run_env_seed_daytona(
+            out_dir,
+            config,
+            config_path,
+            daytona_api_key=daytona_api_key,
+            endpoints=endpoints,
+        )
+        _ = ctx
 
     progress.finish(time.time() - t0, endpoints=endpoints or None)
 
@@ -1018,8 +955,7 @@ def down(ctx: click.Context, env_name: str, daytona: bool) -> None:
 
     if daytona:
         global_cfg = get_global_config_from_ctx(ctx)
-        runner = _get_daytona_runner(daytona_api_key=global_cfg.daytona_api_key)
-        runner.down(env_dir)
+        env_down_daytona(env_dir, daytona_api_key=global_cfg.daytona_api_key)
         emit_cli_event(
             "env_down_completed",
             {
@@ -1037,18 +973,7 @@ def down(ctx: click.Context, env_name: str, daytona: bool) -> None:
     if not _compose_has_services(compose_file):
         click.echo("No local services defined in current compose file; attempting teardown anyway.")
 
-    click.echo("Stopping services...")
-    result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "down"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.echo(click.style("Failed to stop services:", fg="red"), err=True)
-        click.echo(result.stderr, err=True)
-        raise SystemExit(1)
-
-    click.echo(click.style("Environment stopped.", fg="green"))
+    env_down_local(env_dir)
     emit_cli_event(
         "env_down_completed",
         {
@@ -1068,8 +993,7 @@ def seed(ctx: click.Context, env_name: str, daytona: bool, verify_only: bool) ->
     """Seed the environment with initial data."""
     env_dir = resolve_env_dir(env_name, ctx=ctx)
     config_file = env_dir / "env.yaml"
-    data = yaml.safe_load(config_file.read_text()) or {}
-    config = EnvConfig(**data)
+    config = load_env_config(env_dir)
 
     seed_svc_names = _get_seed_service_names(config, config_file)
     if not seed_svc_names:
@@ -1106,542 +1030,3 @@ def seed(ctx: click.Context, env_name: str, daytona: bool, verify_only: bool) ->
             "tool_count": len(config.tools),
         },
     )
-
-
-def _get_seed_service_names(config: EnvConfig, config_path: Path | None = None) -> list[str]:
-    """Get seed service names from the tool definitions in config."""
-    return _get_profiled_service_names(config, profile="seed", config_path=config_path)
-
-
-def _get_preseed_service_names(config: EnvConfig, config_path: Path | None = None) -> list[str]:
-    """Get preseed service names from the tool definitions in config."""
-    return _get_profiled_service_names(config, profile="preseed", config_path=config_path)
-
-
-def _get_profiled_service_names(
-    config: EnvConfig,
-    profile: str,
-    config_path: Path | None = None,
-    tool_names: list[str] | None = None,
-) -> list[str]:
-    """Get profiled service names from the tool definitions in config."""
-    _ = config_path
-    registry = _get_registry()
-    names: list[str] = []
-    for tool_name in tool_names or config.tools:
-        tool = registry.get_tool(tool_name)
-        if not tool:
-            continue
-        service_defs = tool.preseed_services if profile == "preseed" else tool.seed_services
-        if service_defs:
-            names.extend(service_defs.keys())
-    return names
-
-
-def _seed_local(out_dir: Path, seed_svc_names: list[str]) -> None:
-    """Run seed containers locally via docker compose."""
-    _run_profiled_services_local(out_dir, seed_svc_names, profile="seed")
-
-
-def _run_profiled_services_local(
-    out_dir: Path,
-    svc_names: list[str],
-    profile: str,
-    env_overrides: dict[str, str] | None = None,
-    quiet: bool = False,
-    step_ctx: object | None = None,
-) -> None:
-    """Run profiled containers locally via docker compose.
-
-    When *quiet* is True, output is routed to *step_ctx* (if provided) instead
-    of being printed directly via ``click.echo``.
-    """
-    compose_file = out_dir / "docker-compose.yml"
-    if not compose_file.exists():
-        click.echo(
-            click.style(f"No compose file at {compose_file}", fg="red"),
-            err=True,
-        )
-        raise SystemExit(1)
-
-    phase_label = "Preseeding" if profile == "preseed" else "Seeding"
-    ctx: StepContext | None = step_ctx if isinstance(step_ctx, StepContext) else None
-
-    def _echo(msg: str) -> None:
-        if quiet and ctx is not None:
-            ctx.detail(msg)
-        elif not quiet:
-            click.echo(msg)
-
-    for svc_name in svc_names:
-        _echo(f"{phase_label}: {svc_name}...")
-        override_args: list[str] = []
-        for key, value in (env_overrides or {}).items():
-            override_args.extend(["-e", f"{key}={value}"])
-        result = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "--profile",
-                profile,
-                "run",
-                "--rm",
-                *override_args,
-                svc_name,
-            ],
-            capture_output=quiet,
-            text=True,
-        )
-        if result.returncode != 0:
-            msg = f"{phase_label[:-3]} service '{svc_name}' failed (exit {result.returncode})."
-            if quiet and result.stderr:
-                _echo(result.stderr.strip())
-            click.echo(click.style(msg, fg="red"), err=True)
-            raise SystemExit(1)
-        if quiet and result.stdout:
-            _echo(result.stdout.strip())
-        if env_overrides:
-            rendered = " ".join(
-                f"{key}={shlex.quote(value)}" for key, value in env_overrides.items()
-            )
-            _echo(f"  Applied overrides: {rendered}")
-
-    if not quiet:
-        click.echo(click.style(f"\n{phase_label} complete.", fg="green"))
-
-
-def _query_tool_server(
-    url: str,
-    tool_name: str,
-    parameters: dict[str, Any],
-) -> Any:
-    """Execute a tool action against a tool server."""
-    return query_tool_server(url, tool_name, parameters)
-
-
-def _verify_seed_local(config: EnvConfig, config_path: Path | None = None) -> None:
-    """Verify seed data by querying the frappe tool server."""
-    _ = config_path
-    registry = _get_registry()
-    for tool_name in config.tools:
-        tool = registry.get_tool(tool_name)
-        if not tool or not tool.seed_services:
-            continue
-        if tool.name == "frappe-hrms":
-            url = f"http://localhost:{tool.tool_server_port}"
-            _print_frappe_verification(url)
-
-
-_DOC_PREFIXES = {
-    "Employee Records": "Employee Record: ",
-    "Health Enrollments": "Health Enrollment: ",
-    "Job Requisitions": "Job Requisition: ",
-    "NPC Personas": "NPC Persona: ",
-    "Candidate Applications": "Candidate Application: ",
-}
-
-
-def _categorize_docs(titles: list[str]) -> dict[str, list[str]]:
-    """Categorize document titles by known prefix into buckets."""
-    categories: dict[str, list[str]] = {k: [] for k in _DOC_PREFIXES}
-    categories["Policies"] = []
-    for title in titles:
-        matched = False
-        for cat, prefix in _DOC_PREFIXES.items():
-            if title.startswith(prefix):
-                categories[cat].append(title)
-                matched = True
-                break
-        if not matched:
-            categories["Policies"].append(title)
-    return categories
-
-
-def _extract_titles(resp: Any) -> list[str]:
-    """Extract a list of title strings from a tool server response."""
-    records = _extract_samples_all(resp)
-    return [
-        r.get("title") or r.get("name", "")
-        for r in records
-        if isinstance(r, dict) and (r.get("title") or r.get("name"))
-    ]
-
-
-def _extract_samples_all(resp: Any) -> list[dict[str, Any]]:
-    """Extract all records (not capped) from a tool server response."""
-    if resp is None:
-        return []
-    obs = resp.get("observation") if isinstance(resp, dict) else None
-    if obs is None:
-        return []
-    if isinstance(obs, str):
-        try:
-            obs = json.loads(obs)
-        except json.JSONDecodeError:
-            return []
-    if isinstance(obs, list):
-        return obs
-    if isinstance(obs, dict):
-        text = obs.get("text")
-        if isinstance(text, str):
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                pass
-            else:
-                if isinstance(parsed, list):
-                    return parsed
-        if "data" in obs:
-            data = obs["data"]
-            if isinstance(data, list):
-                return data
-    return []
-
-
-def _print_frappe_verification(url: str) -> None:
-    """Query frappe tool server and print verification output."""
-    click.echo(click.style("\nSeed verification:\n", bold=True))
-
-    # 1. Employee count
-    emp_resp = _query_tool_server(
-        url,
-        "frappe_list_resource",
-        {"doctype": "Employee", "limit_page_length": 0},
-    )
-    emp_count = _extract_count(emp_resp)
-
-    # 2. Employee samples (random 3)
-    emp_sample_resp = _query_tool_server(
-        url,
-        "frappe_list_resource",
-        {
-            "doctype": "Employee",
-            "fields": ["employee_name", "designation"],
-            "limit_page_length": 0,
-        },
-    )
-    all_employees = _extract_samples_all(emp_sample_resp)
-    emp_samples = random.sample(all_employees, min(3, len(all_employees)))
-
-    # 3. All doc titles (Wiki Page or Note)
-    doc_titles: list[str] = []
-    for dt in ("Wiki Page", "Note"):
-        title_resp = _query_tool_server(
-            url,
-            "frappe_list_resource",
-            {"doctype": dt, "fields": ["title"], "limit_page_length": 0},
-        )
-        doc_titles = _extract_titles(title_resp)
-        if doc_titles:
-            break
-
-    categories = _categorize_docs(doc_titles)
-
-    # -- Employees --
-    if emp_count is not None:
-        click.echo(f"  Employees:           {emp_count} loaded")
-    else:
-        click.echo(click.style("  Employees:           could not verify", fg="yellow"))
-
-    if emp_samples:
-        click.echo("\n  Sample employees:")
-        for s in emp_samples:
-            name = s.get("employee_name", "?")
-            desig = s.get("designation", "")
-            click.echo(f"    {name:<25} {desig}")
-
-    # -- Documents breakdown --
-    total_docs = sum(len(v) for v in categories.values())
-    if total_docs > 0:
-        click.echo(f"\n  Documents:           {total_docs} total")
-        for cat_name in [*_DOC_PREFIXES.keys(), "Policies"]:
-            items = categories.get(cat_name, [])
-            if items:
-                click.echo(f"    {cat_name + ':':<23}{len(items)}")
-
-        # Sample documents (1 random per category)
-        click.echo("\n  Sample documents:")
-        for cat_name in [*_DOC_PREFIXES.keys(), "Policies"]:
-            items = categories.get(cat_name, [])
-            if items:
-                click.echo(f"    {random.choice(items)}")
-    else:
-        click.echo(click.style("\n  Documents:           could not verify", fg="yellow"))
-
-    click.echo()
-
-
-def _extract_count(resp: Any) -> int | None:
-    """Extract a record count from a tool server response."""
-    if resp is None:
-        return None
-    obs = resp.get("observation") if isinstance(resp, dict) else None
-    if obs is None:
-        return None
-    if isinstance(obs, str):
-        try:
-            obs = json.loads(obs)
-        except json.JSONDecodeError:
-            return None
-    if isinstance(obs, list):
-        return len(obs)
-    if isinstance(obs, dict):
-        # Tool server wraps data in {"text": "<json-string>", ...}
-        text = obs.get("text")
-        if isinstance(text, str):
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                pass
-            else:
-                if isinstance(parsed, list):
-                    return len(parsed)
-        if "data" in obs:
-            data = obs["data"]
-            if isinstance(data, list):
-                return len(data)
-    return None
-
-
-def _extract_samples(resp: Any) -> list[dict[str, Any]]:
-    """Extract sample records from a tool server response."""
-    if resp is None:
-        return []
-    obs = resp.get("observation") if isinstance(resp, dict) else None
-    if obs is None:
-        return []
-    if isinstance(obs, str):
-        try:
-            obs = json.loads(obs)
-        except json.JSONDecodeError:
-            return []
-    if isinstance(obs, list):
-        return obs[:3]
-    if isinstance(obs, dict):
-        # Tool server wraps data in {"text": "<json-string>", ...}
-        text = obs.get("text")
-        if isinstance(text, str):
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                pass
-            else:
-                if isinstance(parsed, list):
-                    return parsed[:3]
-        if "data" in obs:
-            data = obs["data"]
-            if isinstance(data, list):
-                return data[:3]
-    return []
-
-
-# ---------------------------------------------------------------------------
-# Health polling with animated status display
-# ---------------------------------------------------------------------------
-
-_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-_WAITING_MESSAGES = [
-    "Warming up containers...",
-    "Waking up the databases...",
-    "Convincing MongoDB to cooperate...",
-    "Brewing some coffee while we wait...",
-    "Teaching containers to talk to each other...",
-    "Reticulating splines...",
-    "Aligning the bits...",
-    "Herding microservices...",
-    "Almost there, probably...",
-    "Good things come to those who wait...",
-    "Negotiating with Docker...",
-    "Spinning up your workspace...",
-    "Connecting the dots...",
-    "Loading the good stuff...",
-    "Building something beautiful...",
-]
-
-
-def _local_health_fetcher(compose_file: Path) -> Callable[[], dict[str, str]]:
-    """Return a callable that fetches health from local docker compose."""
-
-    def _fetch() -> dict[str, str]:
-        result = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "ps",
-                "--all",
-                "--format",
-                "{{.Name}}\t{{.Status}}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return {}
-        return parse_ps_output(result.stdout)
-
-    return _fetch
-
-
-def _render_status_line(
-    services: dict[str, str],
-    spinner_frame: str,
-    message: str,
-    elapsed: float,
-) -> str:
-    """Render a single status line with spinner, message, and service counts."""
-    ready = sum(1 for status in services.values() if status in ("healthy", "running"))
-    total = len(services)
-    failed = sum(1 for status in services.values() if status in ("exited", "unhealthy"))
-
-    bar_width = 20
-    filled = int(bar_width * ready / total) if total > 0 else 0
-    bar = "█" * filled + "░" * (bar_width - filled)
-
-    elapsed_str = f"{int(elapsed)}s"
-
-    parts = [
-        click.style(f" {spinner_frame} ", fg="cyan"),
-        click.style(message, fg="white"),
-        "  ",
-        click.style("[", fg="white"),
-        click.style(bar[:filled], fg="green"),
-        click.style(bar[filled:], fg="bright_black"),
-        click.style("]", fg="white"),
-        click.style(f" {ready}/{total}", fg="green" if ready == total else "yellow"),
-        click.style(f"  {elapsed_str}", fg="bright_black"),
-    ]
-    if failed:
-        parts.append(click.style(f"  {failed} failed", fg="red"))
-
-    return "".join(parts)
-
-
-def _render_service_detail(
-    services: dict[str, str],
-) -> list[str]:
-    """Render per-service status lines."""
-    lines = []
-    icons = {
-        "healthy": ("✓", "green"),
-        "running": ("●", "green"),
-        "starting": ("◌", "yellow"),
-        "unhealthy": ("✗", "red"),
-        "exited": ("✗", "red"),
-        "unknown": ("?", "bright_black"),
-    }
-    for name, status in sorted(services.items()):
-        icon, color = icons.get(status, ("?", "white"))
-        lines.append(f"   {click.style(icon, fg=color)} {name:<30} {click.style(status, fg=color)}")
-    return lines
-
-
-def _clear_lines(n: int) -> None:
-    """Move cursor up n lines and clear them."""
-    for _ in range(n):
-        sys.stdout.write("\033[A\033[2K")
-    sys.stdout.flush()
-
-
-def _poll_health(
-    health_fetcher: Callable[[], dict[str, str]],
-    timeout: int = 180,
-) -> None:
-    """Poll services with an animated status display.
-
-    Args:
-        health_fetcher: Callable returning {service: status} dict.
-        timeout: Max seconds to wait.
-
-    """
-    start = time.time()
-    spinner = itertools.cycle(_SPINNER_FRAMES)
-    msg_index = 0
-    current_message = _WAITING_MESSAGES[0]
-    last_msg_change = start
-    msg_interval = 3.0
-    lines_printed = 0
-    poll_interval = 2.0
-    consecutive_ready_polls = 0
-
-    shuffled_messages = list(_WAITING_MESSAGES)
-    random.shuffle(shuffled_messages)
-
-    while time.time() - start < timeout:
-        elapsed = time.time() - start
-        services = health_fetcher()
-
-        if time.time() - last_msg_change > msg_interval:
-            msg_index = (msg_index + 1) % len(shuffled_messages)
-            current_message = shuffled_messages[msg_index]
-            last_msg_change = time.time()
-
-        if lines_printed > 0:
-            _clear_lines(lines_printed)
-
-        frame = next(spinner)
-        status_line = _render_status_line(
-            services,
-            frame,
-            current_message,
-            elapsed,
-        )
-        detail_lines = _render_service_detail(services)
-
-        output_lines = [status_line, "", *detail_lines, ""]
-        for line in output_lines:
-            click.echo(line)
-        lines_printed = len(output_lines)
-
-        if services:
-            healthy_or_running = sum(
-                1 for status in services.values() if status in ("healthy", "running")
-            )
-            failed = sum(1 for status in services.values() if status in ("exited", "unhealthy"))
-            total = len(services)
-
-            if failed:
-                _clear_lines(lines_printed)
-                click.echo(
-                    click.style(
-                        " ✗ One or more services failed during startup.",
-                        fg="red",
-                        bold=True,
-                    )
-                )
-                click.echo()
-                for line in _render_service_detail(services):
-                    click.echo(line)
-                click.echo()
-                raise SystemExit(1)
-
-            if healthy_or_running == total and total > 0:
-                consecutive_ready_polls += 1
-            else:
-                consecutive_ready_polls = 0
-
-            if consecutive_ready_polls >= 2:
-                _clear_lines(lines_printed)
-                click.echo(click.style(" ✓ All services are healthy!", fg="green", bold=True))
-                click.echo()
-                for line in _render_service_detail(services):
-                    click.echo(line)
-                click.echo()
-                return
-
-        time.sleep(poll_interval)
-
-    click.echo()
-    click.echo(
-        click.style(" ✗ Timed out waiting for services to become healthy.", fg="red", bold=True)
-    )
-    click.echo()
-    services = health_fetcher()
-    for line in _render_service_detail(services):
-        click.echo(line)
-    click.echo()
-    raise SystemExit(1)

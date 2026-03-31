@@ -1,0 +1,38 @@
+# Template: Blank
+# Minimal skeleton — fill in your domain details
+# Uses UnifiedConfig schema (compatible with simlab tasks-gen validate/run)
+
+[agent]
+role = ""          # e.g., "Financial Analyst"
+description = ""   # what the agent does end-to-end
+
+# Tools the agent can use. Each entry needs name, description, operations, service_name, and service_url.
+# [[toolset]]
+# name = "Email"
+# description = "Send and read emails"
+# service_name = "my-tool-env"
+# service_url = "http://my-tool-env:9000"
+# operations = ["send", "read"]
+
+[scenario]
+name = ""          # e.g., "financial_analysis"
+# role_label = ""  # human-readable role for prompts
+# conventions = "" # free-text domain conventions
+# policies = []    # list of policy rules
+
+[generation]
+num_tasks = 20
+
+[pipeline]
+model = "claude-haiku-4-5-20251001"
+
+# Task categories — what types of tasks to generate.
+# If omitted, Step 0 auto-generates categories from the tool specs.
+# [[categories]]
+# id = "category_id"          # short identifier (e.g. "ticket_triage")
+# label = "Category label"    # human-readable label
+
+# NPCs the agent interacts with (seed data: role + typical information they provide).
+# [[npcs]]
+# role = "Hiring Manager"
+# typical_asks = "Scheduling preferences, candidate feedback, offer approvals"

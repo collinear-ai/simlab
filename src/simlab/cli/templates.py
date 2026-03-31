@@ -1,5 +1,7 @@
 """CLI commands for browsing scenario presets."""
 
+import shutil
+import textwrap
 from pathlib import Path
 
 import click
@@ -19,14 +21,36 @@ from simlab.telemetry import with_command_telemetry
 from simlab.templates.loader import TemplateLoader
 
 
-def _truncate_for_table(value: str, max_width: int) -> str:
-    """Return a single-line value safe for fixed-width template list output."""
-    text = (value or "").replace("\n", " ").strip()
-    if len(text) <= max_width:
-        return text
-    if max_width < 2:
-        return text[:max_width]
-    return text[: max_width - 1] + "…"
+def _render_template_summary(
+    scenario: ScenarioSummary,
+    *,
+    width: int,
+) -> list[str]:
+    """Render one template summary row as a wrapped multi-line block."""
+    fields = [
+        ("Name", scenario.name, "?"),
+        ("Slug", scenario.scenario_id, "?"),
+        ("Description", scenario.description, "—"),
+    ]
+    tool_names = [tool.name.strip() for tool in scenario.tool_servers if tool.name.strip()]
+    if tool_names:
+        fields.append(("Tools", ", ".join(tool_names), "—"))
+
+    lines: list[str] = []
+    for label, value, fallback in fields:
+        text = " ".join((value or "").split()) or fallback
+        prefix = f"    {label}: "
+        lines.extend(
+            textwrap.wrap(
+                text,
+                width=max(width, len(prefix) + 10),
+                initial_indent=prefix,
+                subsequent_indent=" " * len(prefix),
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+    return lines
 
 
 def _get_loader() -> TemplateLoader:
@@ -99,25 +123,12 @@ def list_templates(ctx: click.Context, env_name: str | None) -> None:
             if scenario.scenario_id.strip() not in {"hr_recruiting", "hr_people_management"}
         ]
 
-    name_w = 28
-    slug_w = 24
-    desc_w = 78
+    width = max(80, shutil.get_terminal_size((100, 20)).columns)
     click.echo()
-    click.echo(f"  {'Name':<{name_w}} {'Slug':<{slug_w}} {'Description':<{desc_w}}")
-    click.echo(f"  {'─' * name_w} {'─' * slug_w} {'─' * desc_w}")
     for s in scenarios:
         scenario: ScenarioSummary = s
-        scenario_id = scenario.scenario_id.strip() or "?"
-        name = scenario.name.strip() or "?"
-        desc = (scenario.description or "").strip() or "—"
-        tool_names = [ts.name.strip() for ts in scenario.tool_servers if ts.name.strip()]
-        name_text = _truncate_for_table(name, name_w)
-        slug_text = _truncate_for_table(scenario_id, slug_w)
-        desc_text = _truncate_for_table(desc, desc_w)
-        click.echo(f"  {name_text:<{name_w}} {slug_text:<{slug_w}} {desc_text}")
-        if tool_names:
-            tools_text = _truncate_for_table(", ".join(tool_names), 120)
-            click.echo(click.style(f"    Tools: {tools_text}", fg="yellow"))
+        for line in _render_template_summary(scenario, width=width):
+            click.echo(line)
         click.echo()
 
     click.echo(f"  {len(scenarios)} templates available")

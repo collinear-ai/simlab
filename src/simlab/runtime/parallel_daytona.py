@@ -21,6 +21,7 @@ import click
 
 from simlab.cli.tasks import _CALENDAR_DEFAULT_USERNAME
 from simlab.cli.tasks import _apply_verifier_env_overrides
+from simlab.cli.tasks import _build_mcp_clients
 from simlab.cli.tasks import _build_services_available_section
 from simlab.cli.tasks import _build_skills_guidance_section
 from simlab.cli.tasks import _collect_task_calendar_accounts
@@ -29,14 +30,22 @@ from simlab.cli.tasks import _ensure_task_calendar_accounts
 from simlab.cli.tasks import _get_local_verifier_file_path
 from simlab.cli.tasks import _load_skills_markdown
 from simlab.cli.tasks import _maybe_run_rubric_judge
+from simlab.cli.tasks import _require_mcp_tools_available
 from simlab.cli.tasks import _require_reachable_endpoints
 from simlab.cli.tasks import _restore_env
 from simlab.cli.tasks import _rewrite_tool_server_urls
 from simlab.cli.tasks import _seed_task_data
 from simlab.cli.tasks import _task_uses_calendar
+from simlab.cli.tasks import _verifier_tool_servers
+from simlab.cli.tasks import _wait_for_mcp_tools_available
 from simlab.cli.tasks import get_agent_runtime_helpers
 from simlab.cli.tasks import get_env_runtime_helpers
 from simlab.cli.tasks import get_verifier_runtime_helpers
+from simlab.composer.engine import ComposeEngine
+from simlab.composer.engine import get_mcp_gateway_host_port
+from simlab.mcp_config import get_mcp_command_servers
+from simlab.mcp_config import load_mcp_servers_from_env_dir
+from simlab.npc_chat.activation import NpcChatSession
 from simlab.runtime.daytona_runner import _SNAPSHOT_NAME
 from simlab.runtime.daytona_runner import CreateSandboxFromSnapshotParams
 from simlab.runtime.daytona_runner import _get_daytona
@@ -321,6 +330,27 @@ class ParallelDaytonaOrchestrator:
         if self._cancel.is_set():
             raise RuntimeError(f"{tag} Cancelled")
 
+    @staticmethod
+    def _wait_for_mcp_gateway(
+        gateway_url: str,
+        *,
+        mcp_clients: dict[str, Any] | None = None,
+        timeout: int = 120,
+        poll_interval: int = 5,
+        log_prefix: str = "",
+    ) -> None:
+        """Wait until the gateway-backed MCP namespaces expose tools."""
+        if mcp_clients:
+            _wait_for_mcp_tools_available(
+                mcp_clients,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                log_prefix=log_prefix,
+            )
+            return
+
+        raise RuntimeError(f"{log_prefix} No MCP clients were available for gateway {gateway_url}")
+
     # -- single rollout lifecycle --------------------------------------------
 
     def _run_single_rollout(
@@ -355,6 +385,8 @@ class ParallelDaytonaOrchestrator:
         tag = f"[rollout {rollout_idx + 1}/{self._rollout_count}]"
         result = RolloutResult(rollout_idx=rollout_idx)
         rollout_start = time.monotonic()
+        env_dir = Path(config_path).parent
+        mcp_config = load_mcp_servers_from_env_dir(env_dir)
 
         daytona_client = _get_daytona(self._daytona_api_key)
         sandbox = None
@@ -389,99 +421,143 @@ class ParallelDaytonaOrchestrator:
             if extra_tool_urls:
                 endpoints.update(extra_tool_urls)
 
-            # Wait for all tool servers to become reachable (up to 120s).
-            click.echo(f"{tag} Waiting for tool servers...")
-            _require_reachable_endpoints(
-                endpoints=endpoints,
-                action="tool server readiness",
-                using_daytona=True,
-                wait=True,
-                timeout=120,
-                poll_interval=5,
-                log_prefix=tag,
-            )
+            command_mcp_servers = get_mcp_command_servers(mcp_config) if mcp_config else {}
+            if command_mcp_servers:
+                preview = sandbox.get_preview_link(get_mcp_gateway_host_port(env_dir))
+                endpoints[ComposeEngine.MCP_GATEWAY_SERVICE_NAME] = preview.url.rstrip("/") + "/mcp"
 
-            # 2b. Run env-level seed services (after services are healthy).
-            self._check_cancelled(tag)
-            if seed_svc_names:
-                click.echo(f"{tag} Running environment seed services...")
-                _run_profiled_services_in_sandbox(
-                    sandbox,
-                    seed_svc_names,
-                    profile="seed",
+            # Wait for all resolved HTTP tool servers (and gateway, if present) to become reachable.
+            if endpoints:
+                click.echo(f"{tag} Waiting for tool servers...")
+                _require_reachable_endpoints(
+                    endpoints=endpoints,
+                    action="tool server readiness",
+                    using_daytona=True,
+                    wait=True,
+                    timeout=120,
+                    poll_interval=5,
                     log_prefix=tag,
                 )
 
-            # 3. Provision group channels + calendar accounts + seed task data
-            self._check_cancelled(tag)
-            self._provision_group_channels(
-                tag,
-                sandbox,
-                task_data,
-                profiles,
-                config,
-                config_path,
-            )
-            self._provision_calendar_accounts(
-                tag,
-                sandbox,
-                task_data,
-                profiles,
-                endpoints,
-                config,
-                config_path,
-            )
             if not no_seed:
+                self._check_cancelled(tag)
+                if seed_svc_names:
+                    click.echo(f"{tag} Running environment seed services...")
+                    _run_profiled_services_in_sandbox(
+                        sandbox,
+                        seed_svc_names,
+                        profile="seed",
+                        log_prefix=tag,
+                    )
+
+                self._check_cancelled(tag)
+                self._provision_group_channels(
+                    tag,
+                    sandbox,
+                    task_data,
+                    profiles,
+                    config,
+                    config_path,
+                )
+                self._provision_calendar_accounts(
+                    tag,
+                    sandbox,
+                    task_data,
+                    profiles,
+                    endpoints,
+                    config,
+                    config_path,
+                )
                 self._seed_rollout(tag, task_data, profiles, endpoints)
 
             # 4. Build environment + run agent
             self._check_cancelled(tag)
-            rewritten = _rewrite_tool_server_urls(task_data, endpoints)
-            tool_servers = _effective_tool_servers(rewritten, endpoints)
-            if not tool_servers:
-                raise RuntimeError(  # noqa: TRY301
-                    "Task has no valid tool_servers after URL resolution"
+            mcp_clients = _build_mcp_clients(mcp_config, endpoints)
+            gateway_url = endpoints.get(ComposeEngine.MCP_GATEWAY_SERVICE_NAME)
+            if command_mcp_servers and gateway_url:
+                self._wait_for_mcp_gateway(
+                    gateway_url,
+                    mcp_clients=mcp_clients,
+                    timeout=120,
+                    poll_interval=5,
+                    log_prefix=tag,
                 )
+            _require_mcp_tools_available(mcp_clients)
+            rewritten = _rewrite_tool_server_urls(task_data, endpoints)
+            tool_namespace_endpoints = _effective_tool_servers(rewritten, endpoints)
 
-            http_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
-            environment = http_tool_env_cls(tool_servers=tool_servers)
-
-            instruction = rewritten.get("task", "")
-            skills_section = _build_skills_guidance_section(
-                _load_skills_markdown(config=config, bundle_dir=bundle_dir)
-            )
-            if skills_section:
-                instruction = f"{instruction}\n\n{skills_section}"
-            services_section = _build_services_available_section(
-                config,
-                daytona=True,
-                config_path=config_path,
-                endpoints=endpoints,
-            )
-            if services_section:
-                instruction = f"{instruction}\n\n{services_section}"
-
-            meta = task_data.get("meta", {})
-            click.echo(f"{tag} Running agent ({model} via {provider})...")
-
-            artifacts = run_with_agent_contract(
-                task_id=meta.get("task_id", ""),
-                instruction=instruction,
+            # Auto-activate NPC chat tool if any NPC has chat personality fields.
+            npc_session = NpcChatSession.from_task_data(
+                task_data,
                 model=model,
-                provider=provider,
-                max_steps=max_steps,
-                environment=environment,
-                agent_import_path=agent_import_path,
-                timeout_seconds=agent_timeout_seconds,
                 api_key=api_key,
                 base_url=base_url,
-                stop_event=self._cancel,
+                provider=provider,
             )
+            if npc_session is not None:
+                npc_url = npc_session.start()
+                tool_namespace_endpoints["npc-chat"] = npc_url
+                click.echo(f"{tag} NPC chat tool auto-activated")
+
+            artifacts = None
+            try:
+                if not tool_namespace_endpoints and not mcp_clients:
+                    raise RuntimeError(
+                        "Task has no valid tool_servers and no MCP servers after URL resolution"
+                    )
+
+                unified_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
+                environment = unified_tool_env_cls(
+                    tool_servers=tool_namespace_endpoints,
+                    mcp_clients=mcp_clients or None,
+                )
+
+                instruction = rewritten.get("task", "")
+                skills_section = _build_skills_guidance_section(
+                    _load_skills_markdown(config=config, bundle_dir=bundle_dir)
+                )
+                if skills_section:
+                    instruction = f"{instruction}\n\n{skills_section}"
+                services_section = _build_services_available_section(
+                    config,
+                    daytona=True,
+                    config_path=config_path,
+                    endpoints=endpoints,
+                )
+                if services_section:
+                    instruction = f"{instruction}\n\n{services_section}"
+
+                meta = task_data.get("meta", {})
+                click.echo(f"{tag} Running agent ({model} via {provider})...")
+
+                artifacts = run_with_agent_contract(
+                    task_id=meta.get("task_id", ""),
+                    instruction=instruction,
+                    model=model,
+                    provider=provider,
+                    max_steps=max_steps,
+                    environment=environment,
+                    agent_import_path=agent_import_path,
+                    timeout_seconds=agent_timeout_seconds,
+                    api_key=api_key,
+                    base_url=base_url,
+                    stop_event=self._cancel,
+                )
+            finally:
+                if npc_session is not None:
+                    if artifacts is not None:
+                        npc_session.attach_to_artifacts(artifacts)
+                    npc_session.stop()
+
             result.steps_taken = artifacts.steps_taken
 
             # 5. Save artifacts
             rollout_dir = run_dir / f"rollout_{rollout_idx}"
             rollout_dir.mkdir(parents=True, exist_ok=True)
+
+            if npc_session is not None:
+                npc_session.save_transcripts(rollout_dir)
+
             output_path = rollout_dir / "artifacts.json"
             artifacts.dump(output_path)
             result.artifacts_path = output_path
@@ -495,14 +571,14 @@ class ParallelDaytonaOrchestrator:
                 tag=tag,
                 task_data=task_data,
                 artifacts=artifacts,
-                tool_servers=tool_servers,
+                tool_servers=_verifier_tool_servers(rewritten, endpoints, mcp_clients),
                 rollout_dir=rollout_dir,
                 bundle_dir=bundle_dir,
                 global_cfg=global_cfg,
                 backend_id=backend_id,
                 base_url_api=base_url_api,
                 scenario_manager_api_key=scenario_manager_api_key,
-                env_dir=Path(config_path).parent,
+                env_dir=env_dir,
             )
 
             # Match single-rollout behavior: agent error + no verifiers = failure.

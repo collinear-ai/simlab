@@ -91,15 +91,20 @@ def convert_artifacts(output_dir: str, out_path: str, min_reward: float = 1.0) -
                 raw_calls = content.get("tool_calls", [])
                 openai_calls = []
                 for tc in raw_calls:
-                    args = tc.get("arguments", {})
-                    openai_calls.append({
-                        "type": "function",
-                        "id": tc.get("id", ""),
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
-                        },
-                    })
+                    if "function" in tc:
+                        # Already OpenAI format (newer SimLab versions)
+                        openai_calls.append(tc)
+                    else:
+                        # Legacy format: {"id", "name", "arguments": {...}}
+                        args = tc.get("arguments", {})
+                        openai_calls.append({
+                            "type": "function",
+                            "id": tc.get("id", ""),
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                            },
+                        })
                 out_msg = {"role": "assistant", "content": text}
                 if openai_calls:
                     out_msg["tool_calls"] = openai_calls
@@ -108,7 +113,7 @@ def convert_artifacts(output_dir: str, out_path: str, min_reward: float = 1.0) -
             elif role == "tool" and isinstance(content, dict):
                 # Tool result — recover full observation from tool_results array
                 tool_call_id = content.get("tool_call_id", "")
-                tool_name = content.get("tool_name", "")
+                tool_name = content.get("tool_name", content.get("name", ""))
                 if tool_result_idx < len(tool_results):
                     obs = tool_results[tool_result_idx]["observation"]
                     full_content = json.dumps(obs) if not isinstance(obs, str) else obs

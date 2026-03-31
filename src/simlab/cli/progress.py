@@ -94,7 +94,7 @@ class StepProgress:
             self._console.print(f"\n\\[done] Environment ready — {time_str}", highlight=False)
 
         if endpoints:
-            self._console.print("\n  Tool endpoints:")
+            self._console.print("\n  Endpoints:")
             max_name = max(len(n) for n in endpoints) if endpoints else 0
             for name, url in endpoints.items():
                 padding = " " * (max_name - len(name))

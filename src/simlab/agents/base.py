@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import warnings
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Coroutine
+from concurrent.futures import Future
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -12,6 +17,9 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -29,6 +37,15 @@ class ToolCallResult:
 
     observation: Any
     is_error: bool = False
+
+
+@dataclass(frozen=True)
+class ToolNamespace:
+    """A named tool namespace exposed through a concrete transport."""
+
+    name: str
+    transport: str
+    endpoint: str | None = None
 
 
 @dataclass
@@ -65,14 +82,6 @@ class RunArtifacts:
         data = asdict(self)
         data["tool_calls"] = [asdict(x) for x in self.tool_calls]
         data["tool_results"] = [asdict(x) for x in self.tool_results]
-        # metadata can contain non-serializable values (e.g. mcp_clients: MCPClientHandle)
-        meta = {}
-        for k, v in self.metadata.items():
-            if k == "mcp_clients" and isinstance(v, dict):
-                meta[k] = {name: getattr(handle, "_url", str(handle)) for name, handle in v.items()}
-            else:
-                meta[k] = v
-        data["metadata"] = meta
         return data
 
     def dump(self, path: Path) -> None:
@@ -85,12 +94,54 @@ class RunArtifacts:
 class BaseEnvironment(ABC):
     """Environment abstraction with tool listing and invocation."""
 
-    @abstractmethod
+    def list_tool_namespaces(self) -> list[ToolNamespace]:
+        """Return available tool namespaces.
+
+        Subclasses should override this. The default implementation adapts the
+        deprecated ``tool_servers`` property for backwards compatibility.
+        """
+        return [
+            ToolNamespace(name=name, transport="unknown", endpoint=endpoint)
+            for name, endpoint in self.tool_servers.items()
+        ]
+
     def list_tools(self, tool_server: str | None = None) -> list[dict[str, Any]]:
+        """Return tool definitions through the deprecated sync compatibility path.
+
+        Deprecated: use ``await alist_tools()`` instead. Will be removed in 0.4.0.
+        """
+        warnings.warn(
+            "BaseEnvironment.list_tools() is deprecated; use await alist_tools() instead. "
+            "This compatibility method will be removed in 0.4.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _run_async_compat(self.alist_tools(tool_server))
+
+    def call_tool(
+        self,
+        tool_server: str,
+        tool_name: str,
+        parameters: dict[str, Any],
+    ) -> ToolCallResult:
+        """Invoke a tool through the deprecated sync compatibility path.
+
+        Deprecated: use ``await acall_tool()`` instead. Will be removed in 0.4.0.
+        """
+        warnings.warn(
+            "BaseEnvironment.call_tool() is deprecated; use await acall_tool() instead. "
+            "This compatibility method will be removed in 0.4.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _run_async_compat(self.acall_tool(tool_server, tool_name, parameters))
+
+    @abstractmethod
+    async def alist_tools(self, tool_server: str | None = None) -> list[dict[str, Any]]:
         """Return tool definitions for one server or all servers."""
 
     @abstractmethod
-    def call_tool(
+    async def acall_tool(
         self,
         tool_server: str,
         tool_name: str,
@@ -99,9 +150,20 @@ class BaseEnvironment(ABC):
         """Invoke a tool on a target tool server."""
 
     @property
-    @abstractmethod
     def tool_servers(self) -> dict[str, str]:
-        """Mapping of server name to base URL."""
+        """Deprecated mapping of namespace name to endpoint string.
+
+        Deprecated: use ``list_tool_namespaces()`` instead. Will be removed in 0.4.0.
+        """
+        warnings.warn(
+            "BaseEnvironment.tool_servers is deprecated; use list_tool_namespaces() instead. "
+            "This compatibility property will be removed in 0.4.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return {
+            namespace.name: namespace.endpoint or "" for namespace in self.list_tool_namespaces()
+        }
 
 
 class BaseAgent(ABC):
@@ -128,3 +190,24 @@ class BaseAgent(ABC):
         context: RunArtifacts,
     ) -> None:
         """Execute the instruction and populate RunArtifacts."""
+
+
+def _run_async_compat(coro: Coroutine[object, object, T]) -> T:
+    """Run an async environment compatibility wrapper from sync code."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: Future[T] = Future()
+
+    def _target() -> None:
+        try:
+            result.set_result(asyncio.run(coro))
+        except BaseException as exc:  # pragma: no cover - exercised through wrapper behavior
+            result.set_exception(exc)
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join()
+    return result.result()
