@@ -23,16 +23,29 @@ from verifiers.rubrics.rubric import Rubric
 SIMLAB_TASKS = [
     {
         "question": (
-            "You've received a billing dispute from Karen Mitchell regarding her "
-            "enterprise renewal invoice. She reports a 40% increase with unexpected "
-            "charges and is threatening to cancel by end of week. Contact Diana Walsh "
-            "to obtain the specific billing details and charge breakdown from the "
-            "invoice. Then contact Carlos Mendez to confirm what was discussed during "
-            "the renewal process and any contract amendments. Once you have the facts "
-            "from both, review the ticket details and determine whether this is a "
-            "genuine billing error or a legitimate contract amendment issue. Provide "
-            "Karen with a clear explanation of the charges and your recommended "
-            "resolution path."
+            "You've received an urgent report from James Wilson at Wilson Retail Group "
+            "about intermittent sync failures in their platform integration during peak "
+            "sales, causing critical disruptions to order processing and inventory sync. "
+            "This is a VIP enterprise account with a 2-hour SLA. First, email Amanda "
+            "Reeves to confirm the current account status and any ongoing issues she's "
+            "aware of. Then create or locate the helpdesk ticket and escalate to Marcus "
+            "Chen via Chat with full business context, including details Amanda provides. "
+            "Keep James informed of progress throughout."
+        ),
+        "answer": "",
+        "info": {},
+        "task": "simlab-enterprise-escalation",
+    },
+    {
+        "question": (
+            "Review Karen Mitchell's billing dispute for Invoice #INV-2024-5847. Contact "
+            "Diana Walsh to get the exact details of the billing error and confirm the "
+            "correct amount. Then contact James Foster to get his approval for the "
+            "corrected invoice amount and any customer compensation or credit he is "
+            "willing to authorize. Once you have both the error details from Diana and "
+            "the approved corrected amount and credits from James, send Karen an apology "
+            "email that includes the specific explanation of the error, the corrected "
+            "invoice, and details of any credit or compensation approved."
         ),
         "answer": "",
         "info": {},
@@ -40,31 +53,19 @@ SIMLAB_TASKS = [
     },
     {
         "question": (
-            "David Park from TechStart Inc has reported persistent API rate limiting "
-            "issues affecting their production environment. His enterprise SLA "
-            "guarantees 99.9% uptime and the current issues are putting them at risk "
-            "of breaching that threshold. Investigate the technical details of the "
-            "rate limiting, coordinate with engineering to identify root cause, and "
-            "provide David with a resolution timeline. Ensure the response meets the "
-            "enterprise SLA first-response requirements."
+            "Karen Mitchell reported an account access issue 18 hours ago and hasn't "
+            "received a response — we're at risk of breaching the 24-hour SLA. She's "
+            "also posted frustration in the support-escalations channel. Contact Sarah "
+            "Johnson to get her recommendation on which support agent should handle this "
+            "based on current workload and expertise. Then reach out to Marcus Chen to "
+            "determine if the 'Invalid credentials' error requires backend investigation "
+            "or if standard account recovery will resolve it. Once you have their "
+            "guidance, assign the ticket to the appropriate agent and send Karen an "
+            "acknowledgment email that addresses her frustration and outlines next steps."
         ),
         "answer": "",
         "info": {},
-        "task": "simlab-api-escalation",
-    },
-    {
-        "question": (
-            "Wilson Retail Group has filed an SLA-critical billing dispute claiming "
-            "they were double-charged for their Q4 platform usage. The account is "
-            "flagged as at-risk for churn. Review the billing records, cross-reference "
-            "with the CRM account history, and determine whether the duplicate charge "
-            "is valid. If confirmed, initiate the refund process and coordinate with "
-            "the account manager to schedule a retention call. Document all findings "
-            "in the support ticket."
-        ),
-        "answer": "",
-        "info": {},
-        "task": "simlab-billing-sla",
+        "task": "simlab-sla-breach",
     },
 ]
 

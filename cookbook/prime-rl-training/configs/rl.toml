@@ -5,7 +5,7 @@
 # using a SimLab verifiers environment for reward scoring.
 
 # Use the SFT-warmed model or start from a base instruct model
-model = "Qwen/Qwen3.5-9B"
+model = "Qwen/Qwen3.5-4B"
 max_steps = 50
 
 # Training hyperparameters
