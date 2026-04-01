@@ -29,7 +29,6 @@ from typing import Any
 
 from datasets import Dataset
 
-import verifiers as vf
 from verifiers.envs.environment import Environment
 from verifiers.envs.singleturn_env import SingleTurnEnv
 from verifiers.parsers.parser import Parser
