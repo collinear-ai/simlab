@@ -28,3 +28,4 @@ The agent will walk through each step, ask you for any required inputs (model, t
 | [openai-agents-sdk](openai-agents-sdk/) | Customer-style OpenAI Agents SDK cookbook showing how to keep an existing agent app and add a thin SimLab adapter. |
 | [secure-agent-eval](secure-agent-eval/) | Evaluate agent behavior through OneCLI's credential proxy — compare correctness, audit for credential leakage, and test rate limit resilience. |
 | [simlab-auto-research](simlab-auto-research/) | Autonomous system prompt optimization using the [auto-research](https://github.com/karpathy/autoresearch) pattern. An outer agent iterates on prompts, measured by SimLab task scores. |
+| [prime-rl-training](prime-rl-training/) | Collect SimLab trajectories and train agent models with Prime Intellect's prime-rl (SFT warmup + hosted RL). |
