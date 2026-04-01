@@ -70,12 +70,38 @@ SIMLAB_TASKS = [
 ]
 
 
-def _quality_reward(completion: str, **kwargs) -> float:
+def _extract_text(completion: object) -> str:
+    """Extract all text from a verifiers completion.
+
+    The completion can be a plain string or a list of message objects.
+    For message lists, we concatenate all assistant content AND
+    reasoning_content so the rubric can score thinking models too.
+    """
+    if isinstance(completion, str):
+        return completion
+
+    parts: list[str] = []
+    if isinstance(completion, list):
+        for msg in completion:
+            # Handle both dict and message objects
+            content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else None)
+            if content:
+                parts.append(str(content))
+            # Also grab reasoning/thinking content
+            reasoning = getattr(msg, "reasoning_content", None) or (msg.get("reasoning_content") if isinstance(msg, dict) else None)
+            if reasoning:
+                parts.append(str(reasoning))
+
+    return "\n".join(parts)
+
+
+def _quality_reward(completion: object, **kwargs: object) -> float:
     """Reward for well-structured, substantive responses."""
-    if not completion or not completion.strip():
+    text = _extract_text(completion)
+    if not text or not text.strip():
         return 0.0
 
-    text = completion.strip()
+    text = text.strip()
     score = 0.0
 
     # Length-based scoring
@@ -108,9 +134,10 @@ def _quality_reward(completion: str, **kwargs) -> float:
     return min(score, 1.0)
 
 
-def _completeness_reward(completion: str, question: str, **kwargs) -> float:
+def _completeness_reward(completion: object, question: str, **kwargs: object) -> float:
     """Reward for addressing all parts of the task instruction."""
-    if not completion or not question:
+    text = _extract_text(completion)
+    if not text or not question:
         return 0.0
 
     # Extract action items from the question
@@ -126,7 +153,7 @@ def _completeness_reward(completion: str, question: str, **kwargs) -> float:
 
     addressed = sum(
         1 for action in required_actions
-        if action.lower() in completion.lower()
+        if action.lower() in text.lower()
     )
 
     return addressed / len(required_actions)
