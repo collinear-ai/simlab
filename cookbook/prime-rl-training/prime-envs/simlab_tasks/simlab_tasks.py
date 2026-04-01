@@ -12,6 +12,10 @@ multi-turn customer conversations from the Weaver Enterprises scenario.
 from datasets import Dataset, load_dataset
 
 import verifiers as vf
+from verifiers.envs.environment import Environment
+from verifiers.envs.singleturn_env import SingleTurnEnv
+from verifiers.parsers.parser import Parser
+from verifiers.rubrics.rubric import Rubric
 
 
 # --- Embedded dataset of SimLab customer support prompts ---
@@ -133,7 +137,7 @@ def load_environment(
     dataset_split: str = "train",
     system_prompt: str | None = None,
     **kwargs,
-) -> vf.Environment:
+) -> Environment:
     """Load the SimLab customer support environment.
 
     Args:
@@ -160,13 +164,13 @@ def load_environment(
     else:
         train_dataset = Dataset.from_list(SIMLAB_TASKS)
 
-    parser = vf.Parser()
+    parser = Parser()
 
-    rubric = vf.Rubric(parser=parser)
+    rubric = Rubric(parser=parser)
     rubric.add_reward_func(_quality_reward, weight=0.5)
     rubric.add_reward_func(_completeness_reward, weight=0.5)
 
-    env = vf.SingleTurnEnv(
+    env = SingleTurnEnv(
         dataset=train_dataset,
         system_prompt=system_prompt,
         parser=parser,

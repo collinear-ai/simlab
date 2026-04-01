@@ -64,7 +64,7 @@ def artifacts_to_messages(artifacts: dict[str, Any]) -> list[dict[str, str]]:
 
     Returns a list of {"role": ..., "content": ...} dicts.
     """
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
 
     # If artifacts already contain a messages list, use it directly
     if "messages" in artifacts and isinstance(artifacts["messages"], list):

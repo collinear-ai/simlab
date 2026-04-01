@@ -30,6 +30,10 @@ from typing import Any
 from datasets import Dataset
 
 import verifiers as vf
+from verifiers.envs.environment import Environment
+from verifiers.envs.singleturn_env import SingleTurnEnv
+from verifiers.parsers.parser import Parser
+from verifiers.rubrics.rubric import Rubric
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +189,7 @@ def load_environment(
     min_reward: float = 0.5,
     system_prompt: str | None = None,
     **kwargs,
-) -> vf.Environment:
+) -> Environment:
     """Load a SimLab verifiers environment for prime-rl training.
 
     This creates a SingleTurnEnv that uses SimLab trajectory data as
@@ -229,13 +233,13 @@ def load_environment(
     dataset = Dataset.from_list(rows)
 
     # Build rubric
-    rubric = vf.Rubric()
+    rubric = Rubric()
     rubric.add_reward_func(_trajectory_similarity_reward, weight=0.5)
     rubric.add_reward_func(_format_reward, weight=0.3)
 
-    parser = vf.Parser()
+    parser = Parser()
 
-    env = vf.SingleTurnEnv(
+    env = SingleTurnEnv(
         dataset=dataset,
         system_prompt=system_prompt,
         parser=parser,
