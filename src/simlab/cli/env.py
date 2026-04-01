@@ -596,8 +596,11 @@ def init(
     emit_cli_event(
         "env_init_completed",
         {
-            "template_used": bool(template_name),
-            "selected_tool_count": len(selected_tools),
+            "template_used": bool(config.template),
+            "template_name": config.template,
+            "environment_name": config.name,
+            "selected_tool_count": len(config.tools),
+            "selected_tools": list(config.tools),
             "unsupported_tool_count": len(missing_tools),
             "non_interactive": non_interactive,
         },

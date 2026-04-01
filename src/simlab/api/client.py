@@ -97,8 +97,12 @@ class ScenarioManagerClient:
             sid = scenario.scenario_id.strip()
             name = scenario.name.strip()
             sid_norm = _normalize_for_match(sid)
+            family = sid.split(":", 1)[0].strip()
+            family_norm = _normalize_for_match(family)
             name_norm = _normalize_for_match(name)
             if sid_norm in (norm, norm_singular):
+                return sid
+            if family_norm in (norm, norm_singular):
                 return sid
             if name_norm in (norm, norm_singular):
                 return sid

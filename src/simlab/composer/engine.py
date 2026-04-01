@@ -16,6 +16,8 @@ from simlab.catalog.registry import BuildDefinition
 from simlab.catalog.registry import ServiceDefinition
 from simlab.catalog.registry import ToolDefinition
 from simlab.catalog.registry import ToolRegistry
+from simlab.composer.npc_config import NPC_CREDENTIALS_FILENAME
+from simlab.composer.npc_config import NPC_INTERACTION_CONFIGS_FILENAME
 from simlab.composer.npc_config import inject_npc_env_vars
 from simlab.mcp_config import build_gateway_config_arena_format
 from simlab.mcp_config import build_gateway_container_env
@@ -23,6 +25,49 @@ from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import load_mcp_servers_from_env_dir
 
 DEFAULT_IMAGE_REGISTRY = "ghcr.io/collinear-ai"
+
+
+def parse_template_id(template_id: str) -> tuple[str, str | None]:
+    """Parse a template id into (template, version).
+
+    Accepts either an unversioned template id like ``crm_sales`` or a versioned
+    id like ``crm_sales:0.2.0``.
+    """
+    raw = template_id.strip()
+    if not raw:
+        raise ValueError("Template id cannot be empty")
+
+    if ":" not in raw:
+        return raw, None
+
+    template, version = raw.split(":", 1)
+    template = template.strip()
+    version = version.strip()
+    if not template or not version:
+        raise ValueError(f"Invalid template id: {template_id!r}")
+    if ":" in version:
+        raise ValueError(f"Invalid template id version: {template_id!r}")
+    return template, version
+
+
+def pin_image_tag_for_template(image: str, template_id: str | None) -> str:
+    """Pin collinear/*:latest images to the versioned template tag."""
+    if not template_id:
+        return image
+    _, template_version = parse_template_id(template_id)
+    if template_version is None:
+        return image
+
+    value = (image or "").strip()
+    if not value or "@" in value or ":" not in value:
+        return image
+    if not (value.startswith("collinear/") or "/collinear/" in value):
+        return image
+
+    name, current_tag = value.rsplit(":", 1)
+    if current_tag != "latest":
+        return image
+    return f"{name}:{template_version}"
 
 
 class CodingMount(BaseModel):
@@ -76,6 +121,8 @@ class ComposeOutput(BaseModel):
     scenario_guidance_md: str | None = None
     mcp_gateway_config_json: str | None = None
     mcp_gateway_port: int | None = None
+    npc_credentials_json: str | None = None
+    npc_interaction_configs_json: str | None = None
 
 
 class ComposeEngine:
@@ -97,6 +144,7 @@ class ComposeEngine:
         config: EnvConfig,
         config_dir: Path | None = None,
         env_dir: Path | None = None,
+        output_dir: Path | None = None,
     ) -> ComposeOutput:
         """Build compose output for the given config."""
         resolved_config_dir = config_dir or Path.cwd()
@@ -139,8 +187,13 @@ class ComposeEngine:
             )
 
         # Inject NPC configs if rocketchat is present
+        npc_credentials_json: str | None = None
+        npc_interaction_configs_json: str | None = None
         if "rocketchat" in config.tools:
-            inject_npc_env_vars(services)
+            resolved_output_dir = (output_dir or Path.cwd()).resolve().as_posix()
+            npc_credentials_json, npc_interaction_configs_json = inject_npc_env_vars(
+                services, resolved_output_dir
+            )
 
         if "coding" in config.tools and config.coding is not None:
             bundled_assets.extend(
@@ -216,6 +269,8 @@ class ComposeEngine:
             scenario_guidance_md=scenario_guidance_md,
             mcp_gateway_config_json=mcp_gateway_config_json,
             mcp_gateway_port=mcp_gateway_port,
+            npc_credentials_json=npc_credentials_json,
+            npc_interaction_configs_json=npc_interaction_configs_json,
         )
 
     @staticmethod
@@ -248,6 +303,7 @@ class ComposeEngine:
             image = svc_def.image
             if config.registry:
                 image = self._rewrite_image(image, config.registry)
+            image = pin_image_tag_for_template(image, config.template)
 
             svc: dict = {
                 "image": image,
@@ -312,6 +368,7 @@ class ComposeEngine:
             image = svc_def.image
             if config.registry:
                 image = self._rewrite_image(image, config.registry)
+            image = pin_image_tag_for_template(image, config.template)
 
             svc: dict = {
                 "image": image,
@@ -504,7 +561,8 @@ class ComposeEngine:
             and config.template
             and svc_name in self.FRAPPE_SCENARIO_SERVICE_NAMES
         ):
-            return {"FRAPPE_SEED_SCENARIO": config.template}
+            template, _ = parse_template_id(config.template)
+            return {"FRAPPE_SEED_SCENARIO": template}
         return {}
 
     def _resolve_port(self, port: int, svc_name: str, claimed_ports: dict[int, str]) -> int:
@@ -578,6 +636,14 @@ def write_output(output: ComposeOutput, output_dir: Path) -> None:
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
+    if output.npc_credentials_json is not None:
+        (output_dir / NPC_CREDENTIALS_FILENAME).write_text(
+            output.npc_credentials_json, encoding="utf-8"
+        )
+    if output.npc_interaction_configs_json is not None:
+        (output_dir / NPC_INTERACTION_CONFIGS_FILENAME).write_text(
+            output.npc_interaction_configs_json, encoding="utf-8"
+        )
     if output.mcp_gateway_config_json is not None:
         (output_dir / ComposeEngine.MCP_GATEWAY_CONFIG_FILENAME).write_text(
             output.mcp_gateway_config_json, encoding="utf-8"

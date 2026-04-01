@@ -1,7 +1,0 @@
-name: customer-service
-display_name: Customer Service
-description: Customer support environment with helpdesk ticketing, team chat, and email.
-tools:
-  - frappe-helpdesk
-  - rocketchat
-  - email

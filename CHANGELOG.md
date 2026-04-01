@@ -2,34 +2,7 @@
 
 All notable changes to the SimLab will be documented in this file.
 
-## [Unreleased]
-
-### Added
-
-- Env-local custom tool definitions under `environments/<env>/custom-tools/`
-- `simlab env custom-tools add <env> <name>` to scaffold, enable, and
-  regenerate a custom tool in one command
-- `simlab tools info --env <env>` support for inspecting env-local tools
-- Documentation for env-local custom tool workflows and regeneration behavior
-
-### Changed
-
-- Generated env artifacts now detect drift from `env.yaml`,
-  `custom-tools/*.yaml`, and `mcp-servers.json`
-- Interactive `env up`, `tasks run`, and `tasks seed` now prompt to
-  regenerate stale generated files instead of running with outdated compose
-  output
-- MCP server names are now validated in the environment namespace, including
-  conflicts with built-in tools and env-local custom tools
-- Daytona build contexts for environment services must stay inside the
-  environment bundle
-
-### Fixed
-
-- SimLab no longer runs with silently stale generated env files after manual
-  edits to env config inputs
-
-## [0.2.0] — 2026-03-26
+## [0.2.0] — 2026-03-30
 
 ### Added:
 
@@ -49,6 +22,15 @@ All notable changes to the SimLab will be documented in this file.
 - **Direct MCP tool access** — The reference agent discovers and calls tools
   from configured MCP servers alongside built-in tool servers
 
+#### Custom Tools
+
+- **Env-local custom tool definitions** — Add custom tools under
+  `environments/<env>/custom-tools/`; see the
+  [custom tools guide](https://github.com/collinear-ai/simlab/blob/main/docs/custom-tools.md)
+- **`simlab env custom-tools add`** — Scaffold, enable, and regenerate a custom
+  tool in one command
+- **`simlab tools info --env`** — Inspect env-local custom tools
+
 #### Parallel Execution
 
 - **Parallel Daytona rollouts** — Run multiple rollouts concurrently via
@@ -61,6 +43,8 @@ All notable changes to the SimLab will be documented in this file.
 
 #### Agent Integrations
 
+- **OpenAI Agents SDK** — Built-in adapter for connecting OpenAI Agents SDK
+  agents to SimLab environments
 - **LangGraph** — Built-in adapter for connecting LangGraph agents to SimLab
   environments
 
@@ -84,6 +68,14 @@ All notable changes to the SimLab will be documented in this file.
   the docker-dind snapshot if it doesn't exist
 - **Template consolidation** — Unified HR templates (`hr_recruiting`,
   `people_mgmt`) into 1 `hr` template
+- Generated env artifacts now detect drift from `env.yaml`,
+  `custom-tools/*.yaml`, and `mcp-servers.json`
+- Interactive `env up`, `tasks run`, and `tasks seed` now prompt to regenerate
+  stale generated files instead of running with outdated compose output
+- MCP server names are now validated in the environment namespace, including
+  conflicts with built-in tools and env-local custom tools
+- Daytona build contexts for environment services must stay inside the
+  environment bundle
 
 ### Fixed
 
@@ -93,6 +85,8 @@ All notable changes to the SimLab will be documented in this file.
 - `env down --daytona` losing state file on transient API errors
 - Task IDs showing as `…` in `tasks list` table
 - Seeding duplicates when re-running `env seed`
+- SimLab no longer runs with silently stale generated env files after manual
+  edits to env config inputs
 
 ### Agent Integrations
 
@@ -101,6 +95,9 @@ All notable changes to the SimLab will be documented in this file.
 - LangChain / LangGraph bridge — Added an optional `langchain` dependency extra
   plus `simlab.agents.adapters.langchain.build_langchain_tools(...)` for
   adapting SimLab environments into LangChain tools
+- OpenAI Agents SDK bridge — Added an optional `openai-agents` dependency extra
+  plus `simlab.agents.adapters.openai_agents.build_openai_tools(...)` for
+  adapting SimLab environments into OpenAI Agents SDK tools
 - Reduced duplication in agent wiring — The LangGraph cookbook adapter and the
   built-in reference agent now share the same normalized tool descriptor and
   dispatch logic

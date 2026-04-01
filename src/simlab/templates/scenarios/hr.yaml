@@ -1,8 +1,0 @@
-name: hr
-display_name: HR
-description: Combined HR environment with HRMS, team chat, email, and calendar for recruiting and people management.
-tools:
-  - frappe-hrms
-  - rocketchat
-  - email
-  - calendar

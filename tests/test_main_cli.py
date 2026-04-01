@@ -18,7 +18,7 @@ def test_cli_blocks_non_config_commands_without_api_key(
     monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "missing-config.toml"))
 
     runner = CliRunner()
-    with patch("simlab.cli.templates.ScenarioManagerClient") as mocked_client_cls:
+    with patch("simlab.runtime.templates.ScenarioManagerClient") as mocked_client_cls:
         result = runner.invoke(cli, ["templates", "list"])
 
     assert result.exit_code == 1
@@ -37,11 +37,7 @@ def test_cli_root_api_key_unblocks_command(
     runner = CliRunner()
     with (
         patch("simlab.cli.main._verify_key_with_server", return_value=True),
-        patch(
-            "simlab.cli.templates.resolve_scenario_manager_api_url",
-            return_value="https://api.example.com",
-        ),
-        patch("simlab.cli.templates.ScenarioManagerClient") as mocked_client_cls,
+        patch("simlab.runtime.templates.ScenarioManagerClient") as mocked_client_cls,
     ):
         mocked_client_cls.return_value.list_scenarios.return_value = [
             ScenarioSummary(
@@ -50,7 +46,17 @@ def test_cli_root_api_key_unblocks_command(
                 tool_servers=[ScenarioToolServer(name="rocketchat")],
             )
         ]
-        result = runner.invoke(cli, ["--collinear-api-key", "ck_test", "templates", "list"])
+        result = runner.invoke(
+            cli,
+            [
+                "--collinear-api-key",
+                "ck_test",
+                "--scenario-manager-api-url",
+                "https://api.example.com",
+                "templates",
+                "list",
+            ],
+        )
 
     assert result.exit_code == 0, result.output
     mocked_client_cls.assert_called_once_with(
@@ -70,11 +76,7 @@ def test_cli_config_file_api_key_unblocks_command(
     runner = CliRunner()
     with (
         patch("simlab.cli.main._verify_key_with_server", return_value=True),
-        patch(
-            "simlab.cli.templates.resolve_scenario_manager_api_url",
-            return_value="https://api.example.com",
-        ),
-        patch("simlab.cli.templates.ScenarioManagerClient") as mocked_client_cls,
+        patch("simlab.runtime.templates.ScenarioManagerClient") as mocked_client_cls,
     ):
         mocked_client_cls.return_value.list_scenarios.return_value = [
             ScenarioSummary(
@@ -83,7 +85,17 @@ def test_cli_config_file_api_key_unblocks_command(
                 tool_servers=[ScenarioToolServer(name="rocketchat")],
             )
         ]
-        result = runner.invoke(cli, ["--config-file", str(config_file), "templates", "list"])
+        result = runner.invoke(
+            cli,
+            [
+                "--config-file",
+                str(config_file),
+                "--scenario-manager-api-url",
+                "https://api.example.com",
+                "templates",
+                "list",
+            ],
+        )
 
     assert result.exit_code == 0, result.output
     mocked_client_cls.assert_called_once_with(

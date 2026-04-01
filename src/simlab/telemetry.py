@@ -18,8 +18,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 from functools import wraps
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -27,6 +25,7 @@ from typing import cast
 import click
 import requests
 
+from simlab import __version__
 from simlab.config import SIMLAB_TELEMETRY_DISABLE_ENV_VARS
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_scenario_manager_api_url
@@ -244,14 +243,6 @@ def ensure_session(state: dict[str, Any], *, now: datetime | None = None) -> dic
     return state
 
 
-def simlab_version() -> str:
-    """Return the installed simlab package version."""
-    try:
-        return version("simlab")
-    except PackageNotFoundError:
-        return "0.0.0"
-
-
 def root_context(ctx: click.Context | None) -> click.Context | None:
     """Walk to the root Click context."""
     current = ctx
@@ -291,7 +282,9 @@ def current_request_headers() -> dict[str, str]:
 
 def build_scenario_manager_headers() -> dict[str, str]:
     """Return the current telemetry headers for Scenario Manager API requests."""
-    return current_request_headers()
+    headers = current_request_headers()
+    headers.setdefault(SIMLAB_VERSION_HEADER, __version__)
+    return headers
 
 
 def normalize_optional_string(value: str | None) -> str | None:
@@ -386,7 +379,7 @@ class TelemetryService:
         self.api_key = (api_key or "").strip() or None
         self.state_path = state_path or telemetry_state_path()
         self.timeout_seconds = timeout_seconds
-        self.version = simlab_version()
+        self.version = __version__
         self.state = ensure_session(load_state(self.state_path))
         self.show_notice_once()
         save_state(self.state_path, self.state)

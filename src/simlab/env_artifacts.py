@@ -139,7 +139,9 @@ def regenerate_env_artifacts(env_dir: Path) -> ComposeOutput:
     """Regenerate compose artifacts from ``env.yaml`` plus env-local custom tools."""
     config = load_env_config(env_dir)
     registry = build_registry(env_dir=env_dir)
-    output = ComposeEngine(registry).compose(config, config_dir=env_dir, env_dir=env_dir)
+    output = ComposeEngine(registry).compose(
+        config, config_dir=env_dir, env_dir=env_dir, output_dir=env_dir
+    )
     write_output(output, env_dir)
     write_generation_state(env_dir)
     return output

@@ -27,28 +27,36 @@ jobs:
               echo "Main commit: $main_sha" >&2
               exit 1
           fi
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - name: Validate tag matches project version
+      - name: Validate release tag and version
         run: |
           python3 - <<'PY'
           import os
           import tomllib
           from pathlib import Path
 
-          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
-          version = project["version"]
           tag = os.environ["GITHUB_REF_NAME"]
-          expected_tag = f"v{version}"
-          if tag != expected_tag:
+          pyproject_version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          expected_tag = f"v{pyproject_version}"
+
+          cookbook_mismatches: dict[str, str] = {}
+          for cookbook_pyproject in Path("cookbook").rglob("pyproject.toml"):
+              cookbook_version = tomllib.loads(cookbook_pyproject.read_text(encoding="utf-8"))["project"][
+                  "version"
+              ]
+              if cookbook_version != pyproject_version:
+                  cookbook_mismatches[str(cookbook_pyproject)] = cookbook_version
+
+          if tag != expected_tag or cookbook_mismatches:
               raise SystemExit(
-                  f"Release tag {tag!r} does not match pyproject version {version!r}. "
-                  f"Expected {expected_tag!r}."
+                  "SimLab release version mismatch.\n"
+                  f"  tag: {tag!r}\n"
+                  f"  pyproject.toml [project].version: {pyproject_version!r}\n"
+                  f"  cookbook pyproject mismatches: {cookbook_mismatches!r}\n"
+                  f"  expected tag: {expected_tag!r}\n"
               )
           PY
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
       - name: Build distribution
         run: uvx --from build pyproject-build
       - name: Twine check

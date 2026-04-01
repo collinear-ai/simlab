@@ -53,7 +53,81 @@ def test_compose_uses_default_registry_for_collinear_images() -> None:
     assert "image: ghcr.io/collinear-ai/collinear/email-env:latest" in output.compose_yaml
 
 
-def test_compose_injects_frappe_seed_scenario_for_template() -> None:
+def test_compose_injects_frappe_seed_scenario_for_versioned_template_id() -> None:
+    registry = ToolRegistry()
+    registry.load_all()
+
+    output = ComposeEngine(registry).compose(
+        EnvConfig(
+            tools=["frappe-hrms"],
+            template="hr_people_management:1.0.0",
+        )
+    )
+
+    compose = yaml.safe_load(output.compose_yaml)
+    services = compose["services"]
+
+    assert services["frappe-hrms-env"]["environment"]["FRAPPE_SEED_SCENARIO"] == (
+        "hr_people_management"
+    )
+    assert services["frappe-hrms-seed"]["environment"]["FRAPPE_SEED_SCENARIO"] == (
+        "hr_people_management"
+    )
+
+
+def test_compose_pins_latest_images_from_versioned_template_id() -> None:
+    registry = ToolRegistry()
+    registry._tools["email"] = ToolDefinition(
+        name="email",
+        display_name="Email",
+        description="Email tool",
+        category="communication",
+        tool_server_port=8040,
+        services={
+            "email-env": ServiceDefinition(
+                image="collinear/email-env:latest",
+                ports=["8040"],
+            )
+        },
+    )
+
+    output = ComposeEngine(registry).compose(
+        EnvConfig(
+            tools=["email"],
+            template="hr:1.2.3",
+        )
+    )
+
+    assert "image: ghcr.io/collinear-ai/collinear/email-env:1.2.3" in output.compose_yaml
+
+
+def test_compose_does_not_pin_images_for_unversioned_template_id() -> None:
+    registry = ToolRegistry()
+    registry._tools["email"] = ToolDefinition(
+        name="email",
+        display_name="Email",
+        description="Email tool",
+        category="communication",
+        tool_server_port=8040,
+        services={
+            "email-env": ServiceDefinition(
+                image="collinear/email-env:latest",
+                ports=["8040"],
+            )
+        },
+    )
+
+    output = ComposeEngine(registry).compose(
+        EnvConfig(
+            tools=["email"],
+            template="crm_sales",
+        )
+    )
+
+    assert "image: ghcr.io/collinear-ai/collinear/email-env:latest" in output.compose_yaml
+
+
+def test_compose_injects_frappe_seed_scenario_for_unversioned_template_id() -> None:
     registry = ToolRegistry()
     registry.load_all()
 
@@ -132,7 +206,7 @@ def test_compose_allows_frappe_seed_scenario_override() -> None:
     output = ComposeEngine(registry).compose(
         EnvConfig(
             tools=["frappe-hrms"],
-            template="hr_people_management",
+            template="hr_people_management:1.0.0",
             overrides={"frappe-hrms": {"FRAPPE_SEED_SCENARIO": "custom_scenario"}},
         )
     )

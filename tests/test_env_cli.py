@@ -64,7 +64,7 @@ def test_env_init_template_uses_server_scenario_tools(tmp_path: Path) -> None:
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="financial_services",
+            scenario_id="financial_services:1.0.0",
             name="Financial Services",
             tool_servers=[
                 ScenarioToolServer(name="spreadsheets"),
@@ -82,7 +82,7 @@ def test_env_init_template_uses_server_scenario_tools(tmp_path: Path) -> None:
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "financial_services"
+        mocked_client.resolve_template_to_backend_id.return_value = "financial_services:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -97,15 +97,16 @@ def test_env_init_template_uses_server_scenario_tools(tmp_path: Path) -> None:
         )
 
     assert result.exit_code == 0, result.output
-    assert "Starting from template 'financial_services': spreadsheets" in result.output
-    assert "Ignoring unsupported tool servers from template 'financial_services': missing-tool" in (
-        result.output
+    assert "Starting from template 'financial_services:1.0.0': spreadsheets" in result.output
+    assert (
+        "Ignoring unsupported tool servers from template 'financial_services:1.0.0': missing-tool"
+        in result.output
     )
 
     assert out_file.exists()
     data = yaml.safe_load(out_file.read_text())
     assert data["registry"] == DEFAULT_IMAGE_REGISTRY
-    assert data["template"] == "financial_services"
+    assert data["template"] == "financial_services:1.0.0"
     assert data["tools"] == ["spreadsheets"]
     assert data["name"] == env_name
     assert data["scenario_guidance_md"] == "# Scenario Guidance\nFollow the domain conventions.\n"
@@ -120,7 +121,7 @@ def test_env_init_scenario_guidance_file_overrides_template_guidance(tmp_path: P
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="financial_services",
+            scenario_id="financial_services:1.0.0",
             name="Financial Services",
             tool_servers=[ScenarioToolServer(name="spreadsheets")],
             scenario_guidance_md="# Server Guidance\nFollow the server defaults.\n",
@@ -135,7 +136,7 @@ def test_env_init_scenario_guidance_file_overrides_template_guidance(tmp_path: P
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "financial_services"
+        mocked_client.resolve_template_to_backend_id.return_value = "financial_services:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -185,7 +186,7 @@ def test_env_init_template_maps_service_names_to_registry_tools(tmp_path: Path) 
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="human_resource",
+            scenario_id="human_resource:1.0.0",
             name="Human Resource",
             tool_servers=[
                 ScenarioToolServer(name="frappe-hrms-env"),
@@ -204,7 +205,7 @@ def test_env_init_template_maps_service_names_to_registry_tools(tmp_path: Path) 
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "human_resource"
+        mocked_client.resolve_template_to_backend_id.return_value = "human_resource:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -219,7 +220,7 @@ def test_env_init_template_maps_service_names_to_registry_tools(tmp_path: Path) 
         )
 
     assert result.exit_code == 0, result.output
-    assert "Starting from template 'human_resource': frappe-hrms, email" in result.output
+    assert "Starting from template 'human_resource:1.0.0': frappe-hrms, email" in result.output
 
     assert out_file.exists()
     data = yaml.safe_load(out_file.read_text())
@@ -234,7 +235,7 @@ def test_env_init_template_maps_google_workspace_service_name(tmp_path: Path) ->
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="financial_services",
+            scenario_id="financial_services:1.0.0",
             name="Financial Services",
             tool_servers=[ScenarioToolServer(name="google-workspace-tool-server")],
         )
@@ -250,7 +251,7 @@ def test_env_init_template_maps_google_workspace_service_name(tmp_path: Path) ->
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "financial_services"
+        mocked_client.resolve_template_to_backend_id.return_value = "financial_services:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -278,7 +279,7 @@ def test_env_init_template_maps_erp_service_name(tmp_path: Path) -> None:
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="erp",
+            scenario_id="erp:1.0.0",
             name="ERP",
             tool_servers=[
                 ScenarioToolServer(name="erp-env"),
@@ -297,7 +298,7 @@ def test_env_init_template_maps_erp_service_name(tmp_path: Path) -> None:
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "erp"
+        mocked_client.resolve_template_to_backend_id.return_value = "erp:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -312,7 +313,7 @@ def test_env_init_template_maps_erp_service_name(tmp_path: Path) -> None:
         )
 
     assert result.exit_code == 0, result.output
-    assert "Starting from template 'erp': erp, email" in result.output
+    assert "Starting from template 'erp:1.0.0': erp, email" in result.output
 
     assert out_file.exists()
     data = yaml.safe_load(out_file.read_text())
@@ -327,7 +328,7 @@ def test_env_init_template_maps_crm_service_name(tmp_path: Path) -> None:
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="crm_sales",
+            scenario_id="crm_sales:1.0.0",
             name="CRM Sales",
             tool_servers=[ScenarioToolServer(name="crm-env")],
         )
@@ -340,7 +341,7 @@ def test_env_init_template_maps_crm_service_name(tmp_path: Path) -> None:
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "crm_sales"
+        mocked_client.resolve_template_to_backend_id.return_value = "crm_sales:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -368,7 +369,7 @@ def test_env_init_uses_default_registry_when_flag_omitted(tmp_path: Path) -> Non
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="financial_services",
+            scenario_id="financial_services:1.0.0",
             name="Financial Services",
             tool_servers=[ScenarioToolServer(name="spreadsheets")],
         )
@@ -382,7 +383,7 @@ def test_env_init_uses_default_registry_when_flag_omitted(tmp_path: Path) -> Non
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "financial_services"
+        mocked_client.resolve_template_to_backend_id.return_value = "financial_services:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -435,7 +436,7 @@ def test_env_init_template_uses_global_config_for_api_client(tmp_path: Path) -> 
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="financial_services",
+            scenario_id="financial_services:1.0.0",
             name="Financial Services",
             tool_servers=[ScenarioToolServer(name="spreadsheets")],
         )
@@ -454,7 +455,7 @@ def test_env_init_template_uses_global_config_for_api_client(tmp_path: Path) -> 
         )
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "financial_services"
+        mocked_client.resolve_template_to_backend_id.return_value = "financial_services:1.0.0"
         result = runner.invoke(
             env,
             [
@@ -553,7 +554,7 @@ def test_env_init_coding_template_scaffolds_customization_files(tmp_path: Path) 
     runner = CliRunner()
     fake_scenarios = [
         ScenarioSummary(
-            scenario_id="coding",
+            scenario_id="coding:1.0.0",
             name="Coding",
             tool_servers=[ScenarioToolServer(name="coding-env")],
             scenario_guidance_md="# Server Guidance\nUse coding skills first.\n",
@@ -571,7 +572,7 @@ def test_env_init_coding_template_scaffolds_customization_files(tmp_path: Path) 
     ):
         mocked_client = mocked_client_cls.return_value
         mocked_client.list_scenarios.return_value = fake_scenarios
-        mocked_client.resolve_template_to_backend_id.return_value = "coding"
+        mocked_client.resolve_template_to_backend_id.return_value = "coding:1.0.0"
 
         result = runner.invoke(
             env,
@@ -1391,7 +1392,64 @@ def test_env_init_emits_telemetry(tmp_path: Path) -> None:
         "env_init_completed",
         {
             "template_used": True,
+            "template_name": "human_resource",
+            "environment_name": env_name,
             "selected_tool_count": 1,
+            "selected_tools": ["email"],
+            "unsupported_tool_count": 0,
+            "non_interactive": True,
+        },
+    )
+
+
+def test_env_init_force_regeneration_emits_telemetry_from_env_yaml(tmp_path: Path) -> None:
+    env_name = "regen-telemetry-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: old-name\n"
+        "tools:\n"
+        "  - email\n"
+        "  - rocketchat\n"
+        "template: human_resource\n"
+        "overrides: {}\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    fake_compose_output = _fake_compose_output(
+        tool_endpoints={
+            "email": "http://localhost:8040/tools",
+            "rocketchat": "http://localhost:8041/tools",
+        }
+    )
+
+    with (
+        patch(
+            "simlab.cli.env.build_registry",
+            return_value=_FakeRegistry({"email", "rocketchat"}),
+        ),
+        patch("simlab.cli.env.regenerate_env_artifacts", return_value=fake_compose_output),
+        patch("simlab.cli.env.emit_cli_event") as mocked_emit,
+    ):
+        result = runner.invoke(
+            env,
+            ["init", env_name, "--force", "--non-interactive"],
+            catch_exceptions=False,
+            env={
+                "SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments"),
+                "COLLINEAR_API_KEY": "",
+            },
+        )
+
+    assert result.exit_code == 0, result.output
+    mocked_emit.assert_called_once_with(
+        "env_init_completed",
+        {
+            "template_used": True,
+            "template_name": "human_resource",
+            "environment_name": env_name,
+            "selected_tool_count": 2,
+            "selected_tools": ["email", "rocketchat"],
             "unsupported_tool_count": 0,
             "non_interactive": True,
         },

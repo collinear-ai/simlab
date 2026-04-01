@@ -116,20 +116,52 @@ def generate_npc_interaction_configs(profiles: list[dict[str, Any]]) -> list[dic
     return configs
 
 
-def inject_npc_env_vars(services: dict[str, dict[str, Any]]) -> None:
-    """Inject NPC config env vars into rocketchat-seed and sotopia-runtime services."""
-    profiles = load_npc_profiles()
+NPC_CREDENTIALS_FILENAME = "rocketchat-npc-configs.json"
+NPC_INTERACTION_CONFIGS_FILENAME = "sotopia-npc-interaction-configs.json"
+_NPC_CONFIG_MOUNT_DIR = "/config/npc"
 
-    npc_credentials_json = json.dumps(generate_npc_credentials(profiles), separators=(",", ":"))
-    interaction_configs_json = json.dumps(
-        generate_npc_interaction_configs(profiles), separators=(",", ":")
-    )
+
+def build_npc_config_json(profiles: list[dict[str, Any]]) -> tuple[str, str]:
+    """Build the NPC credentials and interaction configs JSON strings.
+
+    Returns (npc_credentials_json, interaction_configs_json).
+    """
+    npc_credentials_json = json.dumps(generate_npc_credentials(profiles), indent=2)
+    interaction_configs_json = json.dumps(generate_npc_interaction_configs(profiles), indent=2)
+    return npc_credentials_json, interaction_configs_json
+
+
+def inject_npc_env_vars(services: dict[str, dict[str, Any]], output_dir: str) -> tuple[str, str]:
+    """Mount NPC config files into rocketchat-seed and sotopia-runtime services.
+
+    Instead of passing large JSON payloads as environment variables (which can
+    exceed the OS ARG_MAX limit), the configs are written to files that are
+    bind-mounted into the containers.
+
+    Returns (npc_credentials_json, interaction_configs_json) so the caller can
+    write the files to the output directory.
+    """
+    profiles = load_npc_profiles()
+    npc_credentials_json, interaction_configs_json = build_npc_config_json(profiles)
+
+    creds_host_path = f"{output_dir}/{NPC_CREDENTIALS_FILENAME}"
+    interaction_host_path = f"{output_dir}/{NPC_INTERACTION_CONFIGS_FILENAME}"
+
+    creds_container_path = f"{_NPC_CONFIG_MOUNT_DIR}/{NPC_CREDENTIALS_FILENAME}"
+    interaction_container_path = f"{_NPC_CONFIG_MOUNT_DIR}/{NPC_INTERACTION_CONFIGS_FILENAME}"
 
     if "rocketchat-seed" in services:
         env = services["rocketchat-seed"].setdefault("environment", {})
-        env["ROCKETCHAT_NPC_CONFIGS"] = npc_credentials_json
+        env["ROCKETCHAT_NPC_CONFIGS_FILE"] = creds_container_path
+        vols = services["rocketchat-seed"].setdefault("volumes", [])
+        vols.append(f"{creds_host_path}:{creds_container_path}:ro")
 
     if "sotopia-runtime" in services:
         env = services["sotopia-runtime"].setdefault("environment", {})
-        env["ROCKETCHAT_NPC_CONFIGS"] = npc_credentials_json
-        env["SOTOPIA_NPC_INTERACTION_CONFIGS"] = interaction_configs_json
+        env["ROCKETCHAT_NPC_CONFIGS_FILE"] = creds_container_path
+        env["SOTOPIA_NPC_INTERACTION_CONFIGS_FILE"] = interaction_container_path
+        vols = services["sotopia-runtime"].setdefault("volumes", [])
+        vols.append(f"{creds_host_path}:{creds_container_path}:ro")
+        vols.append(f"{interaction_host_path}:{interaction_container_path}:ro")
+
+    return npc_credentials_json, interaction_configs_json

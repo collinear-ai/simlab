@@ -12,6 +12,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -26,6 +27,8 @@ from simlab.api.client import ScenarioManagerApiError
 from simlab.api.client import ScenarioManagerClient
 from simlab.api.client import resolve_scenario_manager_api_url
 from simlab.api.schemas import ScenarioTask
+from simlab.cli.rollout_summary_card import print_parallel_rollout_summary_card
+from simlab.cli.rollout_summary_card import print_single_rollout_summary_card
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
 from simlab.composer.engine import get_mcp_gateway_host_port
@@ -2263,48 +2266,21 @@ def seed(
 # ---------------------------------------------------------------------------
 
 
-def _print_parallel_summary(summary: Any) -> None:
-    """Display a table summarizing parallel rollout results."""
-    click.echo(click.style("\n=== Parallel Rollout Summary ===\n", bold=True))
-    click.echo(f"  Task:      {summary.task_id}")
-    click.echo(f"  Rollouts:  {summary.rollout_count}")
-    click.echo(f"  Duration:  {summary.total_duration_seconds:.1f}s")
-    click.echo()
+@dataclass(frozen=True)
+class SingleRolloutOutcome:
+    """Outcome data for rendering the post-run rollout summary card."""
 
-    passed = [r for r in summary.results if r.error is None and r.verification_passed is not False]
-    failed = [r for r in summary.results if r.error is not None or r.verification_passed is False]
-    rewards = [r.reward for r in summary.results if r.reward is not None]
-
-    for r in summary.results:
-        status = (
-            click.style("PASS", fg="green")
-            if r.verification_passed
-            else (
-                click.style("FAIL", fg="red")
-                if r.verification_passed is False
-                else click.style("ERR ", fg="red")
-                if r.error
-                else click.style("N/A ", fg="yellow")
-            )
-        )
-        reward_str = f"{r.reward:.1f}" if r.reward is not None else "-"
-        err_str = f"  error={r.error}" if r.error else ""
-        click.echo(
-            f"  rollout {r.rollout_idx}: {status}  "
-            f"reward={reward_str}  steps={r.steps_taken}  "
-            f"time={r.duration_seconds:.0f}s{err_str}"
-        )
-
-    click.echo()
-    click.echo(f"  Passed:    {len(passed)}/{summary.rollout_count}")
-    if failed:
-        click.echo(click.style(f"  Failed:    {len(failed)}", fg="red"))
-    if rewards:
-        avg = sum(rewards) / len(rewards)
-        click.echo(f"  Avg reward: {avg:.2f}")
-    if summary.output_dir:
-        click.echo(f"  Output:    {summary.output_dir}")
-    click.echo()
+    task_id: str
+    model: str | None
+    provider: str | None
+    steps_taken: int
+    max_steps: int | None
+    reward: float | None
+    verification_passed: bool | None
+    run_error: str | None
+    verifier_results: list[dict[str, Any]]
+    output_dir: Path
+    exit_code: int
 
 
 @tasks.command()
@@ -2376,6 +2352,7 @@ def _print_parallel_summary(summary: Any) -> None:
     help="Skip automatic environment startup (assume env is already running).",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed agent logs.")
+@click.option("--quiet", is_flag=True, help="Suppress the post-run summary card.")
 @click.option(
     "--daytona", is_flag=True, help="Run against a Daytona sandbox instead of local Docker."
 )
@@ -2412,6 +2389,7 @@ def run(
     keep_alive: bool,
     skip_env_setup: bool,
     verbose: bool,
+    quiet: bool,
     daytona: bool,
     rollout_count: int,
     max_parallel: int,
@@ -2580,7 +2558,14 @@ def run(
             base_url_api=base_url_api,
             scenario_manager_api_key=scenario_manager_api_key,
         )
-        _print_parallel_summary(summary)
+        print_parallel_rollout_summary_card(
+            task_id=summary.task_id,
+            rollout_count=summary.rollout_count,
+            results=summary.results,
+            total_duration_seconds=summary.total_duration_seconds,
+            output_dir=summary.output_dir,
+            quiet=quiet,
+        )
         has_failures = any(
             r.error is not None or r.verification_passed is False for r in summary.results
         )
@@ -2594,6 +2579,9 @@ def run(
     # --- Phase 0: Auto-start environment if needed ---
     managed_env = False  # True only when *this* run started the env
     has_local_services = env_has_local_services(env_dir)
+
+    run_started = time.monotonic()
+    outcome: SingleRolloutOutcome | None = None
 
     try:
         # --- Phase 0: Auto-start environment if needed ---
@@ -2647,7 +2635,7 @@ def run(
                 click.echo(click.style("Environment started.", fg="green"))
 
         # --- Phases 1-3: Seed, run agent, verify ---
-        _run_single_rollout(
+        outcome = _run_single_rollout(
             env_dir=env_dir,
             config=config,
             config_path=config_path,
@@ -2690,6 +2678,25 @@ def run(
                     click.style("Warning: environment teardown failed.", fg="yellow"),
                     err=True,
                 )
+
+    duration_seconds = time.monotonic() - run_started
+    if outcome is not None:
+        print_single_rollout_summary_card(
+            task_id=outcome.task_id,
+            model=outcome.model,
+            provider=outcome.provider,
+            steps_taken=outcome.steps_taken,
+            max_steps=outcome.max_steps,
+            duration_seconds=duration_seconds,
+            reward=outcome.reward,
+            verification_passed=outcome.verification_passed,
+            run_error=outcome.run_error,
+            verifier_results=outcome.verifier_results,
+            output_dir=outcome.output_dir,
+            quiet=quiet,
+        )
+        if outcome.exit_code:
+            raise SystemExit(outcome.exit_code)
 
 
 def _print_run_summary(
@@ -2762,7 +2769,7 @@ def _run_single_rollout(
     managed_env: bool,
     keep_alive: bool,
     skip_env_setup: bool,
-) -> None:
+) -> SingleRolloutOutcome:
     """Execute a single task rollout: resolve endpoints, seed, run agent, verify."""
     # --- Phase 1: Resolve endpoints ---
     endpoints, using_daytona = _resolve_endpoints(
@@ -2949,10 +2956,6 @@ def _run_single_rollout(
     output_path = run_dir / "artifacts.json"
     artifacts.dump(output_path)
 
-    # --- Run summary ---
-    click.echo()
-    _print_run_summary(artifacts, npc_session, run_dir)
-
     run_error = artifacts.error
     if run_error:
         emit_cli_event(
@@ -2969,11 +2972,12 @@ def _run_single_rollout(
                 "keep_alive": keep_alive,
             },
         )
-        click.echo(click.style(f"Run failed: {run_error}", fg="yellow"), err=True)
 
     evaluators = task_data.get("verifiers") or task_data.get("evaluators")
+    verifier_results: list[dict[str, Any]] = []
     reward: float | None = None
     verification_passed: bool | None = None
+    exit_code = 0
     if evaluators:
         build_verifier_artifacts, infer_scenario_from_evaluator, run_verifier = (
             get_verifier_runtime_helpers()
@@ -2992,15 +2996,16 @@ def _run_single_rollout(
                 task_file,
                 _verifier_tool_servers(rewritten, endpoints, mcp_clients),
             )
-            verifier_results: list[dict[str, Any]] = []
-            click.echo(click.style("\nRunning verifiers...", bold=True))
+            if verbose:
+                click.echo(click.style("\nRunning verifiers...", bold=True))
             original_env, applied_env = _apply_verifier_env_overrides(global_cfg)
             try:
                 for i, ev in enumerate(evaluators, 1):
                     if ev.get("func") != "python_module" or not ev.get("module"):
                         continue
                     mod_path = ev["module"]
-                    click.echo(f"  Verifier {i}/{len(evaluators)}: {mod_path}")
+                    if verbose:
+                        click.echo(f"  Verifier {i}/{len(evaluators)}: {mod_path}")
                     result = run_verifier(
                         mod_path,
                         adapter,
@@ -3022,12 +3027,8 @@ def _run_single_rollout(
                             "output": result.output or "",
                         }
                     )
-                    if result.output or result.message:
+                    if verbose and (result.output or result.message):
                         click.echo(result.output or result.message)
-                    if not result.success:
-                        click.echo(click.style(f"  Verifier {i} failed", fg="red"))
-                    else:
-                        click.echo(click.style(f"  Verifier {i} passed", fg="green"))
             finally:
                 _restore_env(original_env, applied_env)
             all_passed = all(r["success"] for r in verifier_results)
@@ -3061,10 +3062,6 @@ def _run_single_rollout(
                 json.dumps(reward_payload, indent=2),
                 encoding="utf-8",
             )
-            click.echo(f"Reward: {reward:.1f}")
-            if rubric_result_dict:
-                click.echo(f"Rubric score: {rubric_result_dict.get('score', 'N/A')}")
-            click.echo(f"Verifier reward: {verifier_dir / 'reward.txt'}")
             if not all_passed:
                 emit_cli_event(
                     "tasks_run_failed",
@@ -3081,33 +3078,46 @@ def _run_single_rollout(
                         "keep_alive": keep_alive,
                     },
                 )
-                click.echo(click.style("\nVerification failed.", fg="red"), err=True)
-                raise SystemExit(1)
-            click.echo(click.style("\nVerification passed.", fg="green"))
+                exit_code = 1
         finally:
             if task_file is not None:
                 task_file.unlink(missing_ok=True)
-    elif run_error:
-        raise SystemExit(1)
 
-    click.echo(click.style("Run completed.", fg="green"))
-    emit_cli_event(
-        "tasks_run_completed",
-        {
-            "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
-            "mode": "daytona" if using_daytona else "local",
-            "seed_requested": not no_seed,
-            "tool_server_count": len(tool_namespace_endpoints),
-            "had_custom_agent": bool(agent_import_path),
-            "max_steps": max_steps,
-            "steps_taken": artifacts.steps_taken,
-            "tool_calls_made": len(artifacts.tool_calls),
-            "verifier_count": len(evaluators or []),
-            "verifier_passed": verification_passed,
-            "reward": reward,
-            "managed_env": managed_env,
-            "keep_alive": keep_alive,
-        },
+    elif run_error:
+        exit_code = 1
+
+    if exit_code == 0:
+        emit_cli_event(
+            "tasks_run_completed",
+            {
+                "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
+                "mode": "daytona" if using_daytona else "local",
+                "seed_requested": not no_seed,
+                "tool_server_count": len(tool_namespace_endpoints),
+                "had_custom_agent": bool(agent_import_path),
+                "max_steps": max_steps,
+                "steps_taken": artifacts.steps_taken,
+                "tool_calls_made": len(artifacts.tool_calls),
+                "verifier_count": len(evaluators or []),
+                "verifier_passed": verification_passed,
+                "reward": reward,
+                "managed_env": managed_env,
+                "keep_alive": keep_alive,
+            },
+        )
+
+    return SingleRolloutOutcome(
+        task_id=str(meta.get("task_id") or task_id),
+        model=model,
+        provider=provider,
+        steps_taken=artifacts.steps_taken,
+        max_steps=max_steps,
+        reward=reward,
+        verification_passed=verification_passed,
+        run_error=run_error,
+        verifier_results=verifier_results,
+        output_dir=run_dir,
+        exit_code=exit_code,
     )
 
 

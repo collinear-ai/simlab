@@ -132,6 +132,7 @@ Each environment directory contains:
 ```bash
 simlab tools list
 simlab templates list
+simlab templates list --env my-env   # uses that env's scenario_manager_api_url
 simlab tasks list --env my-env    # tasks for the template in that env
 simlab tasks list --tasks-dir ./generated-tasks   # or a local bundle
 ```
@@ -520,7 +521,26 @@ Telemetry settings are also global. Use `[telemetry]` in `config.toml` or `SIMLA
 
 ---
 
-## 5) How to test
+## 5) Send Feedback
+
+Have ideas or hit an issue? Send feedback directly from the CLI:
+
+```bash
+# Inline
+simlab feedback "The task gen took a long time and I wasn't sure if it was stuck"
+
+# Interactive (prompts for input)
+simlab feedback
+
+# With environment context
+simlab feedback --env my-env "Seeding seems slow for this template"
+```
+
+Feedback is sent through the telemetry pipeline to the Collinear team. If telemetry is disabled (`SIMLAB_DISABLE_TELEMETRY=1`), the command will let you know and suggest emailing `simlab@collinear.ai` instead.
+
+---
+
+## 6) How to test
 
 ### Unit tests (CLI)
 
@@ -578,7 +598,7 @@ The API serves verifier bundles via `GET /scenarios/{scenario_id}/verifiers/bund
 
 ---
 
-## 6) Hosted API Authentication
+## 7) Hosted API Authentication
 
 If you are using hosted Collinear APIs, configure your key first:
 
@@ -599,7 +619,7 @@ simlab --collinear-api-key "<your-collinear-api-key>" <command>
 
 ---
 
-## 7) Tear Down
+## 8) Tear Down
 
 `tasks run` automatically tears down the environment when the run completes. If you started the environment manually with `env up`, or need to tear it down separately:
 

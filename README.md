@@ -12,7 +12,7 @@
   <a href="https://collinear.ai"><img src="https://img.shields.io/badge/Website-collinear.ai-orange?style=flat-square" alt="Website"></a>
   <img src="https://img.shields.io/badge/python-3.13-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.13">
   <a href="https://github.com/collinear-ai/simlab/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"></a>
-  <a href="https://discord.gg/FfHVP6Yc"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://discord.gg/HZ4xqpf8VC"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 ---
@@ -78,7 +78,7 @@ export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY" # corresponding key
 ```bash
 simlab env init my-env --template hr
 ```
-> To list templates run `simlab templates list`
+> To list templates run `simlab templates list` (or `simlab templates list --env my-env` to use that env's Scenario Manager URL)
 
 Create and list tasks in directory `./generated-tasks`
 ```bash
@@ -114,9 +114,9 @@ No `DAYTONA_API_KEY` required. First run may take several minutes while images a
 
 </details>
 
-For the full walkthrough — configuration, custom agents, task generation, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/QUICKSTART.md)**. For framework adapters and custom agent integration patterns, see **[Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/agent-integrations.md)**.
+For the full walkthrough — configuration, custom agents, task generation, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md)**. For framework adapters and custom agent integration patterns, see **[Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/docs/agent-integrations.md)**.
 
-For environment-scoped tool definitions, see **[Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/custom-tools.md)**.
+For environment-scoped tool definitions, see **[Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/docs/custom-tools.md)**.
 
 ## API Keys
 
@@ -191,9 +191,9 @@ Run `simlab --help` for full usage details.
 
 ## Documentation
 
-- [Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/QUICKSTART.md) — full setup and usage walkthrough
-- [Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/custom-tools.md) — add custom tool definitions under one environment
-- [Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/cli/simlab/docs/agent-integrations.md) — adapter architecture and custom framework integration guide
+- [Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md) — full setup and usage walkthrough
+- [Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/docs/custom-tools.md) — add custom tool definitions under one environment
+- [Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/docs/agent-integrations.md) — adapter architecture and custom framework integration guide
 - [Docs](https://docs.collinear.ai) — complete documentation
 - [Collinear Platform](https://platform.collinear.ai) — get your API key
 

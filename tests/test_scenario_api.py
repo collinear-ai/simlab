@@ -54,7 +54,7 @@ def test_list_scenarios_success() -> None:
     """list_scenarios returns list from API."""
     fake_response = [
         {
-            "scenario_id": "human_resource",
+            "scenario_id": "human_resource:1.0.0",
             "name": "Human Resource",
             "description": "HR scenario",
             "num_tasks": 5,
@@ -69,7 +69,7 @@ def test_list_scenarios_success() -> None:
     with patch.object(client, "_request", return_value=fake_response):
         result = client.list_scenarios()
     assert isinstance(result[0], ScenarioSummary)
-    assert result[0].scenario_id == "human_resource"
+    assert result[0].scenario_id == "human_resource:1.0.0"
 
 
 def test_list_scenarios_include_hidden_uses_query_flag() -> None:
@@ -127,9 +127,14 @@ def test_list_scenario_tasks_can_explicitly_exclude_test_tasks() -> None:
 
 
 def test_resolve_template_to_backend_id_fetches_with_include_hidden() -> None:
-    fake_scenarios = [ScenarioSummary(scenario_id="human_resource", name="Human Resource")]
+    fake_scenarios = [
+        ScenarioSummary(
+            scenario_id="human_resource:1.0.0",
+            name="Human Resource",
+        )
+    ]
     client = ScenarioManagerClient(base_url="https://api.example.com")
     with patch.object(client, "list_scenarios", return_value=fake_scenarios) as mocked:
         resolved = client.resolve_template_to_backend_id("human_resource")
-    assert resolved == "human_resource"
+    assert resolved == "human_resource:1.0.0"
     mocked.assert_called_once_with(include_hidden=True)

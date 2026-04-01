@@ -19,6 +19,7 @@ COMMAND_IMPORT_PATHS = {
     "auth": "simlab.cli.auth:auth",
     "eval": "simlab.cli.eval:eval_command",
     "env": "simlab.cli.env:env",
+    "feedback": "simlab.cli.feedback:feedback",
     "tasks": "simlab.cli.tasks:tasks",
     "tasks-gen": "simlab.cli.tasks_gen:tasks_gen",
     "templates": "simlab.cli.templates:templates",
