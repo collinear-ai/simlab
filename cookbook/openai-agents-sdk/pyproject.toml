@@ -1,6 +1,6 @@
 [project]
 name = "openai-agents-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Customer-style OpenAI Agents SDK app with a SimLab BaseAgent adapter"
 readme = "openai-agents-sdk.md"
 requires-python = ">=3.13"

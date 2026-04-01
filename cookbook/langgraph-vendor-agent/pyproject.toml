@@ -1,6 +1,6 @@
 [project]
 name = "langgraph-vendor-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Plan-and-execute LangGraph agent for vendor management with SimLab ERP and email tools"
 readme = "README.md"
 requires-python = ">=3.13"

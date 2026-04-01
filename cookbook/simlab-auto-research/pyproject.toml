@@ -1,6 +1,6 @@
 [project]
 name = "simlab-auto-research"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous prompt optimization for SimLab agents using the auto-research pattern"
 readme = "simlab-auto-research.md"
 requires-python = ">=3.13"
