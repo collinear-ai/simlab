@@ -1,17 +1,17 @@
-# Simlab CLI v0.1 — Quickstart
+# Simlab CLI — Quickstart
 
 ## Install
 
 Install the published package:
 
 ```bash
-uv tool install simulationlab
+uv tool install --python 3.13 simulationlab
 ```
 
 If you want Daytona support from the packaged CLI:
 
 ```bash
-uv tool install "simulationlab[daytona]"
+uv tool install --python 3.13 "simulationlab[daytona]"
 ```
 
 The PyPI package is named `simulationlab`. The installed CLI command is `simlab`.
@@ -21,9 +21,9 @@ The PyPI package is named `simulationlab`. The installed CLI command is `simlab`
 ```bash
 git clone https://github.com/collinear-ai/simlab.git
 cd simlab/cli/simlab
-uv tool install .
+uv tool install --python 3.13 .
 # or with extras:
-uv tool install ".[daytona]"
+uv tool install --python 3.13 ".[daytona]"
 ```
 
 Then run with `simlab <command>`. To run directly from the repo without installing:
@@ -60,6 +60,9 @@ api_key = "sk-..."
 model = "gpt-4o-mini"
 provider = "openai"
 api_key = "sk-..."
+
+[tasks]
+rollout_format = "default"
 
 [telemetry]
 disabled = false
@@ -359,8 +362,8 @@ You still need a reference-agent API key such as `OPENAI_API_KEY` or `SIMLAB_AGE
 Generate your own task definitions using the task generation pipeline:
 
 ```bash
-# Quick start with a preset
-simlab tasks-gen init --preset recruiting --output-dir ./taskgen
+# Quick start with a template
+simlab tasks-gen init --template recruiting --output-dir ./taskgen
 
 # Interactive wizard
 simlab tasks-gen init --output-dir ./taskgen
@@ -372,7 +375,7 @@ simlab tasks-gen validate ./taskgen/config.toml
 simlab tasks-gen run --config ./taskgen/config.toml
 ```
 
-Available presets: `recruiting`, `people_mgmt`, `coding`, `customer_support`.
+Available templates: `recruiting`, `people_mgmt`, `coding`, `customer_support`.
 
 ---
 
@@ -411,6 +414,30 @@ For a generated local task bundle, point `tasks run` at the bundle directory:
 ```bash
 simlab tasks run --env my-env --tasks-dir ./generated-tasks --task generated-task-id --agent-model gpt-4o-mini --agent-api-key "$OPENAI_API_KEY"
 ```
+
+For a single Harbor task directory, point `tasks run` at the Harbor task
+instead of an env:
+
+```bash
+simlab tasks run --harbor ./examples/harbor/hello-world --agent-model gpt-5.2
+```
+
+Harbor runs compile the task into a generated env and local task bundle first,
+then execute the usual startup, agent, and verifier flow. `--daytona` works for
+Harbor runs too. `--keep-alive` retains the generated Harbor workspace under
+`output/harbor_runs/`.
+
+To emit an ATIF trajectory for any task run, pass
+`--tasks-rollout-format atif` or set `rollout_format: atif` in the env's
+`env.yaml`. You can also set `[tasks].rollout_format` in global config or
+`SIMLAB_TASKS_ROLLOUT_FORMAT=atif`. Harbor runs default to `atif` unless you
+override them.
+
+Current Harbor limits:
+
+- `--harbor` runs a single Harbor task directory, not a suite directory
+- `--skip-env-setup` is not supported with `--harbor`
+- `--rollout-count > 1` is not supported with `--harbor`
 
 If the environment is already running (e.g. from a previous run or manual `env up`), `tasks run` detects it and skips startup/teardown.
 
@@ -473,12 +500,14 @@ If `--agent-import-path` is omitted, the CLI uses the baked‑in reference agent
 
 **Single rollout** (default) writes to a namespaced directory under `output/`:
 
-- `output/agent_run_<task_id>_<timestamp>/artifacts.json` — run artifacts (messages, tool calls, etc.).
+- `output/agent_run_<task_id>_<timestamp>/artifacts.json` — default rollout artifacts (messages, tool calls, etc.).
+- `output/agent_run_<task_id>_<timestamp>/agent/trajectory.json` — ATIF rollout artifacts when `rollout_format` resolves to `atif`.
 - If the task defines **verifiers**, the CLI runs them after the agent and writes Harbor-style reward files in the same run directory:
   - `output/agent_run_<task_id>_<timestamp>/verifier/reward.txt` — `1` or `0`.
   - `output/agent_run_<task_id>_<timestamp>/verifier/reward.json` — e.g. `{"reward": 1.0}`.
 
-Tasks that have no `verifiers` (or `evaluators`) in their JSON only produce `artifacts.json`; there is no verifier step and no reward files.
+Tasks that have no `verifiers` (or `evaluators`) in their JSON only produce the
+selected rollout artifact file; there is no verifier step and no reward files.
 
 **Parallel rollouts** (`--rollout-count > 1`) write to:
 
@@ -492,6 +521,9 @@ output/parallel_run_<task_id>_<timestamp>/
     ...
   summary.json
 ```
+
+When `rollout_format` resolves to `atif`, each rollout directory writes
+`agent/trajectory.json` instead of `artifacts.json`.
 
 `summary.json` includes completed/failed counts, average reward, average steps, and per-rollout details.
 
