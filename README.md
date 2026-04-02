@@ -21,6 +21,7 @@ SimLab is the data layer for adaptively composing RL simulations and evaluating 
 
 - **Browse & compose** environments from a catalog of tool servers and scenario templates
 - **Run agents** against tasks using any LLM provider (OpenAI, Fireworks, custom endpoints)
+- **Run Harbor tasks directly** from a Harbor task directory with `tasks run --harbor`
 - **Generate custom tasks** with built-in task generation pipelines
 - **Evaluate automatically** with verifiers and reward model scoring
 - **Scale to the cloud** with Daytona for remote sandbox execution (if you want to experiment with large-scale parallel rollouts, reach out to us or join the Discord!)
@@ -30,16 +31,16 @@ SimLab is the data layer for adaptively composing RL simulations and evaluating 
 ### Install
 ```bash
 # Recommended: install with all extras
-uv pip install "simulationlab[npc,daytona,langchain]"
+uv tool install --python 3.13 "simulationlab[npc,daytona,langchain]"
 
 # Or install only what you need:
-uv tool install simulationlab
-uv tool install "simulationlab[npc]"        # NPC chat simulation
-uv tool install "simulationlab[daytona]"    # Remote sandbox execution
-uv tool install "simulationlab[langchain]"  # LangChain/LangGraph agents
+uv tool install --python 3.13 simulationlab
+uv tool install --python 3.13 "simulationlab[npc]"        # NPC chat simulation
+uv tool install --python 3.13 "simulationlab[daytona]"    # Remote sandbox execution
+uv tool install --python 3.13 "simulationlab[langchain]"  # LangChain/LangGraph agents
 
 # pipx works too:
-pipx install simulationlab
+pipx install --python 3.13 simulationlab
 ```
 
 The PyPI package is named `simulationlab`. The installed CLI command is `simlab`.
@@ -51,9 +52,9 @@ SimLab currently supports Python 3.13.
 ```bash
 git clone https://github.com/collinear-ai/simlab.git
 cd simlab/cli/simlab
-uv tool install .
+uv tool install --python 3.13 .
 # or with extras:
-uv tool install ".[daytona]"
+uv tool install --python 3.13 ".[daytona]"
 ```
 
 Then run with `simlab <command>`. To run directly from the repo without installing:
@@ -82,7 +83,7 @@ simlab env init my-env --template hr
 
 Create and list tasks in directory `./generated-tasks`
 ```bash
-simlab tasks-gen init --preset recruiting # Can go to the config.toml to setup number of tasks etc.
+simlab tasks-gen init --template recruiting # Can go to the config.toml to setup number of tasks etc.
 simlab tasks list --tasks-dir ./generated-tasks # takes 5-10 mins with the default setting, choose haiku and 2 tasks for a faster generation.
 ```
 
@@ -117,6 +118,22 @@ No `DAYTONA_API_KEY` required. First run may take several minutes while images a
 For the full walkthrough — configuration, custom agents, task generation, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md)**. For framework adapters and custom agent integration patterns, see **[Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/docs/agent-integrations.md)**.
 
 For environment-scoped tool definitions, see **[Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/docs/custom-tools.md)**.
+
+### Run a Harbor task directly
+
+If you have a single Harbor task directory, you can run it without creating a
+named SimLab environment first:
+
+```bash
+simlab tasks run --harbor ./examples/harbor/hello-world \
+  --agent-model gpt-5.2
+```
+
+This compiles the Harbor task into a generated SimLab env and local task
+bundle, then runs the normal agent + verifier flow. Add `--daytona` to run the
+generated Harbor env in Daytona instead of local Docker. Use `--keep-alive` to
+retain the generated Harbor workspace under `output/harbor_runs/` for
+inspection after the run.
 
 ## API Keys
 
@@ -178,8 +195,8 @@ api_key = "sk-..."           # API key (falls back to agent key, then provider e
 | `simlab env down <name>` | Stop and remove environment containers |
 | `simlab env seed <name>` | Seed initial data into a running environment |
 | `simlab tasks list` | List available tasks for an environment |
-| `simlab tasks run` | Run an agent against a task (auto-starts and tears down the environment) |
-| `simlab tasks-gen init` | Initialize task generation config (with presets) |
+| `simlab tasks run` | Run an agent against a task from an env, local bundle, or Harbor task directory |
+| `simlab tasks-gen init` | Initialize task generation config (with templates) |
 | `simlab tasks-gen validate` | Validate a task generation config |
 | `simlab tasks-gen run` | Generate custom tasks via the API |
 | `simlab templates list` | List available scenario templates |
