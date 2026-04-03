@@ -65,7 +65,7 @@ simlab tasks run \
   --env prime-rl-env \
   --task <task_id> \
   --tasks-dir ./generated-tasks \
-  --agent-model gpt-5.2 \
+  --agent-model gpt-4.1-mini \
   --agent-api-key "$OPENAI_API_KEY"
 ```
 

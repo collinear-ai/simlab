@@ -36,7 +36,7 @@ Train an agent model using Prime Intellect's prime-rl with trajectories collecte
   ```
 - **Verifier** configured (for scoring SimLab rollouts):
   ```bash
-  export SIMLAB_VERIFIER_MODEL="gpt-5.2"
+  export SIMLAB_VERIFIER_MODEL="gpt-4.1-mini"
   export SIMLAB_VERIFIER_PROVIDER="openai"
   export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY"
   ```
@@ -85,7 +85,7 @@ simlab tasks run \
   --env prime-rl-env \
   --task <task_id_1> <task_id_2> <task_id_3> \
   --tasks-dir ./generated-tasks \
-  --agent-model gpt-5.2 \
+  --agent-model gpt-4.1-mini \
   --agent-api-key "$OPENAI_API_KEY"
 ```
 
@@ -99,7 +99,7 @@ simlab tasks run \
   --daytona \
   --rollout-count 5 \
   --max-parallel 3 \
-  --agent-model gpt-5.2 \
+  --agent-model gpt-4.1-mini \
   --agent-api-key "$OPENAI_API_KEY"
 ```
 

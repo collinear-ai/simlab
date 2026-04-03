@@ -20,7 +20,7 @@ ROLLOUT_COUNT="${SIMLAB_ROLLOUT_COUNT:-3}"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 DATASET_DIR="${SCRIPT_DIR}/dataset"
 TASKS_DIR="${SCRIPT_DIR}/generated-tasks"
-AGENT_MODEL="${SIMLAB_AGENT_MODEL:-gpt-5.2}"
+AGENT_MODEL="${SIMLAB_AGENT_MODEL:-gpt-4.1-mini}"
 
 echo "=== Step 1: Create SimLab environment ==="
 simlab env init "${ENV_NAME}" --template "${TEMPLATE}"
@@ -70,38 +70,9 @@ python -m prime_rl_training.collect sft \
 
 echo ""
 echo "=== Step 6: Build verifiers environment ==="
-# Create the environment package for prime-rl
+# Use the already-committed environment package
 ENV_PKG_DIR="${SCRIPT_DIR}/prime-envs/simlab_tasks"
-mkdir -p "${ENV_PKG_DIR}"
-
-# Copy the environment module
-cp "${SCRIPT_DIR}/src/prime_rl_training/simlab_env.py" "${ENV_PKG_DIR}/simlab_tasks.py"
-
-cat > "${ENV_PKG_DIR}/pyproject.toml" << 'TOML'
-[project]
-name = "simlab-tasks"
-description = "SimLab task environment for prime-rl training"
-tags = ["simlab", "tool-use", "multi-turn", "train", "eval"]
-version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = [
-    "verifiers>=0.1.11",
-    "datasets",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build]
-include = ["simlab_tasks.py", "pyproject.toml"]
-
-[tool.verifiers.eval]
-num_examples = 5
-rollouts_per_example = 3
-TOML
-
-echo "Environment package created at ${ENV_PKG_DIR}"
+echo "Environment package ready at ${ENV_PKG_DIR}"
 
 echo ""
 echo "=== Step 7: Push environment to Prime Intellect hub ==="

@@ -50,7 +50,10 @@ def load_reward(verifier_dir: Path) -> float:
         # reward.json may have "reward" or "score" key
         return float(data.get("reward", data.get("score", 0.0)))
     elif reward_txt.exists():
-        return float(reward_txt.read_text().strip())
+        try:
+            return float(reward_txt.read_text().strip())
+        except ValueError:
+            return 0.0
     return 0.0
 
 
@@ -76,11 +79,6 @@ def artifacts_to_messages(artifacts: dict[str, Any]) -> list[dict[str, str]]:
                 # Include both text content and tool call info
                 tool_calls = msg["tool_calls"]
                 messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-                # Add corresponding tool results if present
-                for tc in tool_calls:
-                    call_id = tc.get("id", "")
-                    # Look for a following tool message with matching id
-                    # (handled below if tool messages follow in the list)
             elif role == "tool":
                 messages.append({
                     "role": "tool",
