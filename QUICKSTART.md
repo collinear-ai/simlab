@@ -363,7 +363,7 @@ Generate your own task definitions using the task generation pipeline:
 
 ```bash
 # Quick start with a template
-simlab tasks-gen init --template recruiting --output-dir ./taskgen
+simlab tasks-gen init --template hr --output-dir ./taskgen
 
 # Interactive wizard
 simlab tasks-gen init --output-dir ./taskgen
@@ -375,7 +375,7 @@ simlab tasks-gen validate ./taskgen/config.toml
 simlab tasks-gen run --config ./taskgen/config.toml
 ```
 
-Available templates: `recruiting`, `people_mgmt`, `coding`, `customer_support`.
+Available templates: `hr`, `coding`, `customer_support`.
 
 ---
 
