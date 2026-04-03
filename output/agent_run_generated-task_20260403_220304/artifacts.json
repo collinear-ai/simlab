@@ -1,0 +1,25 @@
+{
+  "version": "0.1",
+  "task_id": "generated-task",
+  "task": "Complete the generated task.",
+  "model": "gpt-5.2",
+  "provider": "openai",
+  "messages": [],
+  "tool_calls": [],
+  "tool_results": [],
+  "metadata": {
+    "cli_runtime": {
+      "base_url": null,
+      "api_key_provided": true,
+      "agent_import_path": null,
+      "tool_servers": {},
+      "managed_env": false,
+      "keep_alive": false
+    }
+  },
+  "final_observation": null,
+  "error": null,
+  "steps_taken": 0,
+  "max_steps": 5,
+  "created_at": "2026-04-03T22:03:04.908657+00:00"
+}

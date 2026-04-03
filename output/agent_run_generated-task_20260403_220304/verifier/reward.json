@@ -1,0 +1,11 @@
+{
+  "reward": 1.0,
+  "verifier_results": [
+    {
+      "module": "collinear.scenarios.customer_support.verifiers.generated_task",
+      "success": true,
+      "message": "ok",
+      "output": ""
+    }
+  ]
+}
