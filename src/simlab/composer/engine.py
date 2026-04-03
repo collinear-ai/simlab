@@ -7,6 +7,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import ClassVar
+from typing import TypeAlias
 
 import yaml
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import load_mcp_servers_from_env_dir
 
 DEFAULT_IMAGE_REGISTRY = "ghcr.io/collinear-ai"
+ServiceEnvironment: TypeAlias = dict[str, str] | list[str]
 
 
 def parse_template_id(template_id: str) -> tuple[str, str | None]:
@@ -101,6 +103,7 @@ class EnvConfig(BaseModel):
     name: str = "simlab-env"
     tools: list[str] = Field(default_factory=list)
     overrides: dict[str, dict[str, str]] = Field(default_factory=dict)
+    rollout_format: str | None = None
     coding: CodingConfig | None = None
     scenario_guidance_path: str | None = None
     scenario_guidance_md: str | None = None
@@ -326,9 +329,11 @@ class ComposeEngine:
                 svc["ports"] = ports
 
             # Environment
-            env = dict(svc_def.environment)
-            env.update(self._get_service_env(tool.name, svc_name, config))
-            env.update(overrides)
+            env = self._merge_service_environment(
+                svc_def.environment,
+                self._get_service_env(tool.name, svc_name, config),
+                overrides,
+            )
             if env:
                 svc["environment"] = env
 
@@ -379,9 +384,11 @@ class ComposeEngine:
             if svc_def.build:
                 svc["build"] = self._serialize_build(svc_def.build)
 
-            env = dict(svc_def.environment)
-            env.update(self._get_service_env(tool_name, svc_name, config))
-            env.update(overrides)
+            env = self._merge_service_environment(
+                svc_def.environment,
+                self._get_service_env(tool_name, svc_name, config),
+                overrides,
+            )
             if env:
                 svc["environment"] = env
 
@@ -537,6 +544,37 @@ class ComposeEngine:
             return build
         return build.model_dump(exclude_none=True)
 
+    @staticmethod
+    def _merge_service_environment(
+        raw_env: ServiceEnvironment,
+        generated_env: dict[str, str],
+        overrides: dict[str, str],
+    ) -> ServiceEnvironment:
+        if isinstance(raw_env, dict):
+            merged = dict(raw_env)
+            merged.update(generated_env)
+            merged.update(overrides)
+            return merged
+
+        explicit_env: dict[str, str] = {}
+        passthrough_env: list[str] = []
+        for item in raw_env:
+            entry = item.strip()
+            if not entry:
+                continue
+            if "=" in entry:
+                key, value = entry.split("=", 1)
+                explicit_env[key] = value
+                continue
+            if entry not in passthrough_env:
+                passthrough_env.append(entry)
+
+        for key, value in {**generated_env, **overrides}.items():
+            explicit_env[key] = value
+            passthrough_env = [entry for entry in passthrough_env if entry != key]
+
+        return [*passthrough_env, *(f"{key}={value}" for key, value in explicit_env.items())]
+
     def _collect_env_vars(
         self,
         tool: ToolDefinition,
@@ -549,10 +587,27 @@ class ComposeEngine:
                 env_var_descriptions[req.name] = req.description
         # Scan service environments for ${VAR} references
         for svc_def in tool.services.values():
-            for val in svc_def.environment.values():
+            for val in self._iter_environment_values(svc_def.environment):
                 for match in re.findall(r"\$\{(\w+)\}", val):
                     if match not in env_vars:
                         env_vars[match] = ""
+
+    @staticmethod
+    def _iter_environment_values(raw_env: ServiceEnvironment) -> list[str]:
+        if isinstance(raw_env, dict):
+            return list(raw_env.values())
+
+        values: list[str] = []
+        for item in raw_env:
+            entry = item.strip()
+            if not entry:
+                continue
+            if "=" in entry:
+                _, value = entry.split("=", 1)
+                values.append(value)
+            else:
+                values.append(f"${{{entry}}}")
+        return values
 
     def _get_service_env(self, tool_name: str, svc_name: str, config: EnvConfig) -> dict[str, str]:
         """Return compose-time env vars derived from environment config."""

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import itertools
 import json
+import queue
 import random
+import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from importlib import import_module
@@ -454,28 +457,37 @@ def _extract_samples(resp: Any) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_BUILDKIT_STEP_RE = re.compile(r"^#\d+\s+\[(?P<target>[^\]]+)\]\s*(?P<rest>.*)$")
+_COMPOSE_ACTIONS = {
+    "pulling",
+    "pulled",
+    "building",
+    "creating",
+    "created",
+    "starting",
+    "started",
+    "recreated",
+    "running",
+    "waiting",
+}
 
-_WAITING_MESSAGES = [
-    "Warming up containers...",
-    "Waking up the databases...",
-    "Convincing MongoDB to cooperate...",
-    "Brewing some coffee while we wait...",
-    "Teaching containers to talk to each other...",
-    "Reticulating splines...",
-    "Aligning the bits...",
-    "Herding microservices...",
-    "Almost there, probably...",
-    "Good things come to those who wait...",
-    "Negotiating with Docker...",
-    "Spinning up your workspace...",
-    "Connecting the dots...",
-    "Loading the good stuff...",
-    "Building something beautiful...",
-]
+
+def _compose_service_names(compose_file: Path) -> set[str]:
+    """Return compose service names declared in *compose_file*."""
+    try:
+        compose_data = yaml.safe_load(compose_file.read_text())
+    except (yaml.YAMLError, OSError):
+        return set()
+    services = compose_data.get("services") if isinstance(compose_data, dict) else None
+    if not isinstance(services, dict):
+        return set()
+    return {str(name) for name in services}
 
 
 def _local_health_fetcher(compose_file: Path) -> Callable[[], dict[str, str]]:
     """Return a callable that fetches health from local docker compose."""
+    expected_services = _compose_service_names(compose_file)
 
     def _fetch() -> dict[str, str]:
         result = subprocess.run(
@@ -494,7 +506,7 @@ def _local_health_fetcher(compose_file: Path) -> Callable[[], dict[str, str]]:
         )
         if result.returncode != 0:
             return {}
-        return parse_ps_output(result.stdout)
+        return parse_ps_output(result.stdout, expected_services=expected_services)
 
     return _fetch
 
@@ -533,6 +545,22 @@ def _render_status_line(
     return "".join(parts)
 
 
+def _render_simple_status_line(
+    spinner_frame: str,
+    message: str,
+    elapsed: float,
+) -> str:
+    """Render a single spinner line for long-running subprocess work."""
+    elapsed_str = f"{int(elapsed)}s"
+    return "".join(
+        [
+            click.style(f" {spinner_frame} ", fg="cyan"),
+            click.style(message, fg="white"),
+            click.style(f"  {elapsed_str}", fg="bright_black"),
+        ]
+    )
+
+
 def _render_service_detail(
     services: dict[str, str],
 ) -> list[str]:
@@ -566,25 +594,14 @@ def _poll_health(
     """Poll services with an animated status display."""
     start = time.time()
     spinner = itertools.cycle(_SPINNER_FRAMES)
-    msg_index = 0
-    current_message = _WAITING_MESSAGES[0]
-    last_msg_change = start
-    msg_interval = 3.0
     lines_printed = 0
     poll_interval = 2.0
     consecutive_ready_polls = 0
 
-    shuffled_messages = list(_WAITING_MESSAGES)
-    random.shuffle(shuffled_messages)
-
     while time.time() - start < timeout:
         elapsed = time.time() - start
         services = health_fetcher()
-
-        if time.time() - last_msg_change > msg_interval:
-            msg_index = (msg_index + 1) % len(shuffled_messages)
-            current_message = shuffled_messages[msg_index]
-            last_msg_change = time.time()
+        current_message = _health_wait_message(services)
 
         if lines_printed > 0:
             _clear_lines(lines_printed)
@@ -651,6 +668,193 @@ def _poll_health(
         click.echo(line)
     click.echo()
     raise SystemExit(1)
+
+
+def _run_compose_up_local(
+    up_cmd: list[str],
+    *,
+    has_builds: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``docker compose up`` with an animated progress display."""
+    start = time.time()
+    spinner = itertools.cycle(_SPINNER_FRAMES)
+    current_message = "Starting docker compose build..." if has_builds else "Starting services..."
+    poll_interval = 0.2
+    lines_printed = 0
+
+    process = subprocess.Popen(
+        up_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    progress_lines: queue.Queue[str] = queue.Queue()
+    reader_threads = [
+        threading.Thread(
+            target=_drain_subprocess_stream,
+            args=(process.stdout, stdout_chunks, progress_lines),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_drain_subprocess_stream,
+            args=(process.stderr, stderr_chunks, progress_lines),
+            daemon=True,
+        ),
+    ]
+    for reader_thread in reader_threads:
+        reader_thread.start()
+
+    while process.poll() is None:
+        now = time.time()
+        progress_message = _latest_compose_progress_message(progress_lines)
+        if progress_message is not None:
+            current_message = progress_message
+
+        if lines_printed > 0:
+            _clear_lines(lines_printed)
+
+        click.echo(_render_simple_status_line(next(spinner), current_message, now - start))
+        click.echo()
+        lines_printed = 2
+        time.sleep(poll_interval)
+
+    process.wait()
+    for reader_thread in reader_threads:
+        reader_thread.join()
+    if lines_printed > 0:
+        _clear_lines(lines_printed)
+
+    return subprocess.CompletedProcess(
+        args=up_cmd,
+        returncode=process.returncode,
+        stdout="".join(stdout_chunks),
+        stderr="".join(stderr_chunks),
+    )
+
+
+def _drain_subprocess_stream(
+    stream: Any,
+    sink: list[str],
+    progress_lines: queue.Queue[str] | None = None,
+) -> None:
+    """Drain a subprocess stream in the background to avoid pipe backpressure."""
+    if stream is None:
+        return
+    remainder = ""
+    try:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            sink.append(chunk)
+            if progress_lines is None:
+                continue
+            remainder += chunk
+            lines = remainder.splitlines(keepends=True)
+            remainder = lines.pop() if lines and not lines[-1].endswith(("\n", "\r")) else ""
+            for line in lines:
+                progress_lines.put(line)
+        if progress_lines is not None and remainder.strip():
+            progress_lines.put(remainder)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+
+def _latest_compose_progress_message(progress_lines: queue.Queue[str]) -> str | None:
+    """Return the most recent user-facing compose progress message, if any."""
+    latest: str | None = None
+    while True:
+        try:
+            raw_line = progress_lines.get_nowait()
+        except queue.Empty:
+            return latest
+        message = _summarize_compose_progress(raw_line)
+        if message is not None:
+            latest = message
+
+
+def _summarize_compose_progress(raw_line: str) -> str | None:
+    """Convert raw compose output into a concise progress message."""
+    text = _normalize_compose_output_line(raw_line)
+    if not text:
+        return None
+
+    if text.lower().startswith("attaching to "):
+        return "Attaching to container logs..."
+
+    action_parts = text.rsplit(" ", maxsplit=1)
+    if len(action_parts) == 2 and action_parts[1].lower() in _COMPOSE_ACTIONS:
+        service, action = action_parts
+        return f"{action.capitalize()} {service}..."
+
+    buildkit_match = _BUILDKIT_STEP_RE.match(text)
+    if buildkit_match:
+        target = buildkit_match.group("target")
+        rest = buildkit_match.group("rest").strip()
+        target_parts = target.split()
+        service = target_parts[0]
+        step = target_parts[1] if len(target_parts) > 1 and "/" in target_parts[1] else None
+        if rest.endswith(" DONE"):
+            rest = rest.removesuffix(" DONE").strip()
+        if not rest:
+            return f"Building {service}..."
+        prefix = f"Building {service}"
+        if step:
+            prefix += f" ({step})"
+        return f"{prefix}: {rest}"
+
+    if text.startswith("=> "):
+        return text[3:]
+
+    interesting_terms = (
+        "pull",
+        "build",
+        "create",
+        "start",
+        "extract",
+        "export",
+        "resolve",
+        "load",
+        "download",
+    )
+    if any(term in text.lower() for term in interesting_terms):
+        return text
+    return None
+
+
+def _normalize_compose_output_line(raw_line: str) -> str:
+    """Strip ANSI escapes and collapse whitespace in compose output."""
+    without_ansi = _ANSI_ESCAPE_RE.sub("", raw_line).replace("\r", " ").strip()
+    return " ".join(without_ansi.split())
+
+
+def _health_wait_message(services: dict[str, str]) -> str:
+    """Return a deterministic health-poll message from current service state."""
+    if not services:
+        return "Waiting for docker compose status..."
+
+    starting = sorted(name for name, status in services.items() if status == "starting")
+    unknown = sorted(name for name, status in services.items() if status == "unknown")
+
+    if starting:
+        if len(starting) == 1:
+            return f"Waiting for {starting[0]} health check..."
+        return f"Waiting for {len(starting)} services to become healthy..."
+
+    if unknown:
+        if len(unknown) == 1:
+            return f"Reading status for {unknown[0]}..."
+        return f"Reading status for {len(unknown)} services..."
+
+    ready = sum(1 for status in services.values() if status in ("healthy", "running"))
+    if ready == len(services):
+        return "Confirming services are stable..."
+
+    return "Waiting for services to start..."
 
 
 # ---------------------------------------------------------------------------
@@ -874,7 +1078,7 @@ def ensure_env_started_local(
     up_cmd = ["docker", "compose", "-f", str(compose_file), "up", "-d"]
     if has_builds:
         up_cmd.append("--build")
-    result = subprocess.run(up_cmd, capture_output=True, text=True)
+    result = _run_compose_up_local(up_cmd, has_builds=has_builds)
     if result.returncode != 0:
         click.echo(
             click.style("Failed to start services:", fg="red"),
@@ -898,6 +1102,7 @@ def ensure_env_started_daytona(
     *,
     daytona_api_key: str | None = None,
     verbose: bool = False,
+    progress: StepProgress | None = None,
 ) -> dict[str, str]:
     """Create a Daytona sandbox, upload compose, start services, health poll.
 
@@ -912,8 +1117,8 @@ def ensure_env_started_daytona(
     runner = _get_daytona_runner(daytona_api_key=daytona_api_key)
     tool_ports = _get_tool_ports(config, config_path)
     preseed_svc_names = _get_preseed_service_names(config, config_path)
-    progress = StepProgress(verbose=verbose)
-    reporter = StepProgressReporter(progress)
+    progress_instance = progress or StepProgress(verbose=verbose)
+    reporter = StepProgressReporter(progress_instance)
 
     endpoints = runner.up(
         env_dir, tool_ports, preseed_svc_names=preseed_svc_names, reporter=reporter
@@ -992,7 +1197,12 @@ def env_down_local(env_dir: Path) -> None:
     click.echo(click.style("Environment stopped.", fg="green"))
 
 
-def env_down_daytona(env_dir: Path, daytona_api_key: str | None = None) -> None:
+def env_down_daytona(
+    env_dir: Path,
+    daytona_api_key: str | None = None,
+    progress: StepProgress | None = None,
+) -> None:
     """Delete the Daytona sandbox for this environment."""
     runner = _get_daytona_runner(daytona_api_key=daytona_api_key)
-    runner.down(env_dir)
+    reporter = StepProgressReporter(progress) if progress is not None else None
+    runner.down(env_dir, reporter=reporter)

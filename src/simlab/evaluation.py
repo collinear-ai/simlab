@@ -7,11 +7,17 @@ import json
 import statistics
 from collections import Counter
 from collections import defaultdict
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from simlab.runtime.adapters.harbor.verifier import build_harbor_test_verifier_results
+
 RUBRIC_PASS_THRESHOLD = 0.6
 CRITERIA_CONTAINER_KEYS = ("results", "criteria_results", "checks")
+NATIVE_ROLLOUT_FILENAME = "artifacts.json"
+ATIF_ROLLOUT_RELATIVE_PATH = Path("agent") / "trajectory.json"
 
 
 class EvaluationError(RuntimeError):
@@ -97,7 +103,8 @@ def load_rollout_set(path: Path, *, warnings: list[str]) -> dict[str, Any]:
     rollout_inputs = collect_rollout_inputs(resolved_path, warnings=warnings)
     if not rollout_inputs:
         raise EvaluationError(
-            f"No rollout directories found under {resolved_path}. Expected artifacts.json files."
+            f"No rollout directories found under {resolved_path}. "
+            f"Expected {NATIVE_ROLLOUT_FILENAME} or {ATIF_ROLLOUT_RELATIVE_PATH.as_posix()}."
         )
 
     rollouts = []
@@ -156,7 +163,11 @@ def collect_run_set_rollouts(path: Path, *, warnings: list[str]) -> list[dict[st
         if not child.is_dir() or not child.name.startswith("rollout_"):
             continue
         if not is_rollout_dir(child):
-            warnings.append(f"Skipping {child}: missing artifacts.json")
+            warnings.append(
+                "Skipping "
+                f"{child}: missing {NATIVE_ROLLOUT_FILENAME} or "
+                f"{ATIF_ROLLOUT_RELATIVE_PATH.as_posix()}"
+            )
             continue
 
         rollout_input: dict[str, Any] = {
@@ -178,8 +189,8 @@ def load_rollout(
     summary_entry: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Parse one rollout directory into the report shape."""
-    artifacts = load_json_file(path / "artifacts.json", warnings=warnings, required=True)
-    if not isinstance(artifacts, dict):
+    artifacts, atif_trajectory = load_rollout_artifacts(path, warnings=warnings)
+    if artifacts is None:
         return None
 
     reward_path = path / "verifier" / "reward.json"
@@ -193,13 +204,13 @@ def load_rollout(
         reward_payload = load_json_file(reward_path, warnings=warnings, required=False)
     if reward_payload is not None and not isinstance(reward_payload, dict):
         reward_payload = None
-    reward_payload = reward_payload or {}
+    reward_payload = reward_payload or extract_reward_payload_from_atif(atif_trajectory)
 
     raw_verifier_results = reward_payload.get("verifier_results")
     verifier_results = (
         [entry for entry in raw_verifier_results if isinstance(entry, dict)]
         if isinstance(raw_verifier_results, list)
-        else []
+        else build_harbor_test_verifier_results(reward_payload)
     )
     criteria, reward_model = extract_verifier_views(
         reward_payload,
@@ -237,7 +248,7 @@ def load_rollout(
             error=error,
         ),
         "error": error,
-        "metrics": extract_metrics(metadata, summary_entry),
+        "metrics": extract_metrics(metadata, summary_entry, atif_trajectory=atif_trajectory),
         "criteria": criteria,
         "reward_model": reward_model,
         "tool_calls": build_tool_calls(
@@ -308,6 +319,8 @@ def is_reward_model_result(source: str, parsed_output: Any) -> bool:
     ):
         return True
     if not isinstance(parsed_output, dict):
+        return False
+    if any(isinstance(parsed_output.get(key), list) for key in CRITERIA_CONTAINER_KEYS):
         return False
     return any(
         key in parsed_output for key in ("score", "dimension_scores", "verdict", "raw_response")
@@ -438,6 +451,8 @@ def brief_rollout(rollout: dict[str, Any]) -> dict[str, Any]:
 def extract_metrics(
     metadata: dict[str, Any],
     summary_entry: dict[str, Any] | None,
+    *,
+    atif_trajectory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Extract cost, token, and timing metrics from rollout metadata."""
     rollout_metrics = metadata.get("rollout_metrics")
@@ -456,18 +471,24 @@ def extract_metrics(
     if not isinstance(cost, dict):
         cost = {}
 
+    final_metrics = extract_atif_final_metrics(atif_trajectory)
+
     prompt_tokens = safe_int(
         token_usage.get("prompt_tokens_total")
         or token_usage.get("prompt_tokens")
         or metadata.get("prompt_tokens_total")
+        or final_metrics.get("total_prompt_tokens")
     )
     completion_tokens = safe_int(
         token_usage.get("completion_tokens_total")
         or token_usage.get("completion_tokens")
         or metadata.get("completion_tokens_total")
+        or final_metrics.get("total_completion_tokens")
     )
     total_tokens = safe_int(
-        token_usage.get("total_tokens_total") or metadata.get("total_tokens_total")
+        token_usage.get("total_tokens_total")
+        or metadata.get("total_tokens_total")
+        or final_metrics.get("total_tokens")
     )
     if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
         total_tokens = prompt_tokens + completion_tokens
@@ -477,9 +498,12 @@ def extract_metrics(
         or timing.get("agent_turn_seconds_total")
         or timing.get("elapsed_seconds_total")
         or (summary_entry.get("duration") if summary_entry else None)
+        or extract_atif_duration_seconds(atif_trajectory)
     )
     estimated_cost_usd = safe_float(
-        cost.get("estimated_cost_usd") or metadata.get("estimated_cost_usd")
+        cost.get("estimated_cost_usd")
+        or metadata.get("estimated_cost_usd")
+        or final_metrics.get("total_cost_usd")
     )
 
     return {
@@ -1930,9 +1954,201 @@ def load_json_file(
         return None
 
 
+def load_rollout_artifacts(
+    path: Path,
+    *,
+    warnings: list[str],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Load a native rollout or normalize an ATIF rollout into native shape."""
+    native_path = path / NATIVE_ROLLOUT_FILENAME
+    native_payload = (
+        load_json_file(native_path, warnings=warnings, required=False)
+        if native_path.is_file()
+        else None
+    )
+    if isinstance(native_payload, dict):
+        return native_payload, None
+
+    atif_path = path / ATIF_ROLLOUT_RELATIVE_PATH
+    atif_payload = (
+        load_json_file(atif_path, warnings=warnings, required=False)
+        if atif_path.is_file()
+        else None
+    )
+    if isinstance(atif_payload, dict):
+        return atif_to_artifacts(atif_payload), atif_payload
+
+    if not native_path.is_file() and not atif_path.is_file():
+        warnings.append(
+            "Skipping "
+            f"{path}: missing {NATIVE_ROLLOUT_FILENAME} or "
+            f"{ATIF_ROLLOUT_RELATIVE_PATH.as_posix()}"
+        )
+    return None, None
+
+
+def atif_to_artifacts(trajectory: dict[str, Any]) -> dict[str, Any]:
+    """Normalize an ATIF trajectory into the subset of native artifacts eval uses."""
+    simlab_extra = extract_atif_simlab_extra(trajectory)
+    agent = trajectory.get("agent")
+    agent_dict = agent if isinstance(agent, dict) else {}
+    agent_extra = agent_dict.get("extra")
+    agent_extra_dict = agent_extra if isinstance(agent_extra, dict) else {}
+    metadata = simlab_extra.get("metadata")
+    metadata_dict = metadata if isinstance(metadata, dict) else {}
+    tool_calls, tool_results = extract_atif_tool_artifacts(trajectory.get("steps"))
+
+    return {
+        "version": coerce_str(agent_dict.get("version")) or "0.1",
+        "task_id": coerce_str(simlab_extra.get("task_id")) or "",
+        "task": coerce_str(simlab_extra.get("task")) or "",
+        "model": coerce_str(agent_dict.get("model_name")),
+        "provider": coerce_str(agent_extra_dict.get("provider")),
+        "messages": [],
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "metadata": metadata_dict,
+        "final_observation": coerce_str(simlab_extra.get("final_observation")),
+        "error": coerce_str(simlab_extra.get("run_error")),
+        "steps_taken": safe_int(simlab_extra.get("steps_taken")) or len(tool_calls),
+        "max_steps": safe_int(simlab_extra.get("max_steps")),
+        "created_at": coerce_str(simlab_extra.get("created_at")),
+    }
+
+
+def extract_atif_simlab_extra(trajectory: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the embedded SimLab metadata block from an ATIF trajectory."""
+    if not isinstance(trajectory, dict):
+        return {}
+    extra = trajectory.get("extra")
+    extra_dict = extra if isinstance(extra, dict) else {}
+    simlab = extra_dict.get("simlab")
+    return simlab if isinstance(simlab, dict) else {}
+
+
+def extract_reward_payload_from_atif(trajectory: dict[str, Any] | None) -> dict[str, Any]:
+    """Fallback reward payload for ATIF rollouts when reward.json is absent."""
+    simlab_extra = extract_atif_simlab_extra(trajectory)
+    verifier = simlab_extra.get("verifier")
+    verifier_dict = verifier if isinstance(verifier, dict) else {}
+    payload = verifier_dict.get("payload")
+    if isinstance(payload, dict):
+        return payload
+
+    reward = safe_float(verifier_dict.get("reward"))
+    if reward is None:
+        return {}
+    return {"reward": reward}
+
+
+def extract_atif_tool_artifacts(
+    raw_steps: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Flatten ATIF step tool calls into native-style tool call/result arrays."""
+    steps = raw_steps if isinstance(raw_steps, list) else []
+    tool_calls: list[dict[str, Any]] = []
+    tool_results: list[dict[str, Any]] = []
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        call_items = step.get("tool_calls")
+        if not isinstance(call_items, list):
+            continue
+
+        observation = step.get("observation")
+        observation_dict = observation if isinstance(observation, dict) else {}
+        raw_results = observation_dict.get("results")
+        result_items = raw_results if isinstance(raw_results, list) else []
+        results_by_call_id: dict[str, dict[str, Any]] = {}
+        for result in result_items:
+            if not isinstance(result, dict):
+                continue
+            call_id = coerce_str(result.get("source_call_id"))
+            if call_id:
+                results_by_call_id[call_id] = result
+
+        for call in call_items:
+            if not isinstance(call, dict):
+                continue
+            call_id = coerce_str(call.get("tool_call_id")) or f"call_{len(tool_calls) + 1}"
+            call_extra = call.get("extra")
+            call_extra_dict = call_extra if isinstance(call_extra, dict) else {}
+            matched_result = results_by_call_id.get(call_id)
+            result_extra = matched_result.get("extra") if isinstance(matched_result, dict) else None
+            result_extra_dict = result_extra if isinstance(result_extra, dict) else {}
+
+            tool_server = coerce_str(call_extra_dict.get("tool_server")) or coerce_str(
+                result_extra_dict.get("tool_server")
+            )
+            tool_name = coerce_str(call.get("function_name")) or coerce_str(
+                result_extra_dict.get("tool_name")
+            )
+            arguments = call.get("arguments")
+            parameters = arguments if isinstance(arguments, dict) else {}
+
+            tool_calls.append(
+                {
+                    "tool_server": tool_server or "unknown",
+                    "tool_name": tool_name or "unknown",
+                    "parameters": parameters,
+                }
+            )
+
+            tool_result: dict[str, Any] = {}
+            raw_observation = result_extra_dict.get("raw_observation")
+            if raw_observation is not None:
+                tool_result["observation"] = raw_observation
+            else:
+                content = (
+                    coerce_str(matched_result.get("content"))
+                    if isinstance(matched_result, dict)
+                    else None
+                )
+                if content is not None:
+                    tool_result["observation"] = {"text": content}
+
+            is_error = result_extra_dict.get("is_error")
+            if isinstance(is_error, bool):
+                tool_result["is_error"] = is_error
+            tool_results.append(tool_result)
+
+    return tool_calls, tool_results
+
+
+def extract_atif_final_metrics(trajectory: dict[str, Any] | None) -> dict[str, Any]:
+    """Return ATIF final metrics when present."""
+    if not isinstance(trajectory, dict):
+        return {}
+    final_metrics = trajectory.get("final_metrics")
+    return final_metrics if isinstance(final_metrics, dict) else {}
+
+
+def extract_atif_duration_seconds(trajectory: dict[str, Any] | None) -> float | None:
+    """Estimate ATIF duration from the first and last step timestamps."""
+    if not isinstance(trajectory, dict):
+        return None
+    raw_steps = trajectory.get("steps")
+    if not isinstance(raw_steps, list):
+        return None
+
+    timestamps = [
+        parsed
+        for step in raw_steps
+        if isinstance(step, dict)
+        if isinstance(step.get("timestamp"), str)
+        if (parsed := parse_iso8601_timestamp(step["timestamp"])) is not None
+    ]
+    if len(timestamps) < 2:
+        return None
+    return max((max(timestamps) - min(timestamps)).total_seconds(), 0.0)
+
+
 def is_rollout_dir(path: Path) -> bool:
     """Return whether a directory looks like a rollout directory."""
-    return path.is_dir() and (path / "artifacts.json").is_file()
+    return path.is_dir() and (
+        (path / NATIVE_ROLLOUT_FILENAME).is_file() or (path / ATIF_ROLLOUT_RELATIVE_PATH).is_file()
+    )
 
 
 def is_run_set_dir(path: Path) -> bool:
@@ -1964,6 +2180,16 @@ def parse_json_blob(raw_text: str | None) -> Any:
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError:
+        return None
+
+
+def parse_iso8601_timestamp(raw_text: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp into UTC."""
+    if not raw_text:
+        return None
+    try:
+        return datetime.fromisoformat(raw_text).astimezone(timezone.utc)
+    except ValueError:
         return None
 
 

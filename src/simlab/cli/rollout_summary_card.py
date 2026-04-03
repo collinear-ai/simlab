@@ -153,7 +153,26 @@ def print_parallel_rollout_summary_card(
             format_duration(float(getattr(r, "duration_seconds", 0.0))),
         )
 
-    body = Group(fields, Text(""), table)
+    error_rows = [
+        (
+            str(getattr(r, "rollout_idx", "?")),
+            compact(str(getattr(r, "error", "")), width=120),
+        )
+        for r in results
+        if getattr(r, "error", None)
+    ]
+    error_table = None
+    if error_rows:
+        error_table = Table(box=box.SIMPLE, show_header=True, header_style="bold", padding=(0, 1))
+        error_table.add_column("#", justify="right", no_wrap=True)
+        error_table.add_column("Error", overflow="fold")
+        for idx, message in error_rows[:10]:
+            error_table.add_row(idx, message)
+
+    if error_table:
+        body = Group(fields, Text(""), table, Text(""), error_table)
+    else:
+        body = Group(fields, Text(""), table)
     panel = Panel(
         body,
         box=box.SQUARE,

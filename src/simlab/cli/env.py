@@ -931,7 +931,12 @@ def _up_daytona(
     t0 = time.time()
 
     endpoints = ensure_env_started_daytona(
-        out_dir, config, config_path, daytona_api_key=daytona_api_key, verbose=verbose
+        out_dir,
+        config,
+        config_path,
+        daytona_api_key=daytona_api_key,
+        verbose=verbose,
+        progress=progress,
     )
 
     with progress.step("Environment seeded") as ctx:

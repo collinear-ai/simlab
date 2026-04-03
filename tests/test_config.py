@@ -84,6 +84,17 @@ def test_load_global_config_partial_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert cfg.scenario_manager_api_url == "https://api.example.com"
 
 
+def test_load_global_config_tasks_section(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Tasks rollout format is loaded from the tasks config section."""
+    monkeypatch.delenv("SIMLAB_TASKS_ROLLOUT_FORMAT", raising=False)
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[tasks]\nrollout_format = "ATIF"\n')
+
+    cfg = load_global_config(config_file_path=str(config_file), cli_overrides=None)
+
+    assert cfg.tasks_rollout_format == "atif"
+
+
 def test_load_global_config_missing_file_uses_no_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

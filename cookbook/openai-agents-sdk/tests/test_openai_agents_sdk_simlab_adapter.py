@@ -59,8 +59,12 @@ def test_simlab_agent_records_metadata_and_final_output(monkeypatch) -> None:
         "tool_names": ["email-env__search_emails", "demo__ping"],
     }
     assert artifacts.final_observation == "final answer"
-    assert artifacts.messages[0] == {"role": "user", "content": "triage inbox"}
-    assert artifacts.messages[-1] == {"role": "assistant", "content": "final answer"}
+    assert artifacts.messages[0]["role"] == "user"
+    assert artifacts.messages[0]["content"] == "triage inbox"
+    assert isinstance(artifacts.messages[0]["timestamp"], str)
+    assert artifacts.messages[-1]["role"] == "assistant"
+    assert artifacts.messages[-1]["content"] == "final answer"
+    assert isinstance(artifacts.messages[-1]["timestamp"], str)
 
 
 def test_simlab_agent_errors_on_empty_final_output(monkeypatch) -> None:

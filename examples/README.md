@@ -7,6 +7,7 @@ This directory contains small, copyable examples for SimLab features. It is not 
 | Path | Purpose |
 |------|---------|
 | [custom-cli-tools/](custom-cli-tools/) | Example coding environment with custom CLIs, mounted fixtures, a local task, and a verifier. |
+| [harbor/](harbor/) | Minimal Harbor tasks that can be run with `simlab tasks run --harbor`. |
 | [mcp-servers-url-only.json](mcp-servers-url-only.json) | Minimal URL-based MCP config. |
 | [mcp-servers-command-only.json](mcp-servers-command-only.json) | Minimal command-based MCP config with an API-key env var. |
 | [mcp-servers-mixed.json](mcp-servers-mixed.json) | Minimal mixed MCP config. |

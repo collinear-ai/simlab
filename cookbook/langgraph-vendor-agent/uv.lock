@@ -1640,6 +1640,7 @@ dependencies = [
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.149.0" },
+    { name = "fastapi", marker = "extra == 'npc'", specifier = ">=0.100.0" },
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
     { name = "langgraph", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
     { name = "litellm", specifier = ">=1.80.0" },
@@ -1652,8 +1653,9 @@ requires-dist = [
     { name = "requests", specifier = ">=2.28" },
     { name = "rich", specifier = ">=13.0" },
     { name = "tomli-w", specifier = ">=1.0" },
+    { name = "uvicorn", marker = "extra == 'npc'", specifier = ">=0.20.0" },
 ]
-provides-extras = ["daytona", "langchain", "openai-agents"]
+provides-extras = ["npc", "daytona", "langchain", "openai-agents"]
 
 [package.metadata.requires-dev]
 dev = [

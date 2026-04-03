@@ -91,13 +91,13 @@ def _get_daytona(api_key: str | None = None):  # noqa: ANN202
 
 def _prepare_compose_for_remote(
     compose_dir: Path,
-) -> tuple[bytes, dict[str, tuple[Path, str]]]:
+) -> tuple[bytes, dict[str, tuple[Path, str, str | None]]]:
     """Strip local build contexts and collect contexts to build remotely."""
     compose_path = compose_dir / "docker-compose.yml"
     compose_data = yaml.safe_load(compose_path.read_text())
     services = compose_data.get("services", {}) if isinstance(compose_data, dict) else {}
 
-    build_contexts: dict[str, tuple[Path, str]] = {}
+    build_contexts: dict[str, tuple[Path, str, str | None]] = {}
     compose_root = compose_dir.resolve()
     for service_name, service in services.items():
         if not isinstance(service, dict):
@@ -126,7 +126,12 @@ def _prepare_compose_for_remote(
         build = service.pop("build", None)
         if build is None:
             continue
+        dockerfile: str | None = None
         build_context = build.get("context") if isinstance(build, dict) else build
+        if isinstance(build, dict):
+            raw_dockerfile = build.get("dockerfile")
+            if isinstance(raw_dockerfile, str):
+                dockerfile = raw_dockerfile
         if not isinstance(build_context, str):
             continue
 
@@ -143,7 +148,7 @@ def _prepare_compose_for_remote(
         image_tag = str(service.get("image", f"{service_name}:latest"))
         service["image"] = image_tag
         if context_path.is_dir():
-            build_contexts[service_name] = (context_path, image_tag)
+            build_contexts[service_name] = (context_path, image_tag, dockerfile)
         else:
             click.echo(
                 click.style(
@@ -159,6 +164,19 @@ def _prepare_compose_for_remote(
         sort_keys=False,
     ).encode()
     return compose_bytes, build_contexts
+
+
+def _compose_service_names(compose_dir: Path) -> set[str]:
+    """Return compose service names declared in the local compose bundle."""
+    compose_path = compose_dir / "docker-compose.yml"
+    try:
+        compose_data = yaml.safe_load(compose_path.read_text())
+    except (yaml.YAMLError, OSError):
+        return set()
+    services = compose_data.get("services") if isinstance(compose_data, dict) else None
+    if not isinstance(services, dict):
+        return set()
+    return {str(name) for name in services}
 
 
 def _upload_directory(sandbox: Any, local_dir: Path, remote_dir: str) -> None:  # noqa: ANN401
@@ -203,6 +221,22 @@ def _upload_compose_bundle(sandbox: Any, compose_dir: Path) -> None:  # noqa: AN
     )
     if resp.exit_code != 0:
         raise RuntimeError(f"Failed to extract bundle tarball: {resp.result}")
+
+
+def _collect_compose_debug_output(sandbox: Any) -> str:  # noqa: ANN401
+    """Best-effort docker compose diagnostics from the sandbox."""
+    sections: list[str] = []
+    commands = [
+        ("docker compose ps --all", "Compose status"),
+        ("docker compose logs --no-color --tail=200", "Compose logs"),
+    ]
+    for command, title in commands:
+        with contextlib.suppress(Exception):
+            resp = sandbox.process.exec(command, cwd=_COMPOSE_DIR, timeout=120)
+            output = str(getattr(resp, "result", "") or "").strip()
+            if getattr(resp, "exit_code", 1) == 0 and output:
+                sections.append(f"{title}:\n{output}")
+    return "\n\n".join(sections)
 
 
 def _run_profiled_services_in_sandbox(
@@ -262,6 +296,7 @@ def _ensure_docker_daemon_ready_in_sandbox(
     sandbox: Any,  # noqa: ANN401
     *,
     log_prefix: str = "",
+    quiet: bool = False,
 ) -> None:
     """Wait for the sandbox Docker daemon and start it manually if needed."""
     prefix = f"{log_prefix} " if log_prefix else ""
@@ -269,7 +304,8 @@ def _ensure_docker_daemon_ready_in_sandbox(
     with contextlib.suppress(Exception):
         sandbox.process.create_session("init")
 
-    click.echo(f"{prefix}Waiting for Docker daemon...")
+    if not quiet:
+        click.echo(f"{prefix}Waiting for Docker daemon...")
     daemon_ready = False
     resp = None
     for attempt in range(20):
@@ -279,15 +315,17 @@ def _ensure_docker_daemon_ready_in_sandbox(
             timeout=5,
         )
         if resp.exit_code == 0:
-            click.echo(f"{prefix}Docker daemon ready.")
+            if not quiet:
+                click.echo(f"{prefix}Docker daemon ready.")
             daemon_ready = True
             break
-        if attempt == 0:
+        if attempt == 0 and not quiet:
             click.echo(f"{prefix}  Docker daemon still starting; retrying...")
         time.sleep(3)
 
     if not daemon_ready:
-        click.echo(f"{prefix}Attempting to start Docker daemon manually...")
+        if not quiet:
+            click.echo(f"{prefix}Attempting to start Docker daemon manually...")
         sandbox.process.execute_session_command(
             "init",
             SessionExecuteRequest(command="nohup dockerd &", run_async=True),
@@ -299,7 +337,8 @@ def _ensure_docker_daemon_ready_in_sandbox(
                 timeout=5,
             )
             if resp.exit_code == 0:
-                click.echo(f"{prefix}Docker daemon ready (manual start).")
+                if not quiet:
+                    click.echo(f"{prefix}Docker daemon ready (manual start).")
                 daemon_ready = True
                 break
             time.sleep(3)
@@ -347,6 +386,8 @@ def setup_sandbox_environment(
     tool_ports: dict[str, int],
     preseed_svc_names: list[str] | None = None,
     log_prefix: str = "",
+    *,
+    quiet: bool = False,
 ) -> dict[str, str]:
     """Set up a Daytona sandbox: Docker daemon, compose files, images, services.
 
@@ -359,6 +400,7 @@ def setup_sandbox_environment(
         tool_ports: Mapping of tool name to port number.
         preseed_svc_names: Services to run with the ``preseed`` profile before startup.
         log_prefix: Optional prefix for log messages (e.g. ``"[rollout 1/5]"``).
+        quiet: When true, suppress console output for setup steps.
 
     Returns:
         Mapping of tool name to public URL.
@@ -369,32 +411,40 @@ def setup_sandbox_environment(
     """
     prefix = f"{log_prefix} " if log_prefix else ""
 
-    _ensure_docker_daemon_ready_in_sandbox(sandbox, log_prefix=log_prefix)
+    _ensure_docker_daemon_ready_in_sandbox(sandbox, log_prefix=log_prefix, quiet=quiet)
 
     # Upload compose files.  Bundle assets are packed into a single tarball
     # to minimise HTTP requests through Daytona's proxy (many small uploads
     # cause connection-reset errors under concurrent load).
-    click.echo(f"{prefix}Uploading docker-compose.yml...")
+    if not quiet:
+        click.echo(f"{prefix}Uploading docker-compose.yml...")
     compose_content, build_contexts = _prepare_compose_for_remote(compose_dir)
     sandbox.fs.upload_file(compose_content, f"{_COMPOSE_DIR}/docker-compose.yml")
 
-    click.echo(f"{prefix}Uploading compose bundle assets...")
+    if not quiet:
+        click.echo(f"{prefix}Uploading compose bundle assets...")
     _upload_compose_bundle(sandbox, compose_dir)
 
     env_file = compose_dir / ".env"
     if env_file.exists():
-        click.echo(f"{prefix}Uploading .env...")
+        if not quiet:
+            click.echo(f"{prefix}Uploading .env...")
         sandbox.fs.upload_file(env_file.read_bytes(), f"{_COMPOSE_DIR}/.env")
 
     # Build local-context images in the sandbox.
-    for service_name, (local_context, image_tag) in build_contexts.items():
-        click.echo(f"{prefix}Uploading build context for {service_name}...")
+    for service_name, (local_context, image_tag, dockerfile) in build_contexts.items():
+        if not quiet:
+            click.echo(f"{prefix}Uploading build context for {service_name}...")
         remote_dir = f"{_COMPOSE_DIR}/build-contexts/{service_name}"
         sandbox.process.exec(f"mkdir -p {remote_dir}", cwd=_COMPOSE_DIR)
         _upload_directory(sandbox, local_context, remote_dir)
-        click.echo(f"{prefix}Building {image_tag}...")
+        if not quiet:
+            click.echo(f"{prefix}Building {image_tag}...")
+        dockerfile_arg = ""
+        if dockerfile:
+            dockerfile_arg = f" -f {shlex.quote(f'{remote_dir}/{dockerfile}')}"
         resp = sandbox.process.exec(
-            f"docker build -t {image_tag} {remote_dir}",
+            f"docker build{dockerfile_arg} -t {image_tag} {shlex.quote(remote_dir)}",
             cwd=_COMPOSE_DIR,
             timeout=300,
         )
@@ -402,7 +452,8 @@ def setup_sandbox_environment(
             raise RuntimeError(f"docker build failed for {service_name}:\n{resp.result}")
 
     # Pull images
-    click.echo(f"{prefix}Pulling images...")
+    if not quiet:
+        click.echo(f"{prefix}Pulling images...")
     resp = sandbox.process.exec(
         "docker compose pull --ignore-buildable",
         cwd=_COMPOSE_DIR,
@@ -424,10 +475,12 @@ def setup_sandbox_environment(
             preseed_svc_names,
             profile="preseed",
             log_prefix=log_prefix,
+            quiet=quiet,
         )
 
     # Start services
-    click.echo(f"{prefix}Starting services...")
+    if not quiet:
+        click.echo(f"{prefix}Starting services...")
     resp = sandbox.process.exec(
         "docker compose up -d",
         cwd=_COMPOSE_DIR,
@@ -508,7 +561,7 @@ class DaytonaRunner:
         daytona = _get_daytona(self._daytona_api_key)
 
         # Create sandbox from the docker-dind snapshot
-        rpt.start_step("Daytona sandbox created")
+        rpt.start_step("Creating Daytona sandbox", success_label="Daytona sandbox created")
         sandbox = daytona.create(
             CreateSandboxFromSnapshotParams(
                 snapshot=_SNAPSHOT_NAME,
@@ -523,7 +576,7 @@ class DaytonaRunner:
             sandbox.process.create_session("init")
 
             # Wait for Docker daemon
-            rpt.start_step("Docker daemon ready")
+            rpt.start_step("Waiting for Docker daemon", success_label="Docker daemon ready")
             daemon_ready = False
             for attempt in range(20):
                 resp = sandbox.process.execute_session_command(
@@ -557,7 +610,10 @@ class DaytonaRunner:
             rpt.end_step(success=True)
 
             # Upload compose files
-            rpt.start_step("Environment files uploaded")
+            rpt.start_step(
+                "Uploading environment files",
+                success_label="Environment files uploaded",
+            )
             compose_content, build_contexts = _prepare_compose_for_remote(compose_dir)
             sandbox.fs.upload_file(compose_content, f"{_COMPOSE_DIR}/docker-compose.yml")
             rpt.detail("Uploaded docker-compose.yml")
@@ -574,15 +630,18 @@ class DaytonaRunner:
 
             # Build local-context images in the sandbox.
             if build_contexts:
-                rpt.start_step("Images built")
-                for service_name, (local_context, image_tag) in build_contexts.items():
+                rpt.start_step("Building images", success_label="Images built")
+                for service_name, (local_context, image_tag, dockerfile) in build_contexts.items():
                     rpt.detail(f"Uploading build context for {service_name}...")
                     remote_dir = f"{_COMPOSE_DIR}/build-contexts/{service_name}"
                     sandbox.process.exec(f"mkdir -p {remote_dir}", cwd=_COMPOSE_DIR)
                     _upload_directory(sandbox, local_context, remote_dir)
                     rpt.detail(f"Building {image_tag}...")
+                    dockerfile_arg = ""
+                    if dockerfile:
+                        dockerfile_arg = f" -f {shlex.quote(f'{remote_dir}/{dockerfile}')}"
                     resp = sandbox.process.exec(
-                        f"docker build -t {image_tag} {remote_dir}",
+                        f"docker build{dockerfile_arg} -t {image_tag} {shlex.quote(remote_dir)}",
                         cwd=_COMPOSE_DIR,
                         timeout=300,
                     )
@@ -594,7 +653,7 @@ class DaytonaRunner:
                         raise SystemExit(1)
                 rpt.end_step(success=True)
             # Pull images
-            rpt.start_step("Images pulled")
+            rpt.start_step("Pulling images", success_label="Images pulled")
             resp = sandbox.process.exec(
                 "docker compose pull --ignore-buildable",
                 cwd=_COMPOSE_DIR,
@@ -615,7 +674,10 @@ class DaytonaRunner:
             rpt.end_step(success=True)
 
             if preseed_svc_names:
-                rpt.start_step("Environment preseeded")
+                rpt.start_step(
+                    "Preseeding environment",
+                    success_label="Environment preseeded",
+                )
                 try:
                     _run_profiled_services_in_sandbox(
                         sandbox,
@@ -633,16 +695,20 @@ class DaytonaRunner:
                 rpt.end_step(success=True)
 
             # Start services
-            rpt.start_step("Services started")
+            rpt.start_step("Starting services", success_label="Services started")
             resp = sandbox.process.exec(
                 "docker compose up -d",
                 cwd=_COMPOSE_DIR,
                 timeout=120,
             )
             if resp.exit_code != 0:
+                debug_output = _collect_compose_debug_output(sandbox)
+                error = f"docker compose up failed:\n{resp.result}"
+                if debug_output:
+                    error = f"{error}\n\n{debug_output}"
                 rpt.end_step(
                     success=False,
-                    error=f"docker compose up failed:\n{resp.result}",
+                    error=error,
                 )
                 raise SystemExit(1)
             rpt.end_step(success=True)
@@ -705,8 +771,12 @@ class DaytonaRunner:
             log_prefix=log_prefix,
         )
 
-    def down(self, compose_dir: Path) -> None:
-        """Tear down the Daytona sandbox."""
+    def down(
+        self,
+        compose_dir: Path,
+        reporter: Any | None = None,  # noqa: ANN401
+    ) -> None:
+        """Tear down the Daytona sandbox, optionally via a structured reporter."""
         state_file = compose_dir / _STATE_FILE
         if not state_file.exists():
             click.echo(
@@ -721,10 +791,15 @@ class DaytonaRunner:
         state = json.loads(state_file.read_text())
         sandbox_id = state["sandbox_id"]
         daytona = _get_daytona(self._daytona_api_key)
+        rpt = reporter if reporter is not None else DefaultReporter()
 
-        click.echo("Stopping services and deleting sandbox...")
+        if reporter is None:
+            click.echo("Stopping services and deleting sandbox...")
+        else:
+            rpt.start_step("Stopping Daytona sandbox", success_label="Daytona sandbox torn down")
         deleted = False
         sandbox_gone = False
+        warning: str | None = None
         try:
             sandbox = daytona.get(sandbox_id)
             deleted = teardown_sandbox(daytona, sandbox)
@@ -733,23 +808,25 @@ class DaytonaRunner:
             sandbox_gone = True
         except Exception as e:
             # Transient API error — sandbox may still be alive, keep state file.
-            click.echo(
-                click.style(f"Warning: could not reach Daytona API: {e}", fg="yellow"),
-                err=True,
-            )
+            warning = f"Warning: could not reach Daytona API: {e}"
+            if reporter is None:
+                click.echo(click.style(warning, fg="yellow"), err=True)
 
         if deleted or sandbox_gone:
             state_file.unlink(missing_ok=True)
-            click.echo(click.style("Daytona sandbox torn down.", fg="green"))
+            if reporter is None:
+                click.echo(click.style("Daytona sandbox torn down.", fg="green"))
+            else:
+                rpt.end_step(success=True)
         else:
-            click.echo(
-                click.style(
-                    f"Warning: sandbox {sandbox_id} may not have been deleted. "
-                    f"State file kept at {state_file} for manual cleanup.",
-                    fg="yellow",
-                ),
-                err=True,
+            warning = (
+                f"Warning: sandbox {sandbox_id} may not have been deleted. "
+                f"State file kept at {state_file} for manual cleanup."
             )
+            if reporter is None:
+                click.echo(click.style(warning, fg="yellow"), err=True)
+            else:
+                rpt.end_step(success=False, error=warning)
 
     def seed(
         self,
@@ -811,6 +888,7 @@ class DaytonaRunner:
         state_file = compose_dir / _STATE_FILE
         if not state_file.exists():
             return {}
+        expected_services = _compose_service_names(compose_dir)
 
         state = json.loads(state_file.read_text())
         sandbox_id = state["sandbox_id"]
@@ -824,7 +902,7 @@ class DaytonaRunner:
             )
             if resp.exit_code != 0:
                 return {}
-            return parse_ps_output(resp.result)
+            return parse_ps_output(resp.result, expected_services=expected_services)
         except Exception:
             return {}
 

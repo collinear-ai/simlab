@@ -1,0 +1,154 @@
+{
+  "schema_version": "ATIF-v1.4",
+  "session_id": "run-verifier-failure",
+  "agent": {
+    "name": "FixtureAgent",
+    "version": "0.1",
+    "model_name": "test-model",
+    "extra": {
+      "provider": "openai",
+      "agent_import_path": "custom.agent:FixtureAgent"
+    }
+  },
+  "steps": [
+    {
+      "timestamp": "2026-03-31T12:00:00Z",
+      "source": "user",
+      "message": "Create /app/hello.txt with the expected content.",
+      "extra": {
+        "raw_timestamp": "2026-03-31T12:00:00Z"
+      },
+      "step_id": 1
+    },
+    {
+      "timestamp": "2026-03-31T12:00:01Z",
+      "source": "agent",
+      "message": "I'll create the file.",
+      "model_name": "test-model",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1",
+          "function_name": "write_file",
+          "arguments": {
+            "path": "/app/hello.txt",
+            "content": "hello"
+          },
+          "extra": {
+            "tool_server": "harbor-main"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call_1",
+            "content": "Created /app/hello.txt",
+            "extra": {
+              "tool_server": "harbor-main",
+              "tool_name": "write_file",
+              "is_error": false,
+              "raw_observation": {
+                "text": "Created /app/hello.txt",
+                "path": "/app/hello.txt"
+              },
+              "tool_message": {
+                "tool_call_id": "call_1",
+                "tool_server": "harbor-main",
+                "tool_name": "write_file",
+                "summary": "Created /app/hello.txt",
+                "is_error": false
+              }
+            }
+          }
+        ]
+      },
+      "extra": {
+        "raw_message": {
+          "role": "assistant",
+          "content": {
+            "content": "I'll create the file.",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "harbor-main__write_file",
+                  "arguments": "{\"path\":\"/app/hello.txt\",\"content\":\"hello\"}"
+                }
+              }
+            ]
+          },
+          "timestamp": "2026-03-31T12:00:01Z"
+        }
+      },
+      "step_id": 2
+    },
+    {
+      "timestamp": "2026-03-31T12:00:03Z",
+      "source": "agent",
+      "message": "Done.",
+      "model_name": "test-model",
+      "extra": {
+        "raw_timestamp": "2026-03-31T12:00:03Z"
+      },
+      "step_id": 3
+    },
+    {
+      "timestamp": "2026-03-31T12:00:03Z",
+      "source": "system",
+      "message": "Verifier failed",
+      "extra": {
+        "kind": "verifier",
+        "passed": false,
+        "reward": 0.0,
+        "payload": {
+          "reward": 0.0,
+          "reason": "missing output"
+        }
+      },
+      "step_id": 4
+    }
+  ],
+  "final_metrics": {
+    "total_steps": 4,
+    "total_prompt_tokens": 11,
+    "total_completion_tokens": 7,
+    "total_cost_usd": 0.123
+  },
+  "extra": {
+    "simlab": {
+      "task_id": "hello-world",
+      "task": "Create /app/hello.txt with the expected content.",
+      "created_at": "2026-03-31T12:00:00Z",
+      "steps_taken": 1,
+      "max_steps": 5,
+      "final_observation": "Done.",
+      "metadata": {
+        "cli_runtime": {
+          "agent_import_path": "custom.agent:FixtureAgent"
+        },
+        "rollout_metrics": {
+          "token_usage": {
+            "prompt_tokens_total": 11,
+            "completion_tokens_total": 7
+          },
+          "cost": {
+            "estimated_cost_usd": 0.123
+          }
+        }
+      },
+      "verifier": {
+        "passed": false,
+        "reward": 0.0,
+        "payload": {
+          "reward": 0.0,
+          "reason": "missing output"
+        }
+      },
+      "log_probs": [
+        -0.1,
+        -0.2
+      ]
+    }
+  }
+}

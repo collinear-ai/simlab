@@ -53,6 +53,37 @@ def test_compose_uses_default_registry_for_collinear_images() -> None:
     assert "image: ghcr.io/collinear-ai/collinear/email-env:latest" in output.compose_yaml
 
 
+def test_compose_preserves_list_environment_passthrough_entries() -> None:
+    registry = ToolRegistry()
+    registry._tools["email"] = ToolDefinition(
+        name="email",
+        display_name="Email",
+        description="Email tool",
+        category="communication",
+        tool_server_port=8040,
+        services={
+            "email-env": ServiceDefinition(
+                image="collinear/email-env:latest",
+                ports=["8040"],
+                environment=["OPENAI_API_KEY", "STATIC=value"],
+            )
+        },
+    )
+
+    output = ComposeEngine(registry).compose(
+        EnvConfig(
+            tools=["email"],
+            overrides={"email": {"STATIC": "overridden"}},
+        )
+    )
+
+    compose = yaml.safe_load(output.compose_yaml)
+    env = compose["services"]["email-env"]["environment"]
+
+    assert env == ["OPENAI_API_KEY", "STATIC=overridden"]
+    assert "OPENAI_API_KEY=" in output.env_file
+
+
 def test_compose_injects_frappe_seed_scenario_for_versioned_template_id() -> None:
     registry = ToolRegistry()
     registry.load_all()

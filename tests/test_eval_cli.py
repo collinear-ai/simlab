@@ -12,6 +12,189 @@ from simlab.evaluation import detect_cofailure_patterns
 from simlab.evaluation import summarize_score_summary
 
 
+def write_atif_rollout(
+    rollout_dir: Path,
+    *,
+    task_id: str,
+    model: str,
+    reward: float | None,
+    criteria: list[dict[str, object]] | None = None,
+    reward_model: dict[str, object] | None = None,
+    duration_seconds: float | None = None,
+    estimated_cost_usd: float | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    tool_calls: list[dict[str, object]] | None = None,
+    tool_results: list[dict[str, object]] | None = None,
+    error: str | None = None,
+    include_rollout_metrics: bool = True,
+    agent_step_timestamp: str = "2026-03-24T20:00:01Z",
+) -> None:
+    """Write an ATIF rollout fixture directory for eval CLI tests."""
+    rollout_dir.mkdir(parents=True, exist_ok=True)
+    metadata: dict[str, object] = {}
+    include_metrics = any(
+        value is not None
+        for value in (
+            duration_seconds,
+            estimated_cost_usd,
+            prompt_tokens,
+            completion_tokens,
+        )
+    )
+    if include_metrics and include_rollout_metrics:
+        total_tokens = None
+        if prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+        token_usage: dict[str, int | None] = {
+            "prompt_tokens_total": prompt_tokens,
+            "completion_tokens_total": completion_tokens,
+        }
+        rollout_metrics = {
+            "token_usage": token_usage,
+            "timing": {
+                "duration_seconds": duration_seconds,
+            },
+            "cost": {
+                "estimated_cost_usd": estimated_cost_usd,
+            },
+        }
+        if total_tokens is not None:
+            token_usage["total_tokens_total"] = total_tokens
+        metadata["rollout_metrics"] = rollout_metrics
+
+    steps: list[dict[str, object]] = [
+        {
+            "step_id": 1,
+            "timestamp": "2026-03-24T20:00:00Z",
+            "source": "user",
+            "message": f"Run {task_id}",
+        }
+    ]
+    for index, call in enumerate(tool_calls or [], start=1):
+        result = (tool_results or [])[index - 1] if index - 1 < len(tool_results or []) else {}
+        observation = result.get("observation") if isinstance(result, dict) else None
+        content = None
+        if isinstance(observation, dict):
+            content = observation.get("text")
+        elif isinstance(observation, str):
+            content = observation
+        step: dict[str, object] = {
+            "step_id": len(steps) + 1,
+            "timestamp": agent_step_timestamp,
+            "source": "agent",
+            "message": "Tool call",
+            "model_name": model,
+            "tool_calls": [
+                {
+                    "tool_call_id": f"call_{index}",
+                    "function_name": call.get("tool_name") if isinstance(call, dict) else "tool",
+                    "arguments": (call.get("parameters") if isinstance(call, dict) else {}),
+                    "extra": {
+                        "tool_server": (
+                            call.get("tool_server") if isinstance(call, dict) else "unknown"
+                        )
+                    },
+                }
+            ],
+        }
+        if content is not None:
+            step["observation"] = {
+                "results": [
+                    {
+                        "source_call_id": f"call_{index}",
+                        "content": str(content),
+                        "extra": {
+                            "tool_server": (
+                                call.get("tool_server") if isinstance(call, dict) else "unknown"
+                            ),
+                            "tool_name": (
+                                call.get("tool_name") if isinstance(call, dict) else "tool"
+                            ),
+                            "is_error": bool(result.get("is_error"))
+                            if isinstance(result, dict) and "is_error" in result
+                            else False,
+                            "raw_observation": observation,
+                        },
+                    }
+                ]
+            }
+        steps.append(step)
+
+    trajectory = {
+        "schema_version": "ATIF-v1.4",
+        "session_id": rollout_dir.name,
+        "agent": {
+            "name": "simlab-reference-agent",
+            "version": "0.1",
+            "model_name": model,
+            "extra": {"provider": "openai"},
+        },
+        "steps": steps,
+        "extra": {
+            "simlab": {
+                "task_id": task_id,
+                "task": f"Complete {task_id}",
+                "created_at": "2026-03-24T20:00:00Z",
+                "steps_taken": len(tool_calls or []),
+                "max_steps": 30,
+                "final_observation": "Done",
+                "run_error": error,
+                "metadata": metadata,
+            }
+        },
+    }
+    if include_metrics:
+        total_tokens = None
+        if prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+        final_metrics: dict[str, object] = {"total_steps": len(steps)}
+        if prompt_tokens is not None:
+            final_metrics["total_prompt_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            final_metrics["total_completion_tokens"] = completion_tokens
+        if total_tokens is not None:
+            final_metrics["total_tokens"] = total_tokens
+        if estimated_cost_usd is not None:
+            final_metrics["total_cost_usd"] = estimated_cost_usd
+        trajectory["final_metrics"] = final_metrics
+    (rollout_dir / "agent" / "trajectory.json").parent.mkdir(parents=True, exist_ok=True)
+    (rollout_dir / "agent" / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+
+    if reward is None and criteria is None and reward_model is None:
+        return
+
+    verifier_dir = rollout_dir / "verifier"
+    verifier_dir.mkdir(parents=True, exist_ok=True)
+    verifier_results = []
+    if criteria is not None:
+        verifier_results.append(
+            {
+                "module": f"collinear.scenarios.demo.verifiers.{task_id}",
+                "success": all(bool(item.get("pass")) for item in criteria),
+                "message": "",
+                "output": json.dumps(criteria),
+            }
+        )
+    if reward_model is not None:
+        reward_model_score = reward_model.get("score")
+        if not isinstance(reward_model_score, (int, float)):
+            reward_model_score = 0.0
+        verifier_results.append(
+            {
+                "module": "collinear.scenarios.demo.verifiers.universal_verifier",
+                "success": bool(reward_model_score >= 0.6),
+                "message": "",
+                "output": json.dumps(reward_model),
+            }
+        )
+    reward_payload = {
+        "reward": reward,
+        "verifier_results": verifier_results,
+    }
+    (verifier_dir / "reward.json").write_text(json.dumps(reward_payload), encoding="utf-8")
+
+
 def write_rollout(
     rollout_dir: Path,
     *,
@@ -238,6 +421,161 @@ def test_eval_single_rollout_json_includes_criteria_tool_calls_and_reward_model(
         payload["rollout"]["reward_model"]["dimension_scores"][0]["dimension"]
         == "Calendar Event Update"
     )
+
+
+def test_eval_single_atif_rollout_json_includes_metrics_and_tool_calls(
+    tmp_path: Path,
+) -> None:
+    rollout_dir = tmp_path / "agent_run_task_a"
+    write_atif_rollout(
+        rollout_dir,
+        task_id="task-a",
+        model="gpt-4o-mini",
+        reward=0.0,
+        criteria=[
+            {"criteria": "meeting_created", "pass": False},
+            {"criteria": "scope_discipline", "pass": True},
+        ],
+        reward_model={
+            "score": 0.45,
+            "confidence": 0.81,
+            "verdict": "partial",
+            "failed_criteria": ["meeting_created"],
+            "dimension_scores": [
+                {"dimension": "Calendar Event Update", "score": 0.2, "reason": "No event created"},
+                {"dimension": "Scope Discipline", "score": 0.7, "reason": "No extra actions"},
+            ],
+        },
+        duration_seconds=42.5,
+        estimated_cost_usd=0.12,
+        prompt_tokens=1200,
+        completion_tokens=300,
+        tool_calls=[
+            {
+                "tool_server": "calendar",
+                "tool_name": "create_event",
+                "parameters": {"title": "Interview"},
+            }
+        ],
+        tool_results=[
+            {
+                "observation": {"text": "No event created"},
+                "is_error": True,
+            }
+        ],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(eval_command, [str(rollout_dir), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["mode"] == "single_rollout"
+    assert payload["rollout"]["task_id"] == "task-a"
+    assert payload["rollout"]["metrics"]["estimated_cost_usd"] == pytest.approx(0.12)
+    assert payload["rollout"]["criteria"][0]["name"] == "meeting_created"
+    assert payload["rollout"]["tool_calls"][0]["tool_name"] == "create_event"
+    assert payload["rollout"]["tool_calls"][0]["summary"] == "No event created"
+    assert payload["rollout"]["tool_calls"][0]["is_error"] is True
+    assert payload["rollout"]["reward_model"]["score"] == pytest.approx(0.45)
+
+
+def test_eval_single_atif_rollout_falls_back_to_final_metrics_and_timestamps(
+    tmp_path: Path,
+) -> None:
+    rollout_dir = tmp_path / "agent_run_task_a"
+    write_atif_rollout(
+        rollout_dir,
+        task_id="task-a",
+        model="gpt-4o-mini",
+        reward=1.0,
+        duration_seconds=42.5,
+        estimated_cost_usd=0.12,
+        prompt_tokens=1200,
+        completion_tokens=300,
+        tool_calls=[
+            {
+                "tool_server": "calendar",
+                "tool_name": "create_event",
+                "parameters": {"title": "Interview"},
+            }
+        ],
+        tool_results=[
+            {
+                "observation": {"text": "Created event"},
+                "is_error": False,
+            }
+        ],
+        include_rollout_metrics=False,
+        agent_step_timestamp="2026-03-24T20:00:05Z",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(eval_command, [str(rollout_dir), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["rollout"]["metrics"]["estimated_cost_usd"] == pytest.approx(0.12)
+    assert payload["rollout"]["metrics"]["prompt_tokens"] == 1200
+    assert payload["rollout"]["metrics"]["completion_tokens"] == 300
+    assert payload["rollout"]["metrics"]["total_tokens"] == 1500
+    assert payload["rollout"]["metrics"]["duration_seconds"] == pytest.approx(5.0)
+
+
+def test_eval_single_atif_rollout_extracts_harbor_checks_without_verifier_results(
+    tmp_path: Path,
+) -> None:
+    rollout_dir = tmp_path / "agent_run_task_a"
+    write_atif_rollout(
+        rollout_dir,
+        task_id="task-a",
+        model="gpt-4o-mini",
+        reward=0.0,
+        tool_calls=[
+            {
+                "tool_server": "calendar",
+                "tool_name": "create_event",
+                "parameters": {"title": "Interview"},
+            }
+        ],
+        tool_results=[
+            {
+                "observation": {"text": "No event created"},
+                "is_error": True,
+            }
+        ],
+    )
+    (rollout_dir / "verifier" / "reward.json").write_text(
+        json.dumps(
+            {
+                "reward": 0.0,
+                "checks": [
+                    {
+                        "check": "meeting_created",
+                        "passed": False,
+                        "description": "Meeting was not created",
+                        "weight": 1,
+                        "points": 0,
+                    }
+                ],
+                "score": 0.0,
+                "harbor_test_sh": {
+                    "exit_code": 1,
+                    "output": "verification failed",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(eval_command, [str(rollout_dir), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["rollout"]["criteria"][0]["name"] == "meeting_created"
+    assert payload["rollout"]["criteria"][0]["passed"] is False
+    assert payload["rollout"]["verifier_results"][0]["module"] == "harbor_test_sh"
 
 
 def test_eval_multi_rollout_summarizes_reward_model_scores_and_error_tables(

@@ -71,22 +71,21 @@ def test_run_artifacts_recorder_records_tool_calls() -> None:
     recorder.on_assistant_message("## Email Summary\n...\n## Todo List\n...")
 
     assert artifacts.messages[0]["role"] == "user"
-    assert artifacts.messages[1] == {
-        "role": "assistant",
-        "content": {
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {
-                        "name": "demo__ping",
-                        "arguments": json.dumps({"value": 1}, sort_keys=True),
-                    },
-                }
-            ],
-        },
+    assert artifacts.messages[1]["role"] == "assistant"
+    assert artifacts.messages[1]["content"] == {
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "demo__ping",
+                    "arguments": json.dumps({"value": 1}, sort_keys=True),
+                },
+            }
+        ],
     }
+    assert isinstance(artifacts.messages[1]["timestamp"], str)
     assert artifacts.tool_calls[0].tool_server == "demo"
     assert artifacts.tool_results[0].observation == {"ok": True}
     assert artifacts.messages[2]["role"] == "tool"

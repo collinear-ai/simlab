@@ -19,7 +19,10 @@ from typing import Any
 
 import click
 
+from simlab.cli.progress import ParallelRolloutProgress
 from simlab.cli.tasks import _CALENDAR_DEFAULT_USERNAME
+from simlab.cli.tasks import ROLLOUT_FORMAT_ATIF
+from simlab.cli.tasks import ROLLOUT_FORMAT_DEFAULT
 from simlab.cli.tasks import _apply_verifier_env_overrides
 from simlab.cli.tasks import _build_mcp_clients
 from simlab.cli.tasks import _build_services_available_section
@@ -46,6 +49,7 @@ from simlab.composer.engine import get_mcp_gateway_host_port
 from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import load_mcp_servers_from_env_dir
 from simlab.npc_chat.activation import NpcChatSession
+from simlab.runtime.adapters.harbor import trajectory as harbor_trajectory
 from simlab.runtime.daytona_runner import _SNAPSHOT_NAME
 from simlab.runtime.daytona_runner import CreateSandboxFromSnapshotParams
 from simlab.runtime.daytona_runner import _get_daytona
@@ -81,6 +85,16 @@ class ParallelRunSummary:
     results: list[RolloutResult] = field(default_factory=list)
     total_duration_seconds: float = 0.0
     output_dir: Path | None = None
+
+
+def _rollout_result_label(result: RolloutResult) -> str:
+    if result.error:
+        return "ERR"
+    if result.verification_passed is True:
+        return "PASS"
+    if result.verification_passed is False:
+        return "FAIL"
+    return "N/A"
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +240,8 @@ class ParallelDaytonaOrchestrator:
         backend_id: str | None,
         base_url_api: str,
         scenario_manager_api_key: str | None,
+        rollout_format: str,
+        progress: ParallelRolloutProgress | None = None,
     ) -> ParallelRunSummary:
         """Execute all rollouts and return aggregated summary."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -245,13 +261,14 @@ class ParallelDaytonaOrchestrator:
             output_dir=run_dir,
         )
 
-        click.echo(
-            click.style(
-                f"\nStarting {self._rollout_count} parallel rollout(s) "
-                f"(max {self._max_parallel} concurrent)\n",
-                bold=True,
+        if progress is None:
+            click.echo(
+                click.style(
+                    f"\nStarting {self._rollout_count} parallel rollout(s) "
+                    f"(max {self._max_parallel} concurrent)\n",
+                    bold=True,
+                )
             )
-        )
         start = time.monotonic()
 
         kwargs = {
@@ -277,7 +294,9 @@ class ParallelDaytonaOrchestrator:
             "backend_id": backend_id,
             "base_url_api": base_url_api,
             "scenario_manager_api_key": scenario_manager_api_key,
+            "rollout_format": rollout_format,
             "run_dir": run_dir,
+            "progress": progress,
         }
 
         executor = ThreadPoolExecutor(max_workers=self._max_parallel)
@@ -338,6 +357,7 @@ class ParallelDaytonaOrchestrator:
         timeout: int = 120,
         poll_interval: int = 5,
         log_prefix: str = "",
+        quiet: bool = False,
     ) -> None:
         """Wait until the gateway-backed MCP namespaces expose tools."""
         if mcp_clients:
@@ -346,6 +366,7 @@ class ParallelDaytonaOrchestrator:
                 timeout=timeout,
                 poll_interval=poll_interval,
                 log_prefix=log_prefix,
+                quiet=quiet,
             )
             return
 
@@ -379,11 +400,15 @@ class ParallelDaytonaOrchestrator:
         backend_id: str | None,
         base_url_api: str,
         scenario_manager_api_key: str | None,
+        rollout_format: str,
         run_dir: Path,
+        progress: ParallelRolloutProgress | None = None,
     ) -> RolloutResult:
         """Full lifecycle for one rollout: create -> setup -> seed -> run -> verify -> teardown."""
         tag = f"[rollout {rollout_idx + 1}/{self._rollout_count}]"
         result = RolloutResult(rollout_idx=rollout_idx)
+        if progress is not None:
+            progress.update(rollout_idx, status="Starting")
         rollout_start = time.monotonic()
         env_dir = Path(config_path).parent
         mcp_config = load_mcp_servers_from_env_dir(env_dir)
@@ -394,7 +419,8 @@ class ParallelDaytonaOrchestrator:
         try:
             # 1. Create sandbox
             self._check_cancelled(tag)
-            click.echo(f"{tag} Creating Daytona sandbox...")
+            if progress is None:
+                click.echo(f"{tag} Creating Daytona sandbox...")
             sandbox = daytona_client.create(
                 CreateSandboxFromSnapshotParams(
                     snapshot=_SNAPSHOT_NAME,
@@ -415,6 +441,7 @@ class ParallelDaytonaOrchestrator:
                 tool_ports,
                 preseed_svc_names,
                 log_prefix=tag,
+                quiet=progress is not None,
             )
 
             # Include external URL-backed tools in endpoints.
@@ -428,7 +455,8 @@ class ParallelDaytonaOrchestrator:
 
             # Wait for all resolved HTTP tool servers (and gateway, if present) to become reachable.
             if endpoints:
-                click.echo(f"{tag} Waiting for tool servers...")
+                if progress is None:
+                    click.echo(f"{tag} Waiting for tool servers...")
                 _require_reachable_endpoints(
                     endpoints=endpoints,
                     action="tool server readiness",
@@ -437,17 +465,20 @@ class ParallelDaytonaOrchestrator:
                     timeout=120,
                     poll_interval=5,
                     log_prefix=tag,
+                    quiet=progress is not None,
                 )
 
             if not no_seed:
                 self._check_cancelled(tag)
                 if seed_svc_names:
-                    click.echo(f"{tag} Running environment seed services...")
+                    if progress is None:
+                        click.echo(f"{tag} Running environment seed services...")
                     _run_profiled_services_in_sandbox(
                         sandbox,
                         seed_svc_names,
                         profile="seed",
                         log_prefix=tag,
+                        quiet=progress is not None,
                     )
 
                 self._check_cancelled(tag)
@@ -458,6 +489,7 @@ class ParallelDaytonaOrchestrator:
                     profiles,
                     config,
                     config_path,
+                    log=progress is None,
                 )
                 self._provision_calendar_accounts(
                     tag,
@@ -467,8 +499,9 @@ class ParallelDaytonaOrchestrator:
                     endpoints,
                     config,
                     config_path,
+                    log=progress is None,
                 )
-                self._seed_rollout(tag, task_data, profiles, endpoints)
+                self._seed_rollout(tag, task_data, profiles, endpoints, log=progress is None)
 
             # 4. Build environment + run agent
             self._check_cancelled(tag)
@@ -481,6 +514,7 @@ class ParallelDaytonaOrchestrator:
                     timeout=120,
                     poll_interval=5,
                     log_prefix=tag,
+                    quiet=progress is not None,
                 )
             _require_mcp_tools_available(mcp_clients)
             rewritten = _rewrite_tool_server_urls(task_data, endpoints)
@@ -497,7 +531,8 @@ class ParallelDaytonaOrchestrator:
             if npc_session is not None:
                 npc_url = npc_session.start()
                 tool_namespace_endpoints["npc-chat"] = npc_url
-                click.echo(f"{tag} NPC chat tool auto-activated")
+                if progress is None:
+                    click.echo(f"{tag} NPC chat tool auto-activated")
 
             artifacts = None
             try:
@@ -528,7 +563,16 @@ class ParallelDaytonaOrchestrator:
                     instruction = f"{instruction}\n\n{services_section}"
 
                 meta = task_data.get("meta", {})
-                click.echo(f"{tag} Running agent ({model} via {provider})...")
+                on_step_callback = None
+                if progress is None:
+                    click.echo(f"{tag} Running agent ({model} via {provider})...")
+                else:
+                    progress.update(rollout_idx, status="Running", steps_taken=0)
+
+                    def on_step(steps_taken: int) -> None:
+                        progress.update(rollout_idx, steps_taken=steps_taken)
+
+                    on_step_callback = on_step
 
                 artifacts = run_with_agent_contract(
                     task_id=meta.get("task_id", ""),
@@ -542,6 +586,7 @@ class ParallelDaytonaOrchestrator:
                     api_key=api_key,
                     base_url=base_url,
                     stop_event=self._cancel,
+                    on_step=on_step_callback,
                 )
             finally:
                 if npc_session is not None:
@@ -558,16 +603,19 @@ class ParallelDaytonaOrchestrator:
             if npc_session is not None:
                 npc_session.save_transcripts(rollout_dir)
 
-            output_path = rollout_dir / "artifacts.json"
-            artifacts.dump(output_path)
-            result.artifacts_path = output_path
+            if rollout_format == ROLLOUT_FORMAT_DEFAULT:
+                output_path = rollout_dir / "artifacts.json"
+                artifacts.dump(output_path)
+                result.artifacts_path = output_path
 
-            if artifacts.error:
+            if artifacts.error and progress is None:
                 click.echo(click.style(f"{tag} Agent error: {artifacts.error}", fg="yellow"))
 
             # 6. Run verifiers
             self._check_cancelled(tag)
-            result.reward, result.verification_passed = self._run_verifiers(
+            if progress is not None:
+                progress.update(rollout_idx, status="Verifying")
+            result.reward, result.verification_passed, reward_payload = self._run_verifiers(
                 tag=tag,
                 task_data=task_data,
                 artifacts=artifacts,
@@ -579,31 +627,55 @@ class ParallelDaytonaOrchestrator:
                 base_url_api=base_url_api,
                 scenario_manager_api_key=scenario_manager_api_key,
                 env_dir=env_dir,
+                log=progress is None,
             )
+
+            if rollout_format == ROLLOUT_FORMAT_ATIF:
+                output_path = rollout_dir / "agent" / "trajectory.json"
+                harbor_trajectory.write_atif_trajectory(
+                    output_path,
+                    artifacts=artifacts,
+                    run_id=rollout_dir.name,
+                    verification_passed=result.verification_passed,
+                    reward=result.reward,
+                    reward_payload=reward_payload,
+                )
+                result.artifacts_path = output_path
 
             # Match single-rollout behavior: agent error + no verifiers = failure.
             if artifacts.error and result.verification_passed is None:
                 result.error = f"Agent error (no verifiers): {artifacts.error}"
 
-            status = "passed" if result.verification_passed else "failed"
-            if result.verification_passed is None:
-                status = "no verifiers"
-            click.echo(
-                click.style(
-                    f"{tag} Completed — reward={result.reward}, "
-                    f"steps={result.steps_taken}, {status}",
-                    fg="green" if result.verification_passed else "yellow",
+            if progress is not None:
+                progress.update(
+                    rollout_idx,
+                    status="Done",
+                    result=_rollout_result_label(result),
                 )
-            )
+            else:
+                status = "passed" if result.verification_passed else "failed"
+                if result.verification_passed is None:
+                    status = "no verifiers"
+                click.echo(
+                    click.style(
+                        f"{tag} Completed — reward={result.reward}, "
+                        f"steps={result.steps_taken}, {status}",
+                        fg="green" if result.verification_passed else "yellow",
+                    )
+                )
 
         except (Exception, SystemExit) as exc:
             result.error = str(exc)
-            click.echo(click.style(f"{tag} Failed: {exc}", fg="red"), err=True)
+            if progress is not None:
+                progress.update(rollout_idx, status="Done", result="ERR")
+            else:
+                click.echo(click.style(f"{tag} Failed: {exc}", fg="red"), err=True)
 
         finally:
             # 7. Teardown sandbox
             if sandbox is not None:
-                click.echo(f"{tag} Tearing down sandbox...")
+                if progress is None:
+                    click.echo(f"{tag} Tearing down sandbox...")
                 deleted = teardown_sandbox(daytona_client, sandbox, log_prefix=tag)
                 if deleted:
                     with self._lock:
@@ -633,6 +705,8 @@ class ParallelDaytonaOrchestrator:
         endpoints: dict[str, str],
         config: Any,  # noqa: ANN401
         config_path: str,
+        *,
+        log: bool = True,
     ) -> None:
         """Provision CalDAV users and register calendar accounts in ephemeral sandbox."""
         if not _task_uses_calendar(task_data):
@@ -646,7 +720,8 @@ class ParallelDaytonaOrchestrator:
         if not accounts:
             return
 
-        click.echo(f"{tag} Provisioning calendar users: {', '.join(accounts)}")
+        if log:
+            click.echo(f"{tag} Provisioning calendar users: {', '.join(accounts)}")
 
         get_profiled_service_names, _ = get_env_runtime_helpers()
         config_file = Path(config_path)
@@ -672,6 +747,7 @@ class ParallelDaytonaOrchestrator:
                 profile="preseed",
                 env_overrides=env_overrides,
                 log_prefix=tag,
+                quiet=not log,
             )
         if seed_svc_names:
             _run_profiled_services_in_sandbox(
@@ -680,10 +756,12 @@ class ParallelDaytonaOrchestrator:
                 profile="seed",
                 env_overrides=env_overrides,
                 log_prefix=tag,
+                quiet=not log,
             )
 
         # Register accounts with the calendar tool server
-        _ensure_task_calendar_accounts(task_data, profiles, endpoints, config)
+        log_fn = None if log else (lambda _msg: None)
+        _ensure_task_calendar_accounts(task_data, profiles, endpoints, config, log=log_fn)
 
     def _provision_group_channels(
         self,
@@ -693,6 +771,8 @@ class ParallelDaytonaOrchestrator:
         profiles: dict[str, dict[str, Any]],
         config: Any,  # noqa: ANN401
         config_path: str,
+        *,
+        log: bool = True,
     ) -> None:
         """Provision RocketChat NPC users and group channels in ephemeral sandbox."""
         group_channels = task_data.get("seed_group_channels") or []
@@ -739,10 +819,11 @@ class ParallelDaytonaOrchestrator:
         channel_names = [
             ch.get("channel_name", "?") for ch in group_channels if isinstance(ch, dict)
         ]
-        click.echo(
-            f"{tag} Provisioning group channels: {', '.join(channel_names)} "
-            f"({len(npc_ids)} NPC user(s))"
-        )
+        if log:
+            click.echo(
+                f"{tag} Provisioning group channels: {', '.join(channel_names)} "
+                f"({len(npc_ids)} NPC user(s))"
+            )
 
         get_profiled_service_names, _ = get_env_runtime_helpers()
         config_file = Path(config_path)
@@ -766,6 +847,7 @@ class ParallelDaytonaOrchestrator:
             profile="seed",
             env_overrides=env_overrides,
             log_prefix=tag,
+            quiet=not log,
         )
 
     def _seed_rollout(
@@ -774,6 +856,8 @@ class ParallelDaytonaOrchestrator:
         task_data: dict[str, Any],
         profiles: dict[str, dict[str, Any]],
         endpoints: dict[str, str],
+        *,
+        log: bool = True,
     ) -> None:
         """Seed emails and calendar events for a single rollout.
 
@@ -785,12 +869,15 @@ class ParallelDaytonaOrchestrator:
         if not emails and not cal_events:
             return
 
-        click.echo(f"{tag} Seeding task data...")
-        ok, fail = _seed_task_data(task_data, profiles, endpoints)
-        if fail:
-            click.echo(click.style(f"{tag} Seeding had {fail} failure(s).", fg="yellow"))
-        else:
-            click.echo(click.style(f"{tag} {ok} item(s) seeded.", fg="green"))
+        if log:
+            click.echo(f"{tag} Seeding task data...")
+        log_fn = None if log else (lambda _msg: None)
+        ok, fail = _seed_task_data(task_data, profiles, endpoints, log=log_fn)
+        if log:
+            if fail:
+                click.echo(click.style(f"{tag} Seeding had {fail} failure(s).", fg="yellow"))
+            else:
+                click.echo(click.style(f"{tag} {ok} item(s) seeded.", fg="green"))
 
     def _run_verifiers(
         self,
@@ -806,11 +893,12 @@ class ParallelDaytonaOrchestrator:
         base_url_api: str,
         scenario_manager_api_key: str | None,
         env_dir: Path,
-    ) -> tuple[float | None, bool | None]:
-        """Run verifiers and return ``(reward, passed)``."""
+        log: bool = True,
+    ) -> tuple[float | None, bool | None, dict[str, Any] | None]:
+        """Run verifiers and return ``(reward, passed, reward_payload)``."""
         evaluators = task_data.get("verifiers") or task_data.get("evaluators")
         if not evaluators:
-            return None, None
+            return None, None, None
 
         build_verifier_artifacts, infer_scenario_from_evaluator, run_verifier = (
             get_verifier_runtime_helpers()
@@ -826,7 +914,8 @@ class ParallelDaytonaOrchestrator:
         try:
             adapter = build_verifier_artifacts(artifacts, task_file, tool_servers)
             verifier_results: list[dict[str, Any]] = []
-            click.echo(f"{tag} Running verifiers...")
+            if log:
+                click.echo(f"{tag} Running verifiers...")
             with self._verifier_env_lock:
                 original_env, applied_env = _apply_verifier_env_overrides(global_cfg)
                 try:
@@ -887,7 +976,7 @@ class ParallelDaytonaOrchestrator:
                 encoding="utf-8",
             )
 
-            return reward, all_passed
+            return reward, all_passed, reward_payload
 
         finally:
             task_file.unlink(missing_ok=True)

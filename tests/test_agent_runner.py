@@ -21,6 +21,7 @@ from simlab.agents import load_agent_class
 from simlab.agents import reference_agent
 from simlab.agents import run_with_agent_contract
 from simlab.agents.base import RunArtifacts
+from simlab.agents.base import ToolCall
 
 
 class FakeEnvironment(BaseEnvironment):
@@ -222,6 +223,16 @@ def test_reference_agent_runs_tool_loop(monkeypatch) -> None:  # noqa: ANN001
     assert tool_payload["tool_server"] == "email-env"
     assert tool_payload["tool_name"] == "send_email"
     assert tool_payload["is_error"] is False
+
+
+def test_run_artifacts_on_step_callback_is_invoked() -> None:
+    seen: list[int] = []
+    artifacts = RunArtifacts(task_id="t-1", task="do task", on_step=seen.append)
+    artifacts.record_tool_call(
+        ToolCall(tool_server="email-env", tool_name="send_email", parameters={}),
+        ToolCallResult(observation={"ok": True}, is_error=False),
+    )
+    assert seen == [1]
 
 
 def test_run_with_agent_contract_supports_async_agent_inside_running_event_loop() -> None:

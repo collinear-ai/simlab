@@ -47,6 +47,7 @@ _ENV_MAP: dict[str, list[str]] = {
     "npc_chat_provider": ["SIMLAB_NPC_CHAT_PROVIDER"],
     "npc_chat_base_url": ["SIMLAB_NPC_CHAT_BASE_URL"],
     "npc_chat_api_key": ["SIMLAB_NPC_CHAT_API_KEY"],
+    "tasks_rollout_format": ["SIMLAB_TASKS_ROLLOUT_FORMAT"],
 }
 
 _TOP_LEVEL_FILE_FIELDS = {
@@ -80,6 +81,9 @@ _SECTION_FIELD_MAP: dict[str, dict[str, str]] = {
     "telemetry": {
         "disabled": "telemetry_disabled",
         "state_path": "telemetry_state_path",
+    },
+    "tasks": {
+        "rollout_format": "tasks_rollout_format",
     },
 }
 
@@ -153,6 +157,7 @@ class GlobalConfig(BaseModel):
     npc_chat_provider: str | None = None
     npc_chat_base_url: str | None = None
     npc_chat_api_key: str | None = None
+    tasks_rollout_format: str | None = None
 
 
 def env_var_list(env_vars: tuple[str, ...] | list[str]) -> str:
@@ -184,6 +189,8 @@ def _normalize_loaded_value(field: str, value: object) -> object:
         normalized = _normalize_bool(value)
         if normalized is not None:
             return normalized
+    if field == "tasks_rollout_format" and isinstance(value, str):
+        return value.strip().lower() or None
     if isinstance(value, str):
         return value.strip() or None
     return value

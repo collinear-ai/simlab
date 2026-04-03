@@ -46,6 +46,18 @@ def test_step_success_non_tty() -> None:
     assert "[done] Services started" in out.getvalue()
 
 
+def test_step_success_uses_success_label() -> None:
+    """Successful steps can render a different completion label."""
+    progress, out, _ = _make_progress(tty=False)
+
+    with progress.step("Building images", success_label="Images built"):
+        pass
+
+    output = out.getvalue()
+    assert "[done] Images built" in output
+    assert "[done] Building images" not in output
+
+
 def _raise_with_details(progress: StepProgress) -> None:
     """Helper — raises inside a step with buffered details."""
     with progress.step("Services started") as ctx:
@@ -200,6 +212,19 @@ def test_step_progress_reporter_success() -> None:
     assert "uploaded docker-compose.yml" not in output
 
 
+def test_step_progress_reporter_success_uses_success_label() -> None:
+    """Reporter callers can override the completion label for a step."""
+    progress, out, _ = _make_progress(verbose=False, tty=False)
+    rpt = StepProgressReporter(progress)
+
+    rpt.start_step("Building images", success_label="Images built")
+    rpt.end_step(success=True)
+
+    output = out.getvalue()
+    assert "[done] Images built" in output
+    assert "[done] Building images" not in output
+
+
 def test_step_progress_reporter_failure() -> None:
     """StepProgressReporter renders failure and dumps details."""
     progress, out, err = _make_progress(verbose=False, tty=False)
@@ -211,3 +236,4 @@ def test_step_progress_reporter_failure() -> None:
 
     assert "[FAIL] Docker build" in out.getvalue()
     assert "build log line 1" in err.getvalue()
+    assert "build failed" in err.getvalue()

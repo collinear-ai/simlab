@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
@@ -45,6 +46,7 @@ def run_with_agent_contract(
     api_key: str | None = None,
     base_url: str | None = None,
     stop_event: threading.Event | None = None,
+    on_step: Callable[[int], None] | None = None,
 ) -> RunArtifacts:
     """Execute setup() then run() and always return populated artifacts."""
     artifacts = RunArtifacts(
@@ -53,6 +55,7 @@ def run_with_agent_contract(
         model=model,
         provider=provider,
         max_steps=max_steps,
+        on_step=on_step,
     )
     if agent_import_path:
         agent_cls = load_agent_class(agent_import_path)

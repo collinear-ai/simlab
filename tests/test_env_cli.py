@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypedDict
 from unittest.mock import patch
 
 import click
@@ -44,6 +45,13 @@ class _FakeRegistry:
             )()
             out.append(t)
         return out
+
+
+class _ComposeUpCall(TypedDict, total=False):
+    up_cmd: list[str]
+    has_builds: bool
+    health: dict[str, str]
+    timeout: int
 
 
 def _fake_compose_output(
@@ -1279,6 +1287,142 @@ def test_local_health_fetcher_uses_compose_ps_all(tmp_path: Path) -> None:
     )
 
 
+def test_local_health_fetcher_preserves_hyphenated_service_names(tmp_path: Path) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text(
+        "services:\n  harbor-openhands-agent-server: {}\n  harbor-coding-env: {}\n",
+        encoding="utf-8",
+    )
+    completed = SimpleNamespace(
+        returncode=0,
+        stdout=(
+            "env-harbor-openhands-agent-server-1\tUp 5 seconds (healthy)\n"
+            "env-harbor-coding-env-1\tUp 5 seconds (health: starting)\n"
+        ),
+    )
+
+    with patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed):
+        fetch = lifecycle_module._local_health_fetcher(compose_file)
+        assert fetch() == {
+            "harbor-openhands-agent-server": "healthy",
+            "harbor-coding-env": "starting",
+        }
+
+
+def test_local_health_fetcher_handles_hyphenated_project_names(tmp_path: Path) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text(
+        "services:\n  harbor-openhands-agent-server: {}\n  harbor-coding-env: {}\n",
+        encoding="utf-8",
+    )
+    completed = SimpleNamespace(
+        returncode=0,
+        stdout=(
+            "baseline-env-harbor-openhands-agent-server-1\tUp 5 seconds (healthy)\n"
+            "baseline-env-harbor-coding-env-1\tUp 5 seconds (health: starting)\n"
+        ),
+    )
+
+    with patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed):
+        fetch = lifecycle_module._local_health_fetcher(compose_file)
+        assert fetch() == {
+            "harbor-openhands-agent-server": "healthy",
+            "harbor-coding-env": "starting",
+        }
+
+
+def test_run_compose_up_local_shows_spinner(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = {"value": 0.0}
+
+    def fake_time() -> float:
+        now["value"] += 1.0
+        return now["value"]
+
+    class FakeStream:
+        def __init__(self, chunks: list[str]) -> None:
+            self._chunks = iter(chunks)
+            self.read_calls = 0
+
+        def read(self, _size: int) -> str:
+            self.read_calls += 1
+            return next(self._chunks, "")
+
+        def close(self) -> None:
+            return None
+
+    class FakePopen:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self._poll_values = iter([None, 0])
+            self.stdout = FakeStream(["compose stdout"])
+            self.stderr = FakeStream([""])
+
+        def poll(self) -> int | None:
+            value = next(self._poll_values)
+            if value is not None:
+                assert self.stdout.read_calls > 0
+                assert self.stderr.read_calls > 0
+                self.returncode = value
+            return value
+
+        def wait(self) -> int:
+            return self.returncode
+
+    monkeypatch.setattr(lifecycle_module.time, "time", fake_time)
+    monkeypatch.setattr(lifecycle_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(lifecycle_module, "_clear_lines", lambda _n: None)
+    monkeypatch.setattr(
+        lifecycle_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: FakePopen(),
+    )
+
+    result = lifecycle_module._run_compose_up_local(["docker", "compose", "up"], has_builds=True)
+
+    assert result.returncode == 0
+    assert result.stdout == "compose stdout"
+    assert "Starting docker compose build..." in capsys.readouterr().out
+
+
+def test_ensure_env_started_local_uses_compose_spinner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text(
+        "services:\n  web:\n    build:\n      context: .\n",
+        encoding="utf-8",
+    )
+    called: _ComposeUpCall = {}
+
+    monkeypatch.setattr(
+        lifecycle_module, "_get_preseed_service_names", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_run_compose_up_local",
+        lambda up_cmd, *, has_builds: called.update({"up_cmd": up_cmd, "has_builds": has_builds})
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(lifecycle_module, "_local_health_fetcher", lambda _compose_file: dict)
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_poll_health",
+        lambda health_fetcher, timeout=180: called.update(
+            {"health": health_fetcher(), "timeout": timeout}
+        ),
+    )
+
+    lifecycle_module.ensure_env_started_local(tmp_path, EnvConfig(name="test-env"))
+
+    assert called["has_builds"] is True
+    assert "--build" in called["up_cmd"]
+    assert called["timeout"] == 180
+    assert called["health"] == {}
+
+
 def test_poll_health_raises_when_service_exits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lifecycle_module.time, "sleep", lambda _seconds: None)
 
@@ -1311,7 +1455,7 @@ def test_poll_health_requires_stable_ready_state(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(lifecycle_module.time, "time", fake_time)
     monkeypatch.setattr(lifecycle_module.time, "sleep", lambda _seconds: None)
 
-    lifecycle_module._poll_health(lambda: next(states), timeout=5)
+    lifecycle_module._poll_health(lambda: next(states), timeout=8)
 
 
 def test_poll_health_does_not_succeed_on_single_running_poll(

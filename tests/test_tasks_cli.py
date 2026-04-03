@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import simlab.cli.tasks as tasks_module
 from click.testing import CliRunner
 from simlab.agents.base import RunArtifacts
@@ -666,3 +667,267 @@ def test_tasks_run_passes_mcp_verifier_tool_urls_when_http_tool_servers_are_abse
     assert result.exit_code == 0, result.output
     _, _, verifier_tool_servers = mocked_build_verifier_artifacts.call_args.args
     assert verifier_tool_servers == {"demo": "http://localhost:8091"}
+
+
+def test_tasks_run_writes_atif_when_rollout_format_flag_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    bundle_dir = tmp_path / "generated-tasks"
+    _write_local_bundle(bundle_dir)
+    env_name = "local-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: local-env\ntemplate: customer_support\ntools: [email]\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+
+    with (
+        patch(
+            "simlab.cli.tasks.get_global_config_from_ctx",
+            return_value=SimpleNamespace(
+                scenario_manager_api_url="https://api.example.com",
+                api_key="api-token",
+                daytona_api_key=None,
+                agent_model=None,
+                agent_provider=None,
+                agent_api_key=None,
+                agent_base_url=None,
+                verifier_model=None,
+                verifier_provider=None,
+                verifier_base_url=None,
+                verifier_api_key=None,
+            ),
+        ),
+        patch(
+            "simlab.cli.tasks.resolve_scenario_manager_api_url",
+            return_value="https://api.example.com",
+        ),
+        patch("simlab.cli.tasks.ensure_env_artifacts_current"),
+        patch(
+            "simlab.cli.tasks._resolve_endpoints",
+            return_value=({"email": "http://localhost:8040"}, False),
+        ),
+        patch("simlab.cli.tasks._require_reachable_endpoints"),
+        patch("simlab.cli.tasks._provision_task_calendar_users"),
+        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
+        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
+        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch(
+            "simlab.agents.run_with_agent_contract",
+            return_value=RunArtifacts(
+                task_id="generated-task",
+                task="Complete the generated task.",
+                model="gpt-5.2",
+                provider="openai",
+                max_steps=5,
+            ),
+        ),
+    ):
+        result = runner.invoke(
+            tasks,
+            [
+                "run",
+                "--env",
+                env_name,
+                "--tasks-dir",
+                str(bundle_dir),
+                "--task",
+                "generated-task",
+                "--agent-model",
+                "gpt-5.2",
+                "--agent-api-key",
+                "openai-key",
+                "--tasks-rollout-format",
+                "atif",
+            ],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    run_dirs = sorted((tmp_path / "output").glob("agent_run_*"))
+    assert len(run_dirs) == 1
+    assert not (run_dirs[0] / "artifacts.json").exists()
+    trajectory = json.loads((run_dirs[0] / "agent" / "trajectory.json").read_text(encoding="utf-8"))
+    assert trajectory["schema_version"] == "ATIF-v1.4"
+    assert trajectory["agent"]["model_name"] == "gpt-5.2"
+
+
+def test_tasks_run_writes_atif_when_env_rollout_format_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    bundle_dir = tmp_path / "generated-tasks"
+    _write_local_bundle(bundle_dir)
+    env_name = "local-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: local-env\ntemplate: customer_support\ntools: [email]\nrollout_format: atif\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+
+    with (
+        patch(
+            "simlab.cli.tasks.get_global_config_from_ctx",
+            return_value=SimpleNamespace(
+                scenario_manager_api_url="https://api.example.com",
+                api_key="api-token",
+                daytona_api_key=None,
+                agent_model=None,
+                agent_provider=None,
+                agent_api_key=None,
+                agent_base_url=None,
+                verifier_model=None,
+                verifier_provider=None,
+                verifier_base_url=None,
+                verifier_api_key=None,
+            ),
+        ),
+        patch(
+            "simlab.cli.tasks.resolve_scenario_manager_api_url",
+            return_value="https://api.example.com",
+        ),
+        patch("simlab.cli.tasks.ensure_env_artifacts_current"),
+        patch(
+            "simlab.cli.tasks._resolve_endpoints",
+            return_value=({"email": "http://localhost:8040"}, False),
+        ),
+        patch("simlab.cli.tasks._require_reachable_endpoints"),
+        patch("simlab.cli.tasks._provision_task_calendar_users"),
+        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
+        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
+        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch(
+            "simlab.agents.run_with_agent_contract",
+            return_value=RunArtifacts(
+                task_id="generated-task",
+                task="Complete the generated task.",
+                model="gpt-5.2",
+                provider="openai",
+                max_steps=5,
+            ),
+        ),
+    ):
+        result = runner.invoke(
+            tasks,
+            [
+                "run",
+                "--env",
+                env_name,
+                "--tasks-dir",
+                str(bundle_dir),
+                "--task",
+                "generated-task",
+                "--agent-model",
+                "gpt-5.2",
+                "--agent-api-key",
+                "openai-key",
+            ],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    run_dirs = sorted((tmp_path / "output").glob("agent_run_*"))
+    assert len(run_dirs) == 1
+    assert not (run_dirs[0] / "artifacts.json").exists()
+    trajectory = json.loads((run_dirs[0] / "agent" / "trajectory.json").read_text(encoding="utf-8"))
+    assert trajectory["schema_version"] == "ATIF-v1.4"
+    assert trajectory["agent"]["model_name"] == "gpt-5.2"
+
+
+def test_tasks_run_writes_atif_when_global_rollout_format_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    bundle_dir = tmp_path / "generated-tasks"
+    _write_local_bundle(bundle_dir)
+    env_name = "local-env"
+    env_dir = tmp_path / "environments" / env_name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        "name: local-env\ntemplate: customer_support\ntools: [email]\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+
+    with (
+        patch(
+            "simlab.cli.tasks.get_global_config_from_ctx",
+            return_value=SimpleNamespace(
+                scenario_manager_api_url="https://api.example.com",
+                api_key="api-token",
+                daytona_api_key=None,
+                agent_model=None,
+                agent_provider=None,
+                agent_api_key=None,
+                agent_base_url=None,
+                verifier_model=None,
+                verifier_provider=None,
+                verifier_base_url=None,
+                verifier_api_key=None,
+                tasks_rollout_format="atif",
+            ),
+        ),
+        patch(
+            "simlab.cli.tasks.resolve_scenario_manager_api_url",
+            return_value="https://api.example.com",
+        ),
+        patch("simlab.cli.tasks.ensure_env_artifacts_current"),
+        patch(
+            "simlab.cli.tasks._resolve_endpoints",
+            return_value=({"email": "http://localhost:8040"}, False),
+        ),
+        patch("simlab.cli.tasks._require_reachable_endpoints"),
+        patch("simlab.cli.tasks._provision_task_calendar_users"),
+        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
+        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
+        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch(
+            "simlab.agents.run_with_agent_contract",
+            return_value=RunArtifacts(
+                task_id="generated-task",
+                task="Complete the generated task.",
+                model="gpt-5.2",
+                provider="openai",
+                max_steps=5,
+            ),
+        ),
+    ):
+        result = runner.invoke(
+            tasks,
+            [
+                "run",
+                "--env",
+                env_name,
+                "--tasks-dir",
+                str(bundle_dir),
+                "--task",
+                "generated-task",
+                "--agent-model",
+                "gpt-5.2",
+                "--agent-api-key",
+                "openai-key",
+            ],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(tmp_path / "environments")},
+        )
+
+    assert result.exit_code == 0, result.output
+    run_dirs = sorted((tmp_path / "output").glob("agent_run_*"))
+    assert len(run_dirs) == 1
+    assert not (run_dirs[0] / "artifacts.json").exists()
+    trajectory = json.loads((run_dirs[0] / "agent" / "trajectory.json").read_text(encoding="utf-8"))
+    assert trajectory["schema_version"] == "ATIF-v1.4"
+    assert trajectory["agent"]["model_name"] == "gpt-5.2"

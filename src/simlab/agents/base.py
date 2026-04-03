@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import warnings
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Callable
 from collections.abc import Coroutine
 from concurrent.futures import Future
 from dataclasses import asdict
@@ -20,6 +22,7 @@ from typing import Any
 from typing import TypeVar
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,21 +68,36 @@ class RunArtifacts:
     error: str | None = None
     steps_taken: int = 0
     max_steps: int | None = None
+    on_step: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def record_message(self, role: str, content: str | dict[str, object]) -> None:
         """Append a message (role + content) to this run's message list."""
-        self.messages.append({"role": role, "content": content})
+        self.messages.append(
+            {
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
     def record_tool_call(self, call: ToolCall, result: ToolCallResult) -> None:
         """Record a tool call and its result, incrementing steps taken."""
         self.tool_calls.append(call)
         self.tool_results.append(result)
         self.steps_taken += 1
+        on_step = self.on_step
+        if on_step is None:
+            return
+        try:
+            on_step(self.steps_taken)
+        except Exception:
+            logger.debug("on_step callback raised", exc_info=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable dict of this run's artifacts."""
         data = asdict(self)
+        data.pop("on_step", None)
         data["tool_calls"] = [asdict(x) for x in self.tool_calls]
         data["tool_results"] = [asdict(x) for x in self.tool_results]
         return data

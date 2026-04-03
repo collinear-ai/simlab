@@ -43,7 +43,7 @@ class ServiceDefinition(BaseModel):
     image: str = ""
     build: str | BuildDefinition | None = None
     ports: list[str] = Field(default_factory=list)
-    environment: dict[str, str] = Field(default_factory=dict)
+    environment: dict[str, str] | list[str] = Field(default_factory=dict)
     depends_on: list[str] | dict[str, Any] = Field(default_factory=list)
     volumes: list[str] = Field(default_factory=list)
     command: list[str] | str | None = None
@@ -53,6 +53,10 @@ class ServiceDefinition(BaseModel):
     def _check_image_or_build(self) -> ServiceDefinition:
         if not self.image and not self.build:
             raise ValueError("Service must specify either 'image' or 'build'")
+        if isinstance(self.environment, list):
+            for item in self.environment:
+                if not isinstance(item, str):
+                    raise TypeError("Service environment list entries must be strings")
         return self
 
 

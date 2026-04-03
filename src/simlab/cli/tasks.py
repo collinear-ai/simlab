@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
-import importlib
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
@@ -21,12 +23,15 @@ from typing import cast
 
 import click
 import yaml
+from click.core import ParameterSource
 
 from simlab.agents.mcp_client import MCPClientHandle
 from simlab.api.client import ScenarioManagerApiError
 from simlab.api.client import ScenarioManagerClient
 from simlab.api.client import resolve_scenario_manager_api_url
 from simlab.api.schemas import ScenarioTask
+from simlab.cli.progress import ParallelRolloutProgress
+from simlab.cli.progress import StepProgress
 from simlab.cli.rollout_summary_card import print_parallel_rollout_summary_card
 from simlab.cli.rollout_summary_card import print_single_rollout_summary_card
 from simlab.composer.engine import ComposeEngine
@@ -35,7 +40,6 @@ from simlab.composer.engine import get_mcp_gateway_host_port
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_agent_api_key
 from simlab.config import resolve_collinear_api_key
-from simlab.config import resolve_daytona_api_key
 from simlab.config import resolve_env_dir
 from simlab.env_artifacts import ensure_env_artifacts_current
 from simlab.env_artifacts import load_env_config
@@ -44,6 +48,12 @@ from simlab.mcp_config import get_mcp_command_servers
 from simlab.mcp_config import get_mcp_server_urls
 from simlab.mcp_config import load_mcp_servers_from_env_dir
 from simlab.npc_chat.activation import NpcChatSession
+from simlab.runtime.adapters.harbor import prepare as harbor_prepare
+from simlab.runtime.adapters.harbor import trajectory as harbor_trajectory
+from simlab.runtime.adapters.harbor import urls as harbor_urls
+from simlab.runtime.adapters.harbor import verifier as harbor_verifier_runtime
+from simlab.runtime.adapters.harbor import workspace as harbor_workspace_runtime
+from simlab.runtime.daytona_client import get_daytona_client as _get_daytona_client
 from simlab.runtime.env_lifecycle import ensure_daytona_sandbox_ready
 from simlab.runtime.env_lifecycle import ensure_env_started_daytona
 from simlab.runtime.env_lifecycle import ensure_env_started_local
@@ -109,6 +119,9 @@ _TOOL_WEB_SERVICE_META = {
 _CALENDAR_INTERNAL_BASE_URL = "http://baikal:80/dav.php"
 _CALENDAR_DEFAULT_USERNAME = "chronos"
 _CALENDAR_DEFAULT_PASSWORD = "admin"  # noqa: S105 - seeded test credential for Baikal
+ROLLOUT_FORMAT_DEFAULT = "default"
+ROLLOUT_FORMAT_ATIF = "atif"
+_ROLLOUT_FORMAT_CHOICES = (ROLLOUT_FORMAT_DEFAULT, ROLLOUT_FORMAT_ATIF)
 
 
 def get_env_runtime_helpers() -> tuple[Any, Any]:
@@ -148,6 +161,39 @@ def get_verifier_runtime_helpers() -> tuple[Any, Any, Any]:
     from simlab.verifiers import run_verifier
 
     return build_verifier_artifacts, infer_scenario_from_evaluator, run_verifier
+
+
+def _normalize_rollout_format(value: object) -> str | None:
+    """Normalize a rollout format string and ignore unsupported values."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in _ROLLOUT_FORMAT_CHOICES:
+        return normalized
+    return None
+
+
+def _resolve_rollout_format(
+    *,
+    requested: str | None,
+    config: EnvConfig,
+    global_cfg: Any,
+    harbor: bool,
+) -> str:
+    """Resolve rollout format from CLI, env config, global config, then defaults."""
+    requested_format = _normalize_rollout_format(requested)
+    if requested_format is not None:
+        return requested_format
+
+    env_format = _normalize_rollout_format(getattr(config, "rollout_format", None))
+    if env_format is not None:
+        return env_format
+
+    global_format = _normalize_rollout_format(getattr(global_cfg, "tasks_rollout_format", None))
+    if global_format is not None:
+        return global_format
+
+    return ROLLOUT_FORMAT_ATIF if harbor else ROLLOUT_FORMAT_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +358,7 @@ def _wait_for_mcp_tools_available(
     timeout: int = 120,
     poll_interval: int = 5,
     log_prefix: str = "",
+    quiet: bool = False,
 ) -> None:
     """Poll MCP tool discovery until every configured client exposes tools."""
     if not mcp_clients:
@@ -323,7 +370,8 @@ def _wait_for_mcp_tools_available(
     while failures:
         if time.monotonic() >= deadline:
             raise RuntimeError(f"{prefix}Timed out waiting for MCP tools: {'; '.join(failures)}")
-        click.echo(f"{prefix}Waiting for MCP tools...")
+        if not quiet:
+            click.echo(f"{prefix}Waiting for MCP tools...")
         time.sleep(poll_interval)
         failures = _collect_mcp_tool_failures(mcp_clients)
 
@@ -749,6 +797,7 @@ def _provision_task_calendar_users(
     *,
     using_daytona: bool,
     daytona_api_key: str | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> None:
     """Ensure Baikal has backing CalDAV users/calendars for task-specific accounts."""
     if not _task_uses_calendar(task):
@@ -780,7 +829,10 @@ def _provision_task_calendar_users(
         tool_names=["calendar"],
     )
 
-    click.echo(f"  Provisioning calendar users: {', '.join(accounts)}")
+    if log is None:
+        click.echo(f"  Provisioning calendar users: {', '.join(accounts)}")
+    else:
+        log(f"Provisioning calendar users: {', '.join(accounts)}")
     if using_daytona:
         DaytonaRunner = get_daytona_runner_class()
         runner = DaytonaRunner(daytona_api_key=daytona_api_key)
@@ -824,6 +876,7 @@ def _provision_task_group_channels(
     *,
     using_daytona: bool,
     daytona_api_key: str | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> None:
     """Re-run rocketchat-seed with task-specific NPC users and group channels.
 
@@ -905,9 +958,13 @@ def _provision_task_group_channels(
         return
 
     channel_names = [ch.get("channel_name", "?") for ch in group_channels if isinstance(ch, dict)]
-    click.echo(
-        f"  Provisioning group channels: {', '.join(channel_names)} ({len(npc_ids)} NPC user(s))"
-    )
+    if log is None:
+        click.echo(
+            f"  Provisioning group channels: {', '.join(channel_names)} "
+            f"({len(npc_ids)} NPC user(s))"
+        )
+    else:
+        log(f"Provisioning group channels: {', '.join(channel_names)} ({len(npc_ids)} NPC user(s))")
 
     if using_daytona:
         DaytonaRunner = get_daytona_runner_class()
@@ -934,6 +991,7 @@ def run_env_seed_services(
     *,
     using_daytona: bool,
     daytona_api_key: str | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> None:
     """Run environment seed services so mutable tools start each run from seed state."""
     config_file = Path(config_path)
@@ -943,7 +1001,10 @@ def run_env_seed_services(
     if not seed_svc_names:
         return
 
-    click.echo("  Resetting environment state from seed services")
+    if log is None:
+        click.echo("  Resetting environment state from seed services")
+    else:
+        log("Resetting environment state from seed services")
     if using_daytona:
         DaytonaRunner = get_daytona_runner_class()
         runner = DaytonaRunner(daytona_api_key=daytona_api_key)
@@ -958,6 +1019,8 @@ def _ensure_task_calendar_accounts(
     profiles: dict[str, dict[str, Any]],
     endpoints: dict[str, str],
     config: EnvConfig,
+    *,
+    log: Callable[[str], None] | None = None,
 ) -> None:
     """Register task-specific calendar accounts before seed/run."""
     if not _task_uses_calendar(task):
@@ -991,7 +1054,12 @@ def _ensure_task_calendar_accounts(
                 {"alias": account},
             )
             if _calendar_account_is_connected(test_resp):
-                click.echo(f"  {click.style('✓', fg='green')} Calendar account: [{account}] ready")
+                if log is None:
+                    click.echo(
+                        f"  {click.style('✓', fg='green')} Calendar account: [{account}] ready"
+                    )
+                else:
+                    log(f"✓ Calendar account ready: {account}")
                 continue
 
         resp = _query_tool_server_with_retries(
@@ -1039,15 +1107,27 @@ def _ensure_task_calendar_accounts(
             raise SystemExit(1)
 
         existing_aliases.add(account)
-        click.echo(f"  {click.style('✓', fg='green')} Calendar account: [{account}] ready")
+        if log is None:
+            click.echo(f"  {click.style('✓', fg='green')} Calendar account: [{account}] ready")
+        else:
+            log(f"✓ Calendar account ready: {account}")
 
 
 def _seed_task_data(
     task: dict[str, Any],
     profiles: dict[str, dict[str, Any]],
     endpoints: dict[str, str],
+    *,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[int, int]:
     """Seed task emails and calendar events. Returns ``(ok, fail)`` counts."""
+
+    def _emit(message: str, *, styled: str | None = None) -> None:
+        if log is None:
+            click.echo(styled or message)
+        else:
+            log(message)
+
     emails = task.get("seed_emails", [])
     cal_events = task.get("seed_calendar_events", [])
     ok, fail = 0, 0
@@ -1056,7 +1136,10 @@ def _seed_task_data(
     if emails:
         email_url = endpoints.get("email")
         if not email_url:
-            click.echo(click.style("  No email tool server in environment config.", fg="yellow"))
+            _emit(
+                "No email tool server in environment config.",
+                styled=click.style("  No email tool server in environment config.", fg="yellow"),
+            )
         else:
             for em in emails:
                 from_id = em.get("from_profile_id", "")
@@ -1067,12 +1150,13 @@ def _seed_task_data(
                     from_addr = from_id
                 else:
                     from_addr = f"{from_id}@unknown.com"
-                    click.echo(
-                        click.style(
+                    _emit(
+                        f"! from_profile_id '{from_id}' not in profiles, falling back to {from_addr}",
+                        styled=click.style(
                             f"  ! from_profile_id '{from_id}' not in profiles, "
                             f"falling back to {from_addr}",
                             fg="yellow",
-                        )
+                        ),
                     )
 
                 params: dict[str, Any] = {
@@ -1087,23 +1171,30 @@ def _seed_task_data(
                 resp = _query_tool_server_with_retries(email_url, "send_email", params)
                 if not _tool_response_is_error(resp):
                     ok += 1
-                    click.echo(
-                        f"  {click.style('✓', fg='green')} Email: "
-                        f'{from_addr} → {em["to_addr"]}  "{em["subject"]}"'
+                    _emit(
+                        f'✓ Email: {from_addr} → {em["to_addr"]}  "{em["subject"]}"',
+                        styled=(
+                            f"  {click.style('✓', fg='green')} Email: "
+                            f'{from_addr} → {em["to_addr"]}  "{em["subject"]}"'
+                        ),
                     )
                 else:
                     fail += 1
-                    click.echo(
-                        click.style(
+                    _emit(
+                        f'✗ Email failed: "{em["subject"]}" (endpoint: {email_url})',
+                        styled=click.style(
                             f'  ✗ Email failed: "{em["subject"]}" (endpoint: {email_url})',
                             fg="red",
-                        )
+                        ),
                     )
 
     if cal_events:
         cal_url = endpoints.get("calendar")
         if not cal_url:
-            click.echo(click.style("  No calendar tool server in environment config.", fg="yellow"))
+            _emit(
+                "No calendar tool server in environment config.",
+                styled=click.style("  No calendar tool server in environment config.", fg="yellow"),
+            )
         else:
             for ev in cal_events:
                 account = str(ev.get("account") or "").strip()
@@ -1116,11 +1207,13 @@ def _seed_task_data(
                 )
                 if not calendar_uid:
                     fail += 1
-                    click.echo(
-                        click.style(
-                            f"  ✗ Calendar UID lookup failed: [{account}] {calendar_id} (endpoint: {cal_url})",
+                    _emit(
+                        f"✗ Calendar UID lookup failed: [{account}] {calendar_id} (endpoint: {cal_url})",
+                        styled=click.style(
+                            f"  ✗ Calendar UID lookup failed: [{account}] {calendar_id} "
+                            f"(endpoint: {cal_url})",
                             fg="red",
-                        )
+                        ),
                     )
                     continue
                 params = {
@@ -1134,17 +1227,21 @@ def _seed_task_data(
                 resp = _query_tool_server_with_retries(cal_url, "create_event", params)
                 if not _tool_response_is_error(resp):
                     ok += 1
-                    click.echo(
-                        f"  {click.style('✓', fg='green')} Calendar: "
-                        f"[{ev['account']}] {ev['summary']}  {ev['start']}"
+                    _emit(
+                        f"✓ Calendar: [{ev['account']}] {ev['summary']}  {ev['start']}",
+                        styled=(
+                            f"  {click.style('✓', fg='green')} Calendar: "
+                            f"[{ev['account']}] {ev['summary']}  {ev['start']}"
+                        ),
                     )
                 else:
                     fail += 1
-                    click.echo(
-                        click.style(
+                    _emit(
+                        f"✗ Calendar event failed: {ev['summary']} (endpoint: {cal_url})",
+                        styled=click.style(
                             f"  ✗ Calendar event failed: {ev['summary']} (endpoint: {cal_url})",
                             fg="red",
-                        )
+                        ),
                     )
 
     return ok, fail
@@ -1163,6 +1260,9 @@ def _rewrite_tool_server_urls(
     task_copy = copy.deepcopy(task_data)
     for ts in task_copy.get("tool_servers", []):
         service_name = ts.get("name", "")
+        if service_name in endpoints:
+            ts["tool_server_url"] = endpoints[service_name]
+            continue
         tool_name = _SERVICE_TO_TOOL.get(service_name)
         if tool_name and tool_name in endpoints:
             ts["tool_server_url"] = endpoints[tool_name]
@@ -1216,25 +1316,6 @@ def _verifier_tool_servers(
     return merged
 
 
-def _compose_service_host_port(compose_data: dict[str, Any], service_name: str) -> int | None:
-    """Extract mapped host port for a docker-compose service, if available."""
-    services = compose_data.get("services", {})
-    if not isinstance(services, dict):
-        return None
-    service = services.get(service_name)
-    if not isinstance(service, dict):
-        return None
-    ports = service.get("ports", [])
-    if not isinstance(ports, list):
-        return None
-    for entry in ports:
-        if isinstance(entry, str) and ":" in entry:
-            host = entry.split(":", 1)[0].strip().strip('"').strip("'")
-            if host.isdigit():
-                return int(host)
-    return None
-
-
 def _build_services_available_section(
     config: EnvConfig,
     *,
@@ -1270,7 +1351,7 @@ def _build_services_available_section(
             continue
         compose_svc = meta["compose_service"]
         default_port = meta["default_port"]
-        host_port = _compose_service_host_port(compose_data, str(compose_svc))
+        host_port = harbor_urls.compose_service_host_port(compose_data, str(compose_svc))
         if host_port is None:
             host_port = cast(int, default_port)
         line = f"* {meta['label']}: http://localhost:{host_port}{meta['credentials']}"
@@ -1278,36 +1359,6 @@ def _build_services_available_section(
     if not lines:
         return ""
     return "Services available to you as websites:\n" + "\n".join(lines)
-
-
-def _get_daytona_client(daytona_api_key: str | None = None) -> Any:
-    """Construct Daytona SDK client lazily so local-only use has no hard dependency."""
-    try:
-        daytona_mod = importlib.import_module("daytona")
-        Daytona = daytona_mod.Daytona
-        DaytonaConfig = daytona_mod.DaytonaConfig
-    except Exception as exc:  # pragma: no cover - import path depends on env
-        click.echo(
-            click.style(
-                f"Daytona SDK is required for Daytona mode: {exc}",
-                fg="red",
-            ),
-            err=True,
-        )
-        raise SystemExit(1)
-
-    api_key = resolve_daytona_api_key(daytona_api_key)
-    if not api_key:
-        click.echo(
-            click.style(
-                "Daytona API key is required for Daytona mode via --daytona-api-key, "
-                "config, SIMLAB_DAYTONA_API_KEY, or DAYTONA_API_KEY.",
-                fg="red",
-            ),
-            err=True,
-        )
-        raise SystemExit(1)
-    return Daytona(DaytonaConfig(api_key=api_key))
 
 
 def _sandbox_status(sandbox: Any) -> str:
@@ -1568,6 +1619,7 @@ def _require_reachable_endpoints(
     timeout: int = 120,
     poll_interval: int = 5,
     log_prefix: str = "",
+    quiet: bool = False,
 ) -> None:
     """Fail fast when endpoints are not reachable before seed/run.
 
@@ -1603,7 +1655,8 @@ def _require_reachable_endpoints(
                     err=True,
                 )
                 break  # fall through to fail-fast check below
-            click.echo(f"{prefix}Waiting for: {', '.join(remaining)}...")
+            if not quiet:
+                click.echo(f"{prefix}Waiting for: {', '.join(remaining)}...")
             time.sleep(poll_interval)
     else:
         reachability = _reachable_endpoints(endpoints)
@@ -2287,16 +2340,28 @@ class SingleRolloutOutcome:
 @click.option(
     "--env",
     "env_name",
-    required=True,
+    default=None,
     help="Environment name (for config and endpoints).",
 )
-@click.option("--task", "task_id", required=True, help="Task ID to run.")
+@click.option("--task", "task_id", default=None, help="Task ID to run.")
 @click.option("--include-test", is_flag=True, help="Include test-category tasks.")
 @click.option(
     "--tasks-dir",
     default=None,
     type=click.Path(exists=True, file_okay=False),
     help="Path to a local task bundle (default: fetch task from API using env template).",
+)
+@click.option(
+    "--harbor",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Path to a single Harbor task directory to run through a generated temporary env.",
+)
+@click.option(
+    "--tasks-rollout-format",
+    default=None,
+    type=click.Choice(_ROLLOUT_FORMAT_CHOICES, case_sensitive=False),
+    help="Rollout artifact format to write (defaults to Harbor=atif, otherwise default).",
 )
 @click.option(
     "--agent-model",
@@ -2374,10 +2439,12 @@ class SingleRolloutOutcome:
 @with_command_telemetry("tasks run", resolver=scenario_manager_task_capture_config)
 def run(
     ctx: click.Context,
-    env_name: str,
-    task_id: str,
+    env_name: str | None,
+    task_id: str | None,
     include_test: bool,
     tasks_dir: str | None,
+    harbor: str | None,
+    tasks_rollout_format: str | None,
     model: str,
     provider: str,
     api_key: str | None,
@@ -2402,19 +2469,94 @@ def run(
     Requires --env. Optionally use --tasks-dir for a local task bundle.
     """
     global_cfg = get_global_config_from_ctx(ctx)
-    env_dir = resolve_env_dir(env_name, ctx=ctx)
-    ensure_env_artifacts_current(env_dir, action_label="tasks run")
-    config_path = str(env_dir / "env.yaml")
-    config_file = Path(config_path)
-    config = load_env_config(env_dir)
-    base_url_api = resolve_scenario_manager_api_url(
-        config_path=config_file,
+    harbor_workspace: tempfile.TemporaryDirectory[str] | None = None
+    harbor_workspace_root: Path | None = None
+    harbor_task_id_for_debug = task_id or "harbor-task"
+    run_succeeded = False
+    if harbor:
+        if env_name:
+            click.echo(click.style("Provide --env or --harbor, not both.", fg="red"), err=True)
+            raise SystemExit(1)
+        if tasks_dir:
+            click.echo(click.style("Do not combine --tasks-dir with --harbor.", fg="red"), err=True)
+            raise SystemExit(1)
+        if skip_env_setup:
+            click.echo(
+                click.style("--skip-env-setup is not supported with --harbor.", fg="red"),
+                err=True,
+            )
+            raise SystemExit(1)
+        if rollout_count > 1:
+            click.echo(
+                click.style("--rollout-count > 1 is not supported with --harbor yet.", fg="red"),
+                err=True,
+            )
+            raise SystemExit(1)
+        try:
+            if keep_alive:
+                harbor_workspace_root = harbor_workspace_runtime.create_harbor_workspace_root(
+                    task_label=task_id or Path(harbor).name
+                )
+            else:
+                harbor_workspace = tempfile.TemporaryDirectory(prefix="simlab-harbor-")
+                harbor_workspace_root = Path(harbor_workspace.name)
+            prepared = harbor_prepare.prepare_harbor_run(
+                Path(harbor),
+                workspace_root=harbor_workspace_root,
+                task_id=task_id,
+            )
+        except ValueError as e:
+            click.echo(click.style(f"Harbor task error: {e}", fg="red"), err=True)
+            raise SystemExit(1) from e
+        env_dir = prepared.env_dir
+        ensure_env_artifacts_current(env_dir, action_label="tasks run")
+        config_path = str(env_dir / "env.yaml")
+        config_file = Path(config_path)
+        config = load_env_config(env_dir)
+        bundle_dir: Path | None = prepared.bundle_dir
+        tasks_dir = str(bundle_dir)
+        task_id = prepared.task_id
+        harbor_task_id_for_debug = prepared.task_id
+        if (
+            prepared.agent_timeout_seconds is not None
+            and ctx.get_parameter_source("agent_timeout_seconds") is ParameterSource.DEFAULT
+        ):
+            agent_timeout_seconds = prepared.agent_timeout_seconds
+        base_url_api = resolve_scenario_manager_api_url(
+            config_path=config_file,
+            config=config,
+            base_url=resolve_scenario_manager_api_url(config=global_cfg),
+        )
+        scenario_manager_api_key = resolve_collinear_api_key(config=global_cfg)
+    else:
+        if not env_name:
+            click.echo(
+                click.style("Provide --env <name> or --harbor <task-dir>.", fg="red"), err=True
+            )
+            raise SystemExit(1)
+        if not task_id:
+            click.echo(click.style("Provide --task <id> when using --env.", fg="red"), err=True)
+            raise SystemExit(1)
+        env_dir = resolve_env_dir(env_name, ctx=ctx)
+        ensure_env_artifacts_current(env_dir, action_label="tasks run")
+        config_path = str(env_dir / "env.yaml")
+        config_file = Path(config_path)
+        config = load_env_config(env_dir)
+        bundle_dir = Path(tasks_dir) if tasks_dir else None
+        base_url_api = resolve_scenario_manager_api_url(
+            config_path=config_file,
+            config=config,
+            base_url=resolve_scenario_manager_api_url(config=global_cfg),
+        )
+        scenario_manager_api_key = resolve_collinear_api_key(config=global_cfg)
+
+    rollout_format = _resolve_rollout_format(
+        requested=tasks_rollout_format,
         config=config,
-        base_url=resolve_scenario_manager_api_url(config=global_cfg),
+        global_cfg=global_cfg,
+        harbor=bool(harbor),
     )
-    scenario_manager_api_key = resolve_collinear_api_key(config=global_cfg)
     backend_id: str | None = None
-    bundle_dir: Path | None = Path(tasks_dir) if tasks_dir else None
     if bundle_dir is not None:
         task_data, profiles, _local_task_file = _load_local_task(bundle_dir, task_id)
     else:
@@ -2533,31 +2675,48 @@ def run(
             max_parallel=max_parallel,
             daytona_api_key=global_cfg.daytona_api_key,
         )
-        summary = orchestrator.execute(
-            task_id=task_data.get("meta", {}).get("task_id", task_id),
-            task_data=task_data,
-            profiles=profiles,
-            compose_dir=env_dir,
-            tool_ports=tool_ports,
-            extra_tool_urls=extra_tool_urls,
-            preseed_svc_names=preseed_svc_names,
-            seed_svc_names=seed_svc_names,
-            config=config,
-            config_path=config_path,
-            model=model,
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            max_steps=max_steps,
-            agent_import_path=agent_import_path,
-            agent_timeout_seconds=agent_timeout_seconds,
-            no_seed=no_seed,
-            bundle_dir=bundle_dir,
-            global_cfg=global_cfg,
-            backend_id=backend_id,
-            base_url_api=base_url_api,
-            scenario_manager_api_key=scenario_manager_api_key,
+        parallel_task_id = task_data.get("meta", {}).get("task_id", task_id)
+        parallel_progress = (
+            ParallelRolloutProgress(
+                rollout_count=rollout_count,
+                task_name=parallel_task_id,
+                max_steps=max_steps,
+            )
+            if not verbose and sys.stdout.isatty()
+            else None
         )
+        execute_kwargs = {
+            "task_id": parallel_task_id,
+            "task_data": task_data,
+            "profiles": profiles,
+            "compose_dir": env_dir,
+            "tool_ports": tool_ports,
+            "extra_tool_urls": extra_tool_urls,
+            "preseed_svc_names": preseed_svc_names,
+            "seed_svc_names": seed_svc_names,
+            "config": config,
+            "config_path": config_path,
+            "model": model,
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": base_url,
+            "max_steps": max_steps,
+            "agent_import_path": agent_import_path,
+            "agent_timeout_seconds": agent_timeout_seconds,
+            "no_seed": no_seed,
+            "bundle_dir": bundle_dir,
+            "global_cfg": global_cfg,
+            "backend_id": backend_id,
+            "base_url_api": base_url_api,
+            "scenario_manager_api_key": scenario_manager_api_key,
+            "rollout_format": rollout_format,
+            "progress": parallel_progress,
+        }
+        if parallel_progress is None:
+            summary = orchestrator.execute(**execute_kwargs)
+        else:
+            with parallel_progress:
+                summary = orchestrator.execute(**execute_kwargs)
         print_parallel_rollout_summary_card(
             task_id=summary.task_id,
             rollout_count=summary.rollout_count,
@@ -2575,6 +2734,7 @@ def run(
 
     meta = task_data.get("meta", {})
     display = meta.get("display_name", meta.get("task_id", task_id))
+    progress = StepProgress(verbose=False) if not verbose else None
 
     # --- Phase 0: Auto-start environment if needed ---
     managed_env = False  # True only when *this* run started the env
@@ -2608,7 +2768,8 @@ def run(
                     raise SystemExit(1)
 
                 managed_env = True
-                click.echo(click.style("\nStarting environment...", bold=True))
+                if progress is None:
+                    click.echo(click.style("\nStarting environment...", bold=True))
                 if daytona:
                     ensure_env_started_daytona(
                         env_dir,
@@ -2616,6 +2777,7 @@ def run(
                         env_dir / "env.yaml",
                         daytona_api_key=global_cfg.daytona_api_key,
                         verbose=verbose,
+                        progress=progress,
                     )
                     if not no_seed:
                         run_env_seed_daytona(
@@ -2625,14 +2787,21 @@ def run(
                             daytona_api_key=global_cfg.daytona_api_key,
                         )
                 else:
-                    ensure_env_started_local(
-                        env_dir,
-                        config,
-                        env_dir / "env.yaml",
+                    env_step = (
+                        progress.step("Environment started")
+                        if progress
+                        else contextlib.nullcontext()
                     )
-                    if not no_seed:
-                        run_env_seed_local(env_dir, config, env_dir / "env.yaml")
-                click.echo(click.style("Environment started.", fg="green"))
+                    with env_step:
+                        ensure_env_started_local(
+                            env_dir,
+                            config,
+                            env_dir / "env.yaml",
+                        )
+                        if not no_seed:
+                            run_env_seed_local(env_dir, config, env_dir / "env.yaml")
+                if progress is None:
+                    click.echo(click.style("Environment started.", fg="green"))
 
         # --- Phases 1-3: Seed, run agent, verify ---
         outcome = _run_single_rollout(
@@ -2663,24 +2832,73 @@ def run(
             managed_env=managed_env,
             keep_alive=keep_alive,
             skip_env_setup=skip_env_setup,
+            rollout_format=rollout_format,
+            progress=progress,
         )
+        run_succeeded = outcome.exit_code == 0
     finally:
         # --- Phase 4: Teardown ---
+        if harbor_workspace is not None and not run_succeeded:
+            try:
+                preserved = harbor_workspace_runtime.preserve_harbor_workspace(
+                    Path(harbor_workspace.name),
+                    task_id=harbor_task_id_for_debug,
+                )
+            except Exception as e:
+                click.echo(
+                    click.style(
+                        f"Warning: failed to preserve Harbor workspace: {e}",
+                        fg="yellow",
+                    ),
+                    err=True,
+                )
+            else:
+                click.echo(
+                    click.style(f"Preserved Harbor workspace: {preserved}", fg="yellow"),
+                    err=True,
+                )
+        elif harbor_workspace_root is not None and keep_alive:
+            click.echo(
+                click.style(f"Harbor workspace retained: {harbor_workspace_root}", fg="yellow"),
+                err=True,
+            )
         if managed_env and not keep_alive:
-            click.echo(click.style("\nTearing down environment...", bold=True))
+            if progress is None:
+                click.echo(click.style("\nTearing down environment...", bold=True))
             try:
                 if daytona:
-                    env_down_daytona(env_dir, daytona_api_key=global_cfg.daytona_api_key)
+                    env_down_daytona(
+                        env_dir,
+                        daytona_api_key=global_cfg.daytona_api_key,
+                        progress=progress,
+                    )
                 else:
-                    env_down_local(env_dir)
+                    teardown_step = (
+                        progress.step("Environment stopped")
+                        if progress
+                        else contextlib.nullcontext()
+                    )
+                    with teardown_step:
+                        env_down_local(env_dir)
             except (Exception, SystemExit):
                 click.echo(
                     click.style("Warning: environment teardown failed.", fg="yellow"),
                     err=True,
                 )
+        if harbor_workspace is not None:
+            harbor_workspace.cleanup()
 
     duration_seconds = time.monotonic() - run_started
     if outcome is not None:
+        if progress is not None or quiet:
+            if outcome.verification_passed is True:
+                click.echo(click.style("  ✓ PASS", fg="green"))
+            elif outcome.verification_passed is False:
+                click.echo(click.style("  ✗ FAIL", fg="red"))
+            elif outcome.run_error:
+                click.echo(click.style("  ✗ ERROR", fg="red"))
+            else:
+                click.echo(click.style("  ✓ DONE", fg="yellow"))
         print_single_rollout_summary_card(
             task_id=outcome.task_id,
             model=outcome.model,
@@ -2769,8 +2987,11 @@ def _run_single_rollout(
     managed_env: bool,
     keep_alive: bool,
     skip_env_setup: bool,
+    rollout_format: str,
+    progress: StepProgress | None,
 ) -> SingleRolloutOutcome:
     """Execute a single task rollout: resolve endpoints, seed, run agent, verify."""
+    show_progress = progress is not None
     # --- Phase 1: Resolve endpoints ---
     endpoints, using_daytona = _resolve_endpoints(
         config_path=config_path,
@@ -2780,7 +3001,13 @@ def _run_single_rollout(
         allow_resume=not skip_env_setup,
     )
     # --- Load MCP servers (if any) and build MCP client handles ---
-    mcp_config = load_mcp_servers_from_env_dir(env_dir)
+    mcp_config = harbor_urls.rewrite_mcp_config_for_runtime(
+        load_mcp_servers_from_env_dir(env_dir),
+        env_dir=env_dir,
+        using_daytona=using_daytona,
+        daytona_client_factory=_get_daytona_client,
+        daytona_api_key=global_cfg.daytona_api_key,
+    )
     mcp_clients = _build_mcp_clients(mcp_config, endpoints)
     needed_run_endpoints = needed_task_endpoints(
         task_data,
@@ -2794,51 +3021,62 @@ def _run_single_rollout(
             using_daytona=using_daytona,
             config_path=config_path,
             wait=using_daytona,
+            quiet=show_progress,
         )
     _require_mcp_tools_available(mcp_clients)
 
     # --- Phase 2: Seeding ---
     if not no_seed:
-        # Env-level mutable-state reset — skip if we just did it during startup
-        if not managed_env:
-            run_env_seed_services(
+        seed_step = contextlib.nullcontext() if progress is None else progress.step("Seeded")
+        with seed_step as ctx:
+            log = ctx.detail if ctx is not None else None
+            # Env-level mutable-state reset — skip if we just did it during startup
+            if not managed_env:
+                run_env_seed_services(
+                    config,
+                    config_path,
+                    using_daytona=using_daytona,
+                    daytona_api_key=global_cfg.daytona_api_key,
+                    log=log,
+                )
+
+            # Task-level provisioning
+            _provision_task_group_channels(
+                task_data,
+                profiles,
                 config,
                 config_path,
                 using_daytona=using_daytona,
                 daytona_api_key=global_cfg.daytona_api_key,
+                log=log,
             )
+            _provision_task_calendar_users(
+                task_data,
+                config,
+                config_path,
+                using_daytona=using_daytona,
+                daytona_api_key=global_cfg.daytona_api_key,
+                log=log,
+            )
+            _ensure_task_calendar_accounts(task_data, profiles, endpoints, config, log=log)
 
-        # Task-level provisioning
-        _provision_task_group_channels(
-            task_data,
-            profiles,
-            config,
-            config_path,
-            using_daytona=using_daytona,
-            daytona_api_key=global_cfg.daytona_api_key,
-        )
-        _provision_task_calendar_users(
-            task_data,
-            config,
-            config_path,
-            using_daytona=using_daytona,
-            daytona_api_key=global_cfg.daytona_api_key,
-        )
-        _ensure_task_calendar_accounts(task_data, profiles, endpoints, config)
-
-        # Task data seeding
-        emails = task_data.get("seed_emails", [])
-        cal_events = task_data.get("seed_calendar_events", [])
-        group_channels = task_data.get("seed_group_channels", [])
-        if emails or cal_events or group_channels:
-            click.echo(click.style(f"\nSeeding task: {display}\n", bold=True))
-            ok, fail = _seed_task_data(task_data, profiles, endpoints)
-            if fail:
-                click.echo(
-                    click.style(f"\n  Seeding had {fail} failure(s).", fg="yellow"),
-                )
-            else:
-                click.echo(click.style(f"\n  {ok} item(s) seeded.\n", fg="green"))
+            # Task data seeding
+            emails = task_data.get("seed_emails", [])
+            cal_events = task_data.get("seed_calendar_events", [])
+            group_channels = task_data.get("seed_group_channels", [])
+            if emails or cal_events or group_channels:
+                if progress is None:
+                    click.echo(click.style(f"\nSeeding task: {display}\n", bold=True))
+                ok, fail = _seed_task_data(task_data, profiles, endpoints, log=log)
+                if progress is None:
+                    if fail:
+                        click.echo(
+                            click.style(f"\n  Seeding had {fail} failure(s).", fg="yellow"),
+                        )
+                    else:
+                        click.echo(click.style(f"\n  {ok} item(s) seeded.\n", fg="green"))
+                elif fail:
+                    click.echo(click.style(f"  Seeding had {fail} failure(s).", fg="yellow"))
 
     # --- Phase 3: Build environment + run ---
     rewritten = _rewrite_tool_server_urls(task_data, endpoints)
@@ -2857,7 +3095,8 @@ def _run_single_rollout(
     if npc_session is not None:
         npc_url = npc_session.start()
         tool_namespace_endpoints["npc-chat"] = npc_url
-        click.echo(click.style("  NPC chat tool auto-activated", fg="cyan"))
+        if progress is None:
+            click.echo(click.style("  NPC chat tool auto-activated", fg="cyan"))
 
     # Wrap everything after NPC chat start in try/finally so the server is
     # always stopped — even if validation, environment setup, or the agent
@@ -2884,16 +3123,17 @@ def _run_single_rollout(
             )
             raise SystemExit(1)
 
-        click.echo(click.style(f"\nRunning task: {display}", bold=True))
-        click.echo(f"  Model:            {model} ({provider})")
-        click.echo(f"  Max steps:        {max_steps}")
-        click.echo(f"  Agent import:     {agent_import_path or 'builtin:ReferenceAgent'}")
-        click.echo(f"  Agent timeout (s): {agent_timeout_seconds:g}")
-        click.echo(f"  Endpoint mode:    {'daytona' if using_daytona else 'local'}")
-        click.echo(f"  Managed env:      {managed_env}")
-        if verbose:
-            click.echo(f"  Tool servers:     {', '.join(sorted(tool_namespace_endpoints))}")
-        click.echo()
+        if progress is None:
+            click.echo(click.style(f"\nRunning task: {display}", bold=True))
+            click.echo(f"  Model:            {model} ({provider})")
+            click.echo(f"  Max steps:        {max_steps}")
+            click.echo(f"  Agent import:     {agent_import_path or 'builtin:ReferenceAgent'}")
+            click.echo(f"  Agent timeout (s): {agent_timeout_seconds:g}")
+            click.echo(f"  Endpoint mode:    {'daytona' if using_daytona else 'local'}")
+            click.echo(f"  Managed env:      {managed_env}")
+            if verbose:
+                click.echo(f"  Tool servers:     {', '.join(sorted(tool_namespace_endpoints))}")
+            click.echo()
 
         unified_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
         environment = unified_tool_env_cls(
@@ -2915,18 +3155,32 @@ def _run_single_rollout(
         if services_section:
             instruction = f"{instruction}\n\n{services_section}"
 
-        artifacts = run_with_agent_contract(
-            task_id=meta.get("task_id", task_id),
-            instruction=instruction,
-            model=model,
-            provider=provider,
-            max_steps=max_steps,
-            environment=environment,
-            agent_import_path=agent_import_path,
-            timeout_seconds=agent_timeout_seconds,
-            api_key=api_key,
-            base_url=base_url,
+        on_step = None
+        agent_step = (
+            contextlib.nullcontext() if progress is None else progress.step("Agent running")
         )
+        with agent_step as ctx:
+            if ctx is not None:
+                ctx.update(f"  Agent running (step 0/{max_steps})...")
+
+                def _on_step(steps_taken: int) -> None:
+                    ctx.update(f"  Agent running (step {steps_taken}/{max_steps})...")
+
+                on_step = _on_step
+
+            artifacts = run_with_agent_contract(
+                task_id=meta.get("task_id", task_id),
+                instruction=instruction,
+                model=model,
+                provider=provider,
+                max_steps=max_steps,
+                environment=environment,
+                agent_import_path=agent_import_path,
+                timeout_seconds=agent_timeout_seconds,
+                api_key=api_key,
+                base_url=base_url,
+                on_step=on_step,
+            )
     finally:
         # Always stop the NPC chat server, even on early failures.
         if npc_session is not None:
@@ -2953,8 +3207,9 @@ def _run_single_rollout(
     if npc_session is not None:
         npc_session.save_transcripts(run_dir)
 
-    output_path = run_dir / "artifacts.json"
-    artifacts.dump(output_path)
+    if rollout_format == ROLLOUT_FORMAT_DEFAULT:
+        output_path = run_dir / "artifacts.json"
+        artifacts.dump(output_path)
 
     run_error = artifacts.error
     if run_error:
@@ -2974,11 +3229,78 @@ def _run_single_rollout(
         )
 
     evaluators = task_data.get("verifiers") or task_data.get("evaluators")
+    harbor_verifier = task_data.get("harbor_verifier")
     verifier_results: list[dict[str, Any]] = []
     reward: float | None = None
     verification_passed: bool | None = None
     exit_code = 0
-    if evaluators:
+    harbor_reward_payload: dict[str, Any] | None = None
+    rollout_reward_payload: dict[str, Any] | None = None
+    if harbor_verifier:
+        click.echo(click.style("\nRunning Harbor verifier...", bold=True))
+        verification_passed, reward, harbor_reward_payload, verifier_output = (
+            harbor_verifier_runtime.run_harbor_verifier(
+                env_dir=env_dir,
+                verifier_config=harbor_verifier,
+                using_daytona=using_daytona,
+                daytona_client_factory=_get_daytona_client,
+                daytona_api_key=global_cfg.daytona_api_key,
+            )
+        )
+        if verifier_output:
+            click.echo(verifier_output)
+        verifier_dir = run_dir / "verifier"
+        verifier_dir.mkdir(parents=True, exist_ok=True)
+        (verifier_dir / "reward.txt").write_text(
+            "1" if verification_passed else "0",
+            encoding="utf-8",
+        )
+        (verifier_dir / "reward.json").write_text(
+            json.dumps(harbor_reward_payload, indent=2),
+            encoding="utf-8",
+        )
+        verifier_results = (
+            [
+                entry
+                for entry in harbor_reward_payload.get("verifier_results", [])
+                if isinstance(entry, dict)
+            ]
+            if isinstance(harbor_reward_payload, dict)
+            else []
+        )
+        rollout_reward_payload = harbor_reward_payload
+        if rollout_format == ROLLOUT_FORMAT_ATIF:
+            harbor_trajectory.write_atif_trajectory(
+                run_dir / "agent" / "trajectory.json",
+                artifacts=artifacts,
+                run_id=run_id,
+                verification_passed=verification_passed,
+                reward=reward,
+                reward_payload=harbor_reward_payload,
+            )
+        click.echo(f"Reward: {reward:.1f}")
+        click.echo(f"Verifier reward: {verifier_dir / 'reward.txt'}")
+        if not verification_passed:
+            emit_cli_event(
+                "tasks_run_failed",
+                {
+                    "failure_stage": "verifier",
+                    "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
+                    "mode": "daytona" if using_daytona else "local",
+                    "seed_requested": not no_seed,
+                    "tool_server_count": len(tool_namespace_endpoints),
+                    "had_custom_agent": bool(agent_import_path),
+                    "max_steps": max_steps,
+                    "verifier_count": 1,
+                    "managed_env": managed_env,
+                    "keep_alive": keep_alive,
+                },
+            )
+            click.echo(click.style("\nVerification failed.", fg="red"), err=True)
+            exit_code = 1
+        else:
+            click.echo(click.style("\nVerification passed.", fg="green"))
+    elif evaluators:
         build_verifier_artifacts, infer_scenario_from_evaluator, run_verifier = (
             get_verifier_runtime_helpers()
         )
@@ -2996,41 +3318,45 @@ def _run_single_rollout(
                 task_file,
                 _verifier_tool_servers(rewritten, endpoints, mcp_clients),
             )
-            if verbose:
+            if progress is None and verbose:
                 click.echo(click.style("\nRunning verifiers...", bold=True))
-            original_env, applied_env = _apply_verifier_env_overrides(global_cfg)
-            try:
-                for i, ev in enumerate(evaluators, 1):
-                    if ev.get("func") != "python_module" or not ev.get("module"):
-                        continue
-                    mod_path = ev["module"]
-                    if verbose:
-                        click.echo(f"  Verifier {i}/{len(evaluators)}: {mod_path}")
-                    result = run_verifier(
-                        mod_path,
-                        adapter,
-                        verifier_scenario,
-                        scenario_manager_base_url=base_url_api,
-                        scenario_manager_api_key=scenario_manager_api_key,
-                        local_verifier_path=(
-                            _get_local_verifier_file_path(bundle_dir, mod_path)
-                            if bundle_dir is not None
-                            else None
-                        ),
-                        verifier_cache_root=env_dir / "verifiers",
-                    )
-                    verifier_results.append(
-                        {
-                            "module": mod_path,
-                            "success": result.success,
-                            "message": result.message or "",
-                            "output": result.output or "",
-                        }
-                    )
-                    if verbose and (result.output or result.message):
-                        click.echo(result.output or result.message)
-            finally:
-                _restore_env(original_env, applied_env)
+            verifier_step = (
+                contextlib.nullcontext() if progress is None else progress.step("Verifying")
+            )
+            with verifier_step:
+                original_env, applied_env = _apply_verifier_env_overrides(global_cfg)
+                try:
+                    for i, ev in enumerate(evaluators, 1):
+                        if ev.get("func") != "python_module" or not ev.get("module"):
+                            continue
+                        mod_path = ev["module"]
+                        if progress is None and verbose:
+                            click.echo(f"  Verifier {i}/{len(evaluators)}: {mod_path}")
+                        result = run_verifier(
+                            mod_path,
+                            adapter,
+                            verifier_scenario,
+                            scenario_manager_base_url=base_url_api,
+                            scenario_manager_api_key=scenario_manager_api_key,
+                            local_verifier_path=(
+                                _get_local_verifier_file_path(bundle_dir, mod_path)
+                                if bundle_dir is not None
+                                else None
+                            ),
+                            verifier_cache_root=env_dir / "verifiers",
+                        )
+                        verifier_results.append(
+                            {
+                                "module": mod_path,
+                                "success": result.success,
+                                "message": result.message or "",
+                                "output": result.output or "",
+                            }
+                        )
+                        if progress is None and verbose and (result.output or result.message):
+                            click.echo(result.output or result.message)
+                finally:
+                    _restore_env(original_env, applied_env)
             all_passed = all(r["success"] for r in verifier_results)
 
             # --- Rubric judge (optional) ---
@@ -3052,16 +3378,17 @@ def _run_single_rollout(
                 "1" if all_passed else "0",
                 encoding="utf-8",
             )
-            reward_payload: dict[str, Any] = {
+            verifier_reward_payload: dict[str, Any] = {
                 "reward": reward,
                 "verifier_results": verifier_results,
             }
             if rubric_result_dict is not None:
-                reward_payload["rubric_result"] = rubric_result_dict
+                verifier_reward_payload["rubric_result"] = rubric_result_dict
             (verifier_dir / "reward.json").write_text(
-                json.dumps(reward_payload, indent=2),
+                json.dumps(verifier_reward_payload, indent=2),
                 encoding="utf-8",
             )
+            rollout_reward_payload = verifier_reward_payload
             if not all_passed:
                 emit_cli_event(
                     "tasks_run_failed",
@@ -3085,6 +3412,16 @@ def _run_single_rollout(
 
     elif run_error:
         exit_code = 1
+
+    if rollout_format == ROLLOUT_FORMAT_ATIF and not harbor_verifier:
+        harbor_trajectory.write_atif_trajectory(
+            run_dir / "agent" / "trajectory.json",
+            artifacts=artifacts,
+            run_id=run_id,
+            verification_passed=verification_passed,
+            reward=reward,
+            reward_payload=rollout_reward_payload,
+        )
 
     if exit_code == 0:
         emit_cli_event(

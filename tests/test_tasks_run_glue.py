@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 from simlab.cli import tasks as tasks_cli
+from simlab.runtime.adapters.harbor.workspace import preserve_harbor_workspace
 from simlab.runtime.daytona_runner import DaytonaNotFoundError
 from simlab.runtime.env_lifecycle import ensure_daytona_sandbox_ready
 from simlab.runtime.env_lifecycle import ensure_env_started_daytona
@@ -99,6 +100,22 @@ def test_rewrite_tool_server_urls_maps_erp_service_name() -> None:
 
     assert servers["erp-env"] == "https://erp.preview"
     assert servers["email-env"] == "https://email.preview"
+
+
+def test_rewrite_tool_server_urls_prefers_direct_endpoint_name() -> None:
+    task_data = {
+        "tool_servers": [
+            {"name": "harbor-main", "tool_server_url": "http://harbor-main:8020"},
+        ]
+    }
+    endpoints = {
+        "harbor-main": "https://harbor.preview",
+    }
+
+    rewritten = tasks_cli._rewrite_tool_server_urls(task_data, endpoints)
+    servers = {s["name"]: s["tool_server_url"] for s in rewritten["tool_servers"]}
+
+    assert servers["harbor-main"] == "https://harbor.preview"
 
 
 def test_needed_task_endpoints_only_include_seed_tools_for_seeding() -> None:
@@ -742,6 +759,15 @@ def test_get_daytona_endpoints_prompts_and_resumes(monkeypatch) -> None:  # noqa
         ),
     )
     _patch_registry(monkeypatch, FakeRegistry())
+    monkeypatch.setattr(
+        tasks_cli,
+        "build_registry",
+        lambda **_kwargs: SimpleNamespace(
+            get_tool=lambda name: SimpleNamespace(tool_server_port=8040, tool_server_url=None)
+            if name == "email"
+            else None
+        ),
+    )
     endpoints = tasks_cli._get_daytona_endpoints(str(cfg))
     assert endpoints["email"].startswith("https://")
     assert restart_calls == [["email-preseed"]]
@@ -1197,12 +1223,14 @@ def test_seed_command_waits_only_on_seed_endpoints(
         using_daytona: bool,
         config_path: str | None = None,
         wait: bool = False,
+        quiet: bool = False,
     ) -> None:
         captured["endpoints"] = endpoints
         captured["action"] = action
         captured["using_daytona"] = using_daytona
         captured["config_path"] = config_path
         captured["wait"] = wait
+        captured["quiet"] = quiet
 
     monkeypatch.setattr(
         tasks_cli,
@@ -1332,12 +1360,14 @@ def test_run_command_waits_only_on_task_endpoints(
         using_daytona: bool,
         config_path: str | None = None,
         wait: bool = False,
+        quiet: bool = False,
     ) -> None:
         captured["endpoints"] = endpoints
         captured["action"] = action
         captured["using_daytona"] = using_daytona
         captured["config_path"] = config_path
         captured["wait"] = wait
+        captured["quiet"] = quiet
 
     monkeypatch.setattr(
         tasks_cli,
@@ -1429,6 +1459,24 @@ def test_run_command_waits_only_on_task_endpoints(
 
 def test_env_has_local_services_false_when_no_compose(tmp_path: Path) -> None:
     assert env_has_local_services(tmp_path) is False
+
+
+def test_preserve_harbor_workspace_copies_generated_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "harbor-temp"
+    (workspace / "env").mkdir(parents=True)
+    (workspace / "task-bundle" / "tasks").mkdir(parents=True)
+    (workspace / "env" / "env.yaml").write_text("name: harbor-task\n", encoding="utf-8")
+    (workspace / "task-bundle" / "tasks" / "task.json").write_text("{}", encoding="utf-8")
+
+    preserved = preserve_harbor_workspace(workspace, task_id="finance-task")
+
+    assert preserved.parent == tmp_path / "output" / "harbor_runs"
+    assert (preserved / "env" / "env.yaml").read_text(encoding="utf-8") == "name: harbor-task\n"
+    assert (preserved / "task-bundle" / "tasks" / "task.json").read_text(encoding="utf-8") == "{}"
 
 
 def test_env_has_local_services_false_for_empty_compose(tmp_path: Path) -> None:

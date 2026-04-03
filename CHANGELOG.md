@@ -2,6 +2,33 @@
 
 All notable changes to the SimLab will be documented in this file.
 
+## [0.3.0]
+
+### Added:
+
+#### Harbor task execution and ATIF output format
+
+- **Harbor task execution** — `simlab tasks run --harbor <task-dir>` compiles
+  and runs a single Harbor task directly, including Harbor `tests/test.sh`
+  verification
+- **Configurable rollout output format** — `simlab tasks run
+  --tasks-rollout-format default|atif`, env-local `rollout_format`, and
+  global `[tasks].rollout_format` now select whether runs write native
+  `artifacts.json` or Harbor-format `agent/trajectory.json`; Harbor defaults
+  to `atif`
+
+### Changed:
+
+- **Docker build / startup progress** — When using Harbor or a tool that requires
+  a docker build, simlab now reports compose build and health-check progress more
+  accurately during environment boot
+- **ATIF eval compatibility** — `simlab eval` now falls back to ATIF
+  `final_metrics` and step timestamps when native rollout metrics are absent,
+  and Harbor verifier payloads with structured `checks` now render as
+  programmatic verifier results without requiring precomputed
+  `verifier_results`
+
+
 ## [0.2.0] — 2026-03-30
 
 ### Added:

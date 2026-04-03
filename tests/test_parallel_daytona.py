@@ -597,7 +597,7 @@ class TestParallelDaytonaMcpSupport:
         monkeypatch.setattr(
             ParallelDaytonaOrchestrator,
             "_run_verifiers",
-            lambda *args, **kwargs: (None, None),
+            lambda *args, **kwargs: (None, None, None),
         )
         monkeypatch.setattr(
             "simlab.runtime.parallel_daytona._load_skills_markdown",
@@ -639,6 +639,7 @@ class TestParallelDaytonaMcpSupport:
             backend_id=None,
             base_url_api="http://example.invalid",
             scenario_manager_api_key=None,
+            rollout_format="default",
             run_dir=tmp_path / "output",
         )
 
@@ -758,7 +759,7 @@ class TestParallelDaytonaMcpSupport:
         monkeypatch.setattr(
             ParallelDaytonaOrchestrator,
             "_run_verifiers",
-            lambda *args, **kwargs: (None, None),
+            lambda *args, **kwargs: (None, None, None),
         )
         monkeypatch.setattr(
             "simlab.runtime.parallel_daytona._load_skills_markdown",
@@ -801,6 +802,7 @@ class TestParallelDaytonaMcpSupport:
             backend_id=None,
             base_url_api="http://example.invalid",
             scenario_manager_api_key=None,
+            rollout_format="default",
             run_dir=tmp_path / "output",
         )
 
@@ -863,7 +865,7 @@ class TestParallelDaytonaMcpSupport:
 
         def fake_run_verifiers(_self: object, **kwargs):
             captured["verifier_tool_servers"] = kwargs["tool_servers"]
-            return (None, None)
+            return (None, None, None)
 
         monkeypatch.setattr(
             "simlab.runtime.parallel_daytona._get_daytona", lambda _key: fake_daytona
@@ -948,6 +950,7 @@ class TestParallelDaytonaMcpSupport:
             backend_id=None,
             base_url_api="http://example.invalid",
             scenario_manager_api_key=None,
+            rollout_format="default",
             run_dir=tmp_path / "output",
         )
 
@@ -1069,6 +1072,7 @@ class TestProvisionGroupChannels:
             profile: str,  # noqa: ARG001
             env_overrides: dict[str, str] | None = None,
             log_prefix: str = "",  # noqa: ARG001
+            quiet: bool = False,  # noqa: ARG001
         ) -> None:
             sandbox_calls.append(env_overrides or {})
 
