@@ -31,6 +31,8 @@ Current pieces:
   - `build_langchain_tools(environment, recorder=...)`
 - `simlab.agents.adapters.openai_agents`
   - `build_openai_agents_tools(environment, recorder=...)`
+- `simlab.agents.adapters.claude_agent`
+  - `build_claude_agent_tools(environment, recorder=...)`
 
 This split keeps the reusable part in core while leaving framework-specific
 message formats and orchestration outside the base runtime.
@@ -75,6 +77,7 @@ From the published package:
 ```bash
 uv tool install "simulationlab[langchain]"
 uv tool install "simulationlab[openai-agents]"
+uv tool install "simulationlab[claude-agents]"
 ```
 
 From this repo:
@@ -83,6 +86,7 @@ From this repo:
 cd cli/simlab
 uv sync --dev --extra langchain
 uv sync --dev --extra openai-agents
+uv sync --dev --extra claude-agents
 ```
 
 ## LangChain / LangGraph Example
@@ -166,6 +170,58 @@ Use this with:
 ```bash
 simlab tasks run --env my-env --task task_id \
   --agent-import-path path.to.agent:MyOpenAIAgentsAgent
+```
+
+## Claude Agent SDK Example
+
+The Claude Agent adapter converts SimLab tools into in-process MCP servers
+and records tool execution back into `RunArtifacts`.
+
+```python
+import asyncio
+
+from simlab.agents import BaseAgent, BaseEnvironment, RunArtifacts
+from simlab.agents.adapters import RunArtifactsRecorder
+from simlab.agents.adapters.claude_agent import build_claude_agent_tools
+
+from my_app import run_my_claude_agent
+
+
+class MyClaudeAgent(BaseAgent):
+    @staticmethod
+    def name() -> str:
+        return "my-claude-agent"
+
+    def setup(self, environment: BaseEnvironment) -> None:
+        _ = environment
+
+    def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: RunArtifacts,
+    ) -> None:
+        recorder = RunArtifactsRecorder(context)
+        recorder.on_user_message(instruction)
+        mcp_servers, allowed_tools = build_claude_agent_tools(
+            environment, recorder=recorder
+        )
+
+        result = asyncio.run(
+            run_my_claude_agent(
+                instruction=instruction,
+                mcp_servers=mcp_servers,
+                allowed_tools=allowed_tools,
+            )
+        )
+        context.final_observation = str(result or "")
+```
+
+Use this with:
+
+```bash
+simlab tasks run --env my-env --task task_id \
+  --agent-import-path path.to.agent:MyClaudeAgent
 ```
 
 ## Design Guidance

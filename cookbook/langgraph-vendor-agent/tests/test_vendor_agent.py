@@ -61,7 +61,7 @@ def test_vendor_agent_populates_artifacts() -> None:
     assert agent.name() == "langgraph-vendor-agent"
 
     env = FakeEnvironment()
-    context = RunArtifacts(task_id="test-1", task="test task")
+    context = RunArtifacts(task_id="test-1", task="test task", max_steps=7)
     agent.setup(env)
 
     fake_result = {
@@ -82,6 +82,9 @@ def test_vendor_agent_populates_artifacts() -> None:
         with patch("langgraph_vendor_agent.simlab_adapter.build_chat_model_from_env"):
             agent.run("test instruction", env, context)
 
+    _, invoke_kwargs = mock_app.invoke.call_args
+    assert invoke_kwargs["config"]["recursion_limit"] == 7
+
     assert context.final_observation is not None
     assert "NovaTech" in context.final_observation
     assert context.metadata["cookbook_agent"]["name"] == "langgraph-vendor-agent"
@@ -93,7 +96,7 @@ def test_vendor_agent_handles_empty_output() -> None:
 
     agent = VendorManagementAgent()
     env = FakeEnvironment()
-    context = RunArtifacts(task_id="test-2", task="test task")
+    context = RunArtifacts(task_id="test-2", task="test task", max_steps=9)
 
     fake_result = {"final_output": "", "plan": [], "step_results": []}
 
@@ -108,6 +111,9 @@ def test_vendor_agent_handles_empty_output() -> None:
 
         with patch("langgraph_vendor_agent.simlab_adapter.build_chat_model_from_env"):
             agent.run("test instruction", env, context)
+
+    _, invoke_kwargs = mock_app.invoke.call_args
+    assert invoke_kwargs["config"]["recursion_limit"] == 9
 
     assert context.error is not None
     assert "no final output" in context.error

@@ -28,15 +28,41 @@ def build_report(
     path: Path,
     *,
     compare_path: Path | None = None,
+    task_ids: tuple[str, ...] = (),
+    model_names: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build a single-rollout, multi-rollout, or comparison evaluation payload."""
     warnings: list[str] = []
     left_dataset = load_rollout_set(path, warnings=warnings)
-    left_rollouts = left_dataset["rollouts"]
+    left_rollouts = filter_rollouts(
+        left_dataset["rollouts"],
+        task_ids=task_ids,
+        model_names=model_names,
+    )
+    if not left_rollouts:
+        task_display = list(task_ids) or None
+        model_display = list(model_names) or None
+        raise EvaluationError(
+            "No rollouts matched the requested filters under "
+            f"{left_dataset['path']} "
+            f"(tasks={task_display}, models={model_display})."
+        )
 
     if compare_path is not None:
         right_dataset = load_rollout_set(compare_path, warnings=warnings)
-        right_rollouts = right_dataset["rollouts"]
+        right_rollouts = filter_rollouts(
+            right_dataset["rollouts"],
+            task_ids=task_ids,
+            model_names=model_names,
+        )
+        if not right_rollouts:
+            task_display = list(task_ids) or None
+            model_display = list(model_names) or None
+            raise EvaluationError(
+                "No rollouts matched the requested filters under "
+                f"{right_dataset['path']} "
+                f"(tasks={task_display}, models={model_display})."
+            )
 
         left_summary = summarize_rollouts(left_rollouts)
         right_summary = summarize_rollouts(right_rollouts)
@@ -80,6 +106,29 @@ def build_report(
         "summary": summarize_rollouts(left_rollouts),
         "rollouts": [brief_rollout(rollout) for rollout in left_rollouts],
     }
+
+
+def filter_rollouts(
+    rollouts: list[dict[str, Any]],
+    *,
+    task_ids: tuple[str, ...] = (),
+    model_names: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    """Filter rollouts by task and model while keeping identifiers open-ended."""
+    requested_tasks = tuple(task_id.strip() for task_id in task_ids if task_id.strip())
+    requested_models = tuple(model.strip() for model in model_names if model.strip())
+
+    if not requested_tasks and not requested_models:
+        return rollouts
+
+    filtered: list[dict[str, Any]] = []
+    for rollout in rollouts:
+        if requested_tasks and str(rollout.get("task_id") or "") not in requested_tasks:
+            continue
+        if requested_models and str(rollout.get("model") or "") not in requested_models:
+            continue
+        filtered.append(rollout)
+    return filtered
 
 
 def load_rollout_set(path: Path, *, warnings: list[str]) -> dict[str, Any]:

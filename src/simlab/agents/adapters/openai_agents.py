@@ -110,5 +110,5 @@ def build_openai_agents_tools(
 
     runtime = _ToolRuntime(environment=environment, recorder=recorder)
     descriptors = list_tool_descriptors(environment)
-    build_tool_dispatch(descriptors)
+    _ = build_tool_dispatch(descriptors)
     return [_build_openai_agents_tool(descriptor, runtime) for descriptor in descriptors]

@@ -34,6 +34,7 @@ class VendorManagementAgent(BaseAgent):
         app = graph.compile()
 
         recorder.on_user_message(instruction)
+        recursion_limit = context.max_steps or 16
         result = app.invoke(
             {
                 "task": instruction,
@@ -41,7 +42,8 @@ class VendorManagementAgent(BaseAgent):
                 "current_step_idx": 0,
                 "step_results": [],
                 "final_output": "",
-            }
+            },
+            config={"recursion_limit": recursion_limit},
         )
 
         final = result.get("final_output", "")

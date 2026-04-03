@@ -43,6 +43,9 @@ npc = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
 ]
+google-adk = [
+    "google-adk>=1.28.0",
+]
 daytona = [
     "daytona>=0.149.0",
 ]
@@ -52,6 +55,9 @@ langchain = [
 ]
 openai-agents = [
     "openai-agents>=0.9.0",
+]
+claude-agents = [
+    "claude-agent-sdk>=0.1.0",
 ]
 
 [project.scripts]

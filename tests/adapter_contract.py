@@ -28,8 +28,8 @@ class ToolAdapterHarness(Protocol):
     def tool_name(self, tool: object) -> str:
         """Return the public tool name exposed to the framework."""
 
-    def invoke(self, tool: object, payload: dict[str, Any]) -> str:
-        """Invoke one framework-native tool and return the string observation."""
+    def invoke(self, tool: object, payload: dict[str, Any]) -> object:
+        """Invoke one framework-native tool and return the observation."""
 
 
 @dataclass
@@ -205,7 +205,11 @@ def assert_records_tool_invocation(harness: ToolAdapterHarness) -> None:
 
     output = harness.invoke(tools[1], {"value": 1})
 
-    assert '"tool_name": "ping"' in output
+    if isinstance(output, str):
+        assert '"tool_name": "ping"' in output
+    else:
+        assert isinstance(output, dict)
+        assert output["tool_name"] == "ping"
     assert artifacts.tool_calls[0].tool_server == "demo"
     assert artifacts.tool_results[0].observation["parameters"] == {"value": 1}
     assert artifacts.messages[0]["role"] == "assistant"

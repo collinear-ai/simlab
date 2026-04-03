@@ -78,6 +78,7 @@ _SERVICE_TO_TOOL = {
     "email-env": "email",
     "erp-env": "erp",
     "chronos-server": "calendar",
+    "frappe-helpdesk-env": "frappe-helpdesk",
     "frappe-hrms-env": "frappe-hrms",
     "google-workspace-tool-server": "google-workspace",
     "playwright-mcp": "playwright",
@@ -90,6 +91,12 @@ _SERVICE_TO_TOOL = {
 _TOOL_TO_SERVICE = {tool: service for service, tool in _SERVICE_TO_TOOL.items()}
 
 _TOOL_WEB_SERVICE_META = {
+    "frappe-helpdesk": {
+        "compose_service": "frappe-helpdesk",
+        "label": "Frappe Helpdesk",
+        "default_port": 8000,
+        "credentials": " (login: Administrator / admin)",
+    },
     "frappe-hrms": {
         "compose_service": "frappe-hrms",
         "label": "Frappe HRMS",
@@ -415,6 +422,12 @@ def _get_local_verifier_file_path(tasks_dir: Path, module_path: str) -> Path | N
     verifier_file = verifiers_dir / f"{module_stem}.py"
     if verifier_file.is_file():
         return verifier_file
+    # Fallback: verifier stems use a "v" prefix for numeric-leading task IDs
+    # (Python modules cannot start with a digit). Try adding the prefix.
+    if module_stem and module_stem[0].isdigit():
+        prefixed = verifiers_dir / f"v{module_stem}.py"
+        if prefixed.is_file():
+            return prefixed
     return None
 
 

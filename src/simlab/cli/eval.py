@@ -4,13 +4,19 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
 import click
 
+from simlab.config import get_global_config_from_ctx
+from simlab.config import resolve_agent_api_key
 from simlab.evaluation import EvaluationError
 from simlab.evaluation import build_report
+from simlab.evaluation import parse_iso8601_timestamp
+from simlab.evaluation import summarize_rollouts
 
 
 @click.command("eval")
@@ -27,33 +33,797 @@ from simlab.evaluation import build_report
     type=click.Path(path_type=Path, exists=False, file_okay=False),
     help="Compare PATH against another rollout directory.",
 )
+@click.option(
+    "--task",
+    "task_ids",
+    multiple=True,
+    help="Only include rollouts for the given task id (can repeat).",
+)
+@click.option(
+    "--model",
+    "model_names",
+    multiple=True,
+    help="Only include rollouts for the given model name (can repeat).",
+)
 @click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON output.")
+@click.option(
+    "--report",
+    "report_path",
+    type=click.Path(path_type=Path, exists=False, file_okay=True, dir_okay=False),
+    flag_value="eval-report.md",
+    is_flag=False,
+    help="Write a Markdown report to PATH (default: ./eval-report.md).",
+)
 def eval_command(
     path: Path,
     compare_path: Path | None,
+    task_ids: tuple[str, ...],
+    model_names: tuple[str, ...],
     json_output: bool,
+    report_path: Path | None,
 ) -> None:
     """Analyze local rollout artifacts under PATH. Defaults to ./output."""
+    resolved_report_path = report_path.expanduser() if report_path is not None else None
+    warn_report_overwrite(resolved_report_path)
+
     try:
         report = build_report(
             path,
             compare_path=compare_path,
+            task_ids=task_ids,
+            model_names=model_names,
         )
     except EvaluationError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if json_output:
         click.echo(json.dumps(report, indent=2))
+    else:
+        if report["mode"] == "single_rollout":
+            print_single_rollout(report["rollout"])
+        elif report["mode"] == "compare":
+            print_compare_report(report)
+        else:
+            print_multi_rollout(report["path"], report["summary"])
+
+        print_warnings(report.get("warnings", []))
+
+    report_written = False
+    if resolved_report_path is not None:
+        try:
+            write_markdown_report(report, resolved_report_path)
+            report_written = True
+        except Exception as exc:  # pragma: no cover - click renders exception text
+            raise click.ClickException(f"Failed to write Markdown report: {exc}") from exc
+
+    if report_written:
+        if json_output:
+            click.echo(f"Evaluation report written to {resolved_report_path}", err=True)
+            return
+        click.echo("")
+        click.echo(f"Evaluation report written to {resolved_report_path}")
+
+
+def write_markdown_report(report: dict[str, Any], report_path: Path) -> None:
+    """Write the Markdown evaluation report to disk."""
+    report_text = render_markdown_report(report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report_text, encoding="utf-8")
+
+
+def warn_report_overwrite(report_path: Path | None) -> None:
+    """Warn early when the report path already exists."""
+    if report_path is None or not report_path.exists():
         return
 
-    if report["mode"] == "single_rollout":
-        print_single_rollout(report["rollout"])
-    elif report["mode"] == "compare":
-        print_compare_report(report)
-    else:
-        print_multi_rollout(report["path"], report["summary"])
+    click.echo(
+        click.style(
+            f"WARNING: report file already exists and will be overwritten: {report_path}",
+            fg="yellow",
+            bold=True,
+        ),
+        err=True,
+    )
+    click.echo(
+        click.style("Press Ctrl+C now to cancel.", fg="yellow", bold=True),
+        err=True,
+    )
+    click.echo("", err=True)
 
-    print_warnings(report.get("warnings", []))
+
+def render_markdown_report(report: dict[str, Any]) -> str:
+    """Render the evaluation report as shareable Markdown."""
+    generated_at = datetime.now(timezone.utc)
+
+    if report.get("mode") == "multi_rollout":
+        summary = report["summary"]
+        rollouts = report.get("rollouts", [])
+        rollout_path = report.get("path")
+    elif report.get("mode") == "single_rollout":
+        rollout = report["rollout"]
+        summary = summarize_rollouts([rollout])
+        rollouts = [rollout]
+        rollout_path = report.get("path") or rollout.get("path")
+    elif report.get("mode") == "compare":
+        return render_markdown_compare_report(report, generated_at)
+    else:
+        raise ValueError(
+            "Markdown report generation currently supports single, multi, and compare eval only."
+        )
+
+    run_analysis = generate_run_analysis_markdown(
+        summary,
+        rollouts=rollouts,
+        rollout_path=str(rollout_path or ""),
+    )
+
+    lines: list[str] = ["# Evaluation Report", ""]
+
+    rollout_count = int(summary.get("rollout_count") or 0)
+    task_count = int(summary.get("task_count") or 0)
+    models = summary.get("models") or []
+    lines.append(
+        f"**{rollout_count} rollouts** | {task_count} tasks | {format_model_summary(models)}"
+    )
+
+    date_range = format_date_range(rollouts)
+    if date_range:
+        lines.append(f"**Date range:** {date_range}")
+
+    passed_count = int(summary.get("passed_count") or 0)
+    pass_rate = summary.get("pass_rate")
+    lines.append(f"**Pass rate:** {format_percent(pass_rate)} ({passed_count}/{rollout_count})")
+
+    reward_distribution = summary.get("reward_distribution") or {}
+    lines.append(
+        "**Reward:** "
+        f"min={format_compact_number(reward_distribution.get('min'))} "
+        f"· p50={format_compact_number(reward_distribution.get('p50'))} "
+        f"· max={format_compact_number(reward_distribution.get('max'))}"
+    )
+
+    aggregate_metrics = summary.get("aggregate_metrics") or {}
+    lines.append(
+        "**Total cost:** "
+        f"{format_money(aggregate_metrics.get('total_cost_usd'))} | "
+        f"Avg per rollout: {format_money(aggregate_metrics.get('avg_cost_usd'))}"
+    )
+    lines.append(
+        "**Avg duration:** "
+        f"{format_duration(aggregate_metrics.get('avg_duration_seconds'))} | "
+        "**Avg tokens:** "
+        f"{format_tokens(aggregate_metrics.get('avg_prompt_tokens'))} in / "
+        f"{format_tokens(aggregate_metrics.get('avg_completion_tokens'))} out"
+    )
+    lines.append("")
+
+    results_by_task = summary.get("results_by_task") or []
+    lines.extend(render_results_by_task_section(results_by_task))
+    lines.append("")
+
+    capability_analysis = summary.get("capability_analysis") or []
+    lines.extend(render_capability_analysis_section(capability_analysis, rollout_count))
+    lines.append("")
+
+    if run_analysis:
+        lines.append("## Run Analysis")
+        lines.append("")
+        lines.append(run_analysis.strip())
+        lines.append("")
+
+    lines.append("---")
+    lines.append(f"*Generated by SimLab on {generated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}*")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_markdown_compare_report(report: dict[str, Any], generated_at: datetime) -> str:
+    """Render a compare-mode evaluation report in Markdown."""
+    if report.get("compare_kind") == "rollout":
+        return render_markdown_rollout_compare_report(report, generated_at)
+
+    return render_markdown_dataset_compare_report(report, generated_at)
+
+
+def render_markdown_rollout_compare_report(report: dict[str, Any], generated_at: datetime) -> str:
+    """Render a rollout-level compare report in Markdown."""
+    left_rollout = report["left"]["rollout"]
+    right_rollout = report["right"]["rollout"]
+    comparison = report.get("rollout_comparison") or {}
+
+    lines: list[str] = ["# Comparison Report", ""]
+
+    if left_rollout.get("task_id") == right_rollout.get("task_id"):
+        lines.append(f"**Task:** {left_rollout.get('task_id')}")
+    else:
+        lines.append(f"**A task:** {left_rollout.get('task_id')}")
+        lines.append(f"**B task:** {right_rollout.get('task_id')}")
+
+    lines.append(f"**A path:** {left_rollout.get('path')}")
+    lines.append(f"**B path:** {right_rollout.get('path')}")
+    lines.append("")
+
+    lines.extend(render_rollout_compare_summary_section(comparison.get("overview") or []))
+    lines.append("")
+
+    lines.extend(
+        render_rollout_compare_tool_flow_section(
+            comparison.get("left_errors") or [],
+            comparison.get("right_errors") or [],
+        )
+    )
+    lines.append("")
+
+    lines.extend(render_rollout_compare_criteria_section(comparison.get("criteria") or []))
+    lines.append("")
+
+    lines.extend(
+        render_rollout_compare_reward_model_dimensions_section(
+            comparison.get("reward_model_dimensions") or []
+        )
+    )
+    lines.append("")
+
+    lines.extend(
+        render_rollout_compare_tool_sequence_section(comparison.get("tool_sequence") or [])
+    )
+    lines.append("")
+
+    lines.extend(
+        render_rollout_compare_error_calls_section(
+            "A Error Calls",
+            comparison.get("left_errors") or [],
+            empty_message="_No tool errors on A._",
+        )
+    )
+    lines.append("")
+
+    lines.extend(
+        render_rollout_compare_error_calls_section(
+            "B Error Calls",
+            comparison.get("right_errors") or [],
+            empty_message="_No tool errors on B._",
+        )
+    )
+    lines.append("")
+
+    lines.append("---")
+    lines.append(f"*Generated by SimLab on {generated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}*")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_rollout_compare_summary_section(overview_rows: list[dict[str, Any]]) -> list[str]:
+    """Render the rollout summary section as Markdown."""
+    headers = ["Metric", "A", "B", "A-B", "Better"]
+    rows: list[list[str]] = []
+    for row in overview_rows:
+        metric = row.get("metric")
+        left_value = row.get("left_value")
+        right_value = row.get("right_value")
+        rows.append(
+            [
+                rollout_metric_label(metric),
+                format_rollout_compare_value(metric, left_value),
+                format_rollout_compare_value(metric, right_value),
+                format_rollout_compare_delta(metric, row.get("delta")),
+                better_side(metric, left_value, right_value),
+            ]
+        )
+
+    section = ["## Summary", ""]
+    if not rows:
+        section.append("_No rollout comparison data recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_rollout_compare_tool_flow_section(
+    left_errors: list[dict[str, Any]],
+    right_errors: list[dict[str, Any]],
+) -> list[str]:
+    """Render the tool flow summary section as Markdown."""
+    section = ["## Tool Flow", ""]
+    section.append(
+        render_markdown_table(
+            ["Metric", "Value"],
+            [
+                ["A tool errors", str(len(left_errors))],
+                ["B tool errors", str(len(right_errors))],
+            ],
+        )
+    )
+    return section
+
+
+def render_rollout_compare_criteria_section(criteria_rows: list[dict[str, Any]]) -> list[str]:
+    """Render the programmatic verifier comparison section as Markdown."""
+    headers = ["Criterion", "A", "B", "Notes"]
+    rows: list[list[str]] = [
+        [
+            str(row.get("criterion") or ""),
+            format_pass_fail(row.get("left_passed")),
+            format_pass_fail(row.get("right_passed")),
+            comparison_notes(row.get("left_detail"), row.get("right_detail")),
+        ]
+        for row in criteria_rows
+    ]
+
+    section = ["## Programmatic Verifier Comparison", ""]
+    if not rows:
+        section.append("_No programmatic verifier results recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_rollout_compare_reward_model_dimensions_section(
+    dimension_rows: list[dict[str, Any]],
+) -> list[str]:
+    """Render the reward model dimension comparison section as Markdown."""
+    headers = ["Dimension", "A", "B", "A-B", "Better"]
+    rows: list[list[str]] = [
+        [
+            str(row.get("dimension") or ""),
+            format_number(row.get("left_score")),
+            format_number(row.get("right_score")),
+            format_signed(row.get("delta_score")),
+            better_side("reward_model_score", row.get("left_score"), row.get("right_score")),
+        ]
+        for row in dimension_rows
+    ]
+
+    section = ["## Reward Model Dimension Comparison", ""]
+    if not rows:
+        section.append("_No reward model dimensions recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_rollout_compare_tool_sequence_section(
+    tool_sequence_rows: list[dict[str, Any]],
+) -> list[str]:
+    """Render the tool sequence comparison section as Markdown."""
+    headers = ["#", "A tool", "B tool", "Match", "A status", "B status"]
+    rows: list[list[str]] = [
+        [
+            str(row.get("step") or ""),
+            str(row.get("left_tool") or ""),
+            str(row.get("right_tool") or ""),
+            "yes" if row.get("same_tool") else "no",
+            "error" if row.get("left_error") else ("ok" if row.get("left_tool") else ""),
+            "error" if row.get("right_error") else ("ok" if row.get("right_tool") else ""),
+        ]
+        for row in tool_sequence_rows[:15]
+    ]
+
+    section = ["## Tool Sequence", ""]
+    if not rows:
+        section.append("_No tool calls recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    if len(tool_sequence_rows) > 15:
+        section.append("")
+        section.append("_Showing first 15 tool calls._")
+    return section
+
+
+def render_rollout_compare_error_calls_section(
+    title: str,
+    error_rows: list[dict[str, Any]],
+    *,
+    empty_message: str,
+) -> list[str]:
+    """Render a per-side tool error call table as Markdown."""
+    headers = ["#", "Tool", "Summary"]
+    rows: list[list[str]] = [
+        [
+            str(row.get("index") or ""),
+            str(row.get("tool") or ""),
+            compact(row.get("summary"), 200),
+        ]
+        for row in error_rows
+    ]
+
+    section = [f"## {title}", ""]
+    if not rows:
+        section.append(empty_message)
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_markdown_dataset_compare_report(report: dict[str, Any], generated_at: datetime) -> str:
+    """Render a dataset-level compare report in Markdown."""
+    left = report["left"]
+    right = report["right"]
+    comparison = report.get("comparison") or {}
+
+    lines: list[str] = ["# Comparison Report", ""]
+    lines.append(f"**A:** {Path(str(left.get('path') or '')).name}")
+    lines.append(f"**B:** {Path(str(right.get('path') or '')).name}")
+    lines.append(f"**A path:** {left.get('path')}")
+    lines.append(f"**B path:** {right.get('path')}")
+    if report.get("compare_kind"):
+        lines.append(f"**Compare kind:** {report.get('compare_kind')}")
+    lines.append("")
+
+    lines.extend(render_compare_overview_section(comparison.get("overview") or []))
+    lines.append("")
+    lines.extend(render_compare_task_section(comparison.get("results_by_task") or []))
+    lines.append("")
+    lines.extend(render_compare_model_section(comparison.get("model_comparison") or []))
+    lines.append("")
+    lines.extend(render_compare_system_section(comparison.get("system_failure_rates") or []))
+    lines.append("")
+    lines.extend(render_compare_capability_section(comparison.get("capability_analysis") or []))
+    lines.append("")
+
+    lines.append("---")
+    lines.append(f"*Generated by SimLab on {generated_at.strftime('%Y-%m-%d %H:%M:%S UTC')}*")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_compare_overview_section(overview_rows: list[dict[str, Any]]) -> list[str]:
+    """Render a compare overview section as Markdown."""
+    headers = ["Metric", "A", "B", "A-B", "Better"]
+    rows: list[list[str]] = []
+    for row in overview_rows:
+        metric = row.get("metric")
+        left_value = row.get("left_value")
+        right_value = row.get("right_value")
+        rows.append(
+            [
+                overview_metric_label(metric),
+                format_overview_value(metric, left_value),
+                format_overview_value(metric, right_value),
+                format_overview_delta(metric, row.get("delta")),
+                better_side(metric, left_value, right_value),
+            ]
+        )
+
+    section = ["## Overview", ""]
+    if not rows:
+        section.append("_No comparison data recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_compare_task_section(task_rows: list[dict[str, Any]]) -> list[str]:
+    """Render the task comparison section as Markdown."""
+    headers = [
+        "Task",
+        "A reward",
+        "B reward",
+        "A-B reward",
+        "A reward model",
+        "B reward model",
+        "A-B reward model",
+        "Better",
+    ]
+    rows: list[list[str]] = [
+        [
+            str(row.get("task_id") or ""),
+            format_percent(row.get("left_pass_rate")),
+            format_percent(row.get("right_pass_rate")),
+            format_signed_percent(row.get("delta_pass_rate")),
+            format_number(row.get("left_mean_reward_model_score")),
+            format_number(row.get("right_mean_reward_model_score")),
+            format_signed(row.get("delta_mean_reward_model_score")),
+            better_side("pass_rate", row.get("left_pass_rate"), row.get("right_pass_rate")),
+        ]
+        for row in task_rows
+    ]
+
+    section = ["## Task Comparison", ""]
+    if not rows:
+        section.append("_No task comparison data recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_compare_model_section(model_rows: list[dict[str, Any]]) -> list[str]:
+    """Render the model comparison section as Markdown."""
+    headers = [
+        "Model",
+        "A reward",
+        "B reward",
+        "A-B reward",
+        "A reward model",
+        "B reward model",
+        "A-B reward model",
+        "Better",
+    ]
+    rows: list[list[str]] = [
+        [
+            str(row.get("model") or ""),
+            format_percent(row.get("left_pass_rate")),
+            format_percent(row.get("right_pass_rate")),
+            format_signed_percent(row.get("delta_pass_rate")),
+            format_number(row.get("left_mean_reward_model_score")),
+            format_number(row.get("right_mean_reward_model_score")),
+            format_signed(row.get("delta_mean_reward_model_score")),
+            better_side("pass_rate", row.get("left_pass_rate"), row.get("right_pass_rate")),
+        ]
+        for row in model_rows
+    ]
+
+    section = ["## Model Comparison", ""]
+    if not rows:
+        section.append("_No model comparison data recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_compare_system_section(system_rows: list[dict[str, Any]]) -> list[str]:
+    """Render the system failure rate comparison section as Markdown."""
+    headers = ["System", "A fail", "B fail", "Delta fail", "Better"]
+    rows: list[list[str]] = [
+        [
+            str(row.get("system") or ""),
+            format_percent(row.get("left_fail_rate")),
+            format_percent(row.get("right_fail_rate")),
+            format_signed_percent(row.get("delta_fail_rate")),
+            better_side("fail_rate", row.get("left_fail_rate"), row.get("right_fail_rate")),
+        ]
+        for row in system_rows
+    ]
+
+    section = ["## System Failure Rate Comparison", ""]
+    if not rows:
+        section.append("_No system comparison data recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_compare_capability_section(capability_rows: list[dict[str, Any]]) -> list[str]:
+    """Render the capability comparison section as Markdown."""
+    headers = [
+        "Capability",
+        "A pass",
+        "B pass",
+        "A-B pass",
+        "A results",
+        "B results",
+        "Better",
+    ]
+    rows: list[list[str]] = [
+        [
+            str(row.get("capability") or ""),
+            format_percent(row.get("left_pass_rate")),
+            format_percent(row.get("right_pass_rate")),
+            format_signed_percent(row.get("delta_pass_rate")),
+            format_compare_value(row.get("left_total_count")),
+            format_compare_value(row.get("right_total_count")),
+            better_side("pass_rate", row.get("left_pass_rate"), row.get("right_pass_rate")),
+        ]
+        for row in capability_rows
+    ]
+
+    section = ["## Capability Comparison", ""]
+    if not rows:
+        section.append("_No capability comparison data recorded._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def format_date_range(rollouts: list[dict[str, Any]]) -> str | None:
+    """Return the date range spanned by the rollouts when timestamps exist."""
+    timestamps = [
+        parsed
+        for rollout in rollouts
+        if (parsed := parse_iso8601_timestamp(str(rollout.get("created_at") or ""))) is not None
+    ]
+    if not timestamps:
+        return None
+    start = min(timestamps).date().isoformat()
+    end = max(timestamps).date().isoformat()
+    if start == end:
+        return start
+    return f"{start} to {end}"
+
+
+def format_compact_number(value: Any) -> str:
+    """Format a float without trailing zeros for Markdown summaries."""
+    if not isinstance(value, (int, float)):
+        return "n/a"
+    text = f"{float(value):.3f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def render_results_by_task_section(results_by_task: list[dict[str, Any]]) -> list[str]:
+    """Render the results-by-task Markdown section."""
+    headers = ["Task", "Pass Rate", "Avg Cost", "Avg Duration"]
+    rows: list[list[str]] = []
+    for row in results_by_task:
+        task_id = str(row.get("task_id") or "")
+        passed_count = int(row.get("passed_count") or 0)
+        rollout_count = int(row.get("rollout_count") or 0)
+        pass_rate = row.get("pass_rate")
+        rows.append(
+            [
+                task_id,
+                f"{format_percent(pass_rate)} ({passed_count}/{rollout_count})",
+                format_money(row.get("avg_cost_usd")),
+                format_duration(row.get("avg_duration_seconds")),
+            ]
+        )
+
+    section = ["## Results by Task", ""]
+    if not rows:
+        section.append("_No task results found._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def render_capability_analysis_section(
+    capability_rows: list[dict[str, Any]],
+    rollout_count: int,
+) -> list[str]:
+    """Render the capability analysis Markdown section."""
+    headers = ["Capability", "Pass Rate", "Details"]
+    rows: list[list[str]] = []
+    for row in capability_rows:
+        capability = str(row.get("capability") or "")
+        pass_count = int(row.get("pass_count") or 0)
+        total_count = int(row.get("total_count") or 0)
+        pass_rate = row.get("pass_rate")
+        rows.append(
+            [
+                capability,
+                f"{format_percent(pass_rate)} ({pass_count}/{total_count})",
+                format_capability_details(row, rollout_count),
+            ]
+        )
+
+    section = ["## Capability Analysis", ""]
+    if not rows:
+        section.append("_No capability analysis found._")
+        return section
+    section.append(render_markdown_table(headers, rows))
+    return section
+
+
+def format_capability_details(row: dict[str, Any], rollout_count: int) -> str:
+    """Describe cofailure and attempt patterns for one capability."""
+    attempt_signal = row.get("attempt_signal")
+    raw_patterns = row.get("cofailure_patterns")
+    patterns = raw_patterns if isinstance(raw_patterns, list) else []
+    top_pattern = patterns[0] if patterns else None
+
+    details: list[str] = []
+    if isinstance(top_pattern, dict):
+        fail_count = int(top_pattern.get("fail_count") or 0)
+        if fail_count:
+            details.append(f"Fails together in {fail_count}/{rollout_count} runs")
+    if isinstance(attempt_signal, str) and attempt_signal.strip():
+        details.append(attempt_signal.strip())
+    return " | ".join(details) if details else ""
+
+
+def render_markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Render a GitHub-compatible Markdown table."""
+    lines = [
+        "| " + " | ".join(escape_markdown_cell(header) for header in headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(escape_markdown_cell(cell) for cell in row) + " |" for row in rows
+    )
+    return "\n".join(lines)
+
+
+def escape_markdown_cell(value: Any) -> str:
+    """Escape Markdown table cell text."""
+    text = str(value or "").replace("\n", " ").replace("\r", " ").strip()
+    return text.replace("|", "\\|")
+
+
+def generate_run_analysis_markdown(
+    summary: dict[str, Any],
+    *,
+    rollouts: list[dict[str, Any]],
+    rollout_path: str,
+) -> str | None:
+    """Generate a short Markdown run analysis using an LLM when an API key is available."""
+    global_cfg = get_global_config_from_ctx(click.get_current_context(silent=True))
+
+    providers = {str(rollout.get("provider")) for rollout in rollouts if rollout.get("provider")}
+    provider = (
+        next(iter(providers))
+        if len(providers) == 1
+        else ((global_cfg.agent_provider or "openai").strip() or "openai")
+    )
+    provider = provider.strip() or "openai"
+
+    api_key = resolve_agent_api_key(provider=provider, config=global_cfg)
+    if not api_key:
+        return None
+
+    analysis_model: str | None = None
+    raw_models = summary.get("models")
+    models = (
+        [model.strip() for model in raw_models if isinstance(model, str) and model.strip()]
+        if isinstance(raw_models, list)
+        else []
+    )
+    if len(models) == 1:
+        analysis_model = models[0]
+    if not analysis_model:
+        analysis_model = (global_cfg.agent_model or "gpt-5.2").strip() or "gpt-5.2"
+
+    base_url = (global_cfg.agent_base_url or "").strip() or None
+
+    raw_results_by_task = summary.get("results_by_task")
+    results_by_task: list[Any] = (
+        raw_results_by_task if isinstance(raw_results_by_task, list) else []
+    )
+    raw_capability_analysis = summary.get("capability_analysis")
+    capability_analysis: list[Any] = (
+        raw_capability_analysis if isinstance(raw_capability_analysis, list) else []
+    )
+    raw_cofailure_patterns = summary.get("cofailure_patterns")
+    cofailure_patterns: list[Any] = (
+        raw_cofailure_patterns if isinstance(raw_cofailure_patterns, list) else []
+    )
+
+    analysis_input = {
+        "path": rollout_path,
+        "rollout_count": summary.get("rollout_count"),
+        "task_count": summary.get("task_count"),
+        "models": summary.get("models"),
+        "pass_rate": summary.get("pass_rate"),
+        "passed_count": summary.get("passed_count"),
+        "reward_distribution": summary.get("reward_distribution"),
+        "aggregate_metrics": summary.get("aggregate_metrics"),
+        "results_by_task": results_by_task[:25],
+        "capability_analysis": capability_analysis[:25],
+        "cofailure_patterns": cofailure_patterns[:10],
+    }
+
+    system_prompt = (
+        "You are SimLab. Write a short analysis of an evaluation run "
+        "based only on the provided JSON. "
+        "Focus on the biggest strengths, the biggest gaps, and what to change next. "
+        "Output 2 to 4 short paragraphs plus one final line that starts with "
+        "'**Recommendation:**'. "
+        "Do not include headings, bullets, or code fences."
+    )
+
+    litellm_model = analysis_model
+    if provider and not analysis_model.startswith(f"{provider}/"):
+        litellm_model = f"{provider}/{analysis_model}"
+
+    try:
+        import litellm  # noqa: PLC0415
+
+        analysis_payload = json.dumps(analysis_input, indent=2, ensure_ascii=False)
+        response = litellm.completion(
+            model=litellm_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": analysis_payload},
+            ],
+            api_key=api_key,
+            base_url=base_url,
+            temperature=0.2,
+        )
+        content = response.choices[0].message.content
+    except Exception as exc:
+        click.echo(
+            f"[simlab] Run analysis skipped due to LLM error ({type(exc).__name__}).",
+            err=True,
+        )
+        return None
+
+    text = (content or "").strip()
+    return text or None
 
 
 def print_single_rollout(rollout: dict[str, Any]) -> None:

@@ -83,7 +83,7 @@ simlab env init my-env --template hr
 
 Create and list tasks in directory `./generated-tasks`
 ```bash
-simlab tasks-gen init --template recruiting # Can go to the config.toml to setup number of tasks etc.
+simlab tasks-gen init --template hr # Can go to the config.toml to setup number of tasks etc.
 simlab tasks list --tasks-dir ./generated-tasks # takes 5-10 mins with the default setting, choose haiku and 2 tasks for a faster generation.
 ```
 
