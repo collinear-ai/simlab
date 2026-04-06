@@ -70,10 +70,10 @@ def test_import_fallback_to_langgraph_prebuilt() -> None:
     with patch("langgraph_vendor_agent.plan_and_execute.import_module", fake_import_module):
         # Re-run the import logic
         try:
-            _create_agent_fn = fake_import_module("langchain.agents").create_agent
+            _create_agent_fn = getattr(fake_import_module("langchain.agents"), "create_agent")
             use_new = True
         except (ModuleNotFoundError, AttributeError):
-            _create_agent_fn = real_import_module("langgraph.prebuilt").create_react_agent
+            _create_agent_fn = getattr(real_import_module("langgraph.prebuilt"), "create_react_agent")
             use_new = False
 
     assert not use_new
