@@ -58,7 +58,6 @@ def test_build_graph_calls_legacy_fn_with_prompt_kwarg() -> None:
 
 def test_import_fallback_to_langgraph_prebuilt() -> None:
     """When langchain.agents has no create_agent, we fall back to langgraph.prebuilt."""
-    import importlib
     from importlib import import_module as real_import_module
 
     def fake_import_module(name: str) -> object:
