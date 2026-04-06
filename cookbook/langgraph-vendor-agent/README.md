@@ -9,7 +9,7 @@ START → planner → executor (react) → reviewer → (loop or compiler) → E
 ```
 
 - **Planner**: Reads the task and produces a JSON plan of 4-5 steps
-- **Executor**: A `create_react_agent` subgraph that handles multi-round tool calling per step
+- **Executor**: A LangGraph react subgraph that handles multi-round tool calling per step
 - **Reviewer**: Marks step done, routes back to executor or forward to compiler
 - **Compiler**: Combines all step results into the final formatted response
 

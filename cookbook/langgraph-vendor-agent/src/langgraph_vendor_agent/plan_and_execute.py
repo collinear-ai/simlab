@@ -8,13 +8,22 @@ from __future__ import annotations
 
 import json
 import operator
+from importlib import import_module
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import create_react_agent
+
+# Prefer the new langchain.agents.create_agent; fall back to the legacy
+# langgraph.prebuilt.create_react_agent for older installs.
+_USE_NEW_CREATE_AGENT = False
+try:
+    _create_agent_fn = import_module("langchain.agents").create_agent
+    _USE_NEW_CREATE_AGENT = True
+except (ModuleNotFoundError, AttributeError):
+    _create_agent_fn = import_module("langgraph.prebuilt").create_react_agent
 
 
 class PlanStep(TypedDict):
@@ -84,17 +93,17 @@ def build_plan_and_execute_graph(
     else:
         exec_tools = list(tools)
 
-    react_executor = create_react_agent(
-        model,
-        exec_tools,
-        prompt=SystemMessage(
-            content=(
-                "You are an execution agent. Use the available tools to "
-                "complete the step you are given. Call as many tools as needed. "
-                "After gathering data, summarize your findings."
-            )
-        ),
+    executor_prompt = SystemMessage(
+        content=(
+            "You are an execution agent. Use the available tools to "
+            "complete the step you are given. Call as many tools as needed. "
+            "After gathering data, summarize your findings."
+        )
     )
+    if _USE_NEW_CREATE_AGENT:
+        react_executor = _create_agent_fn(model, tools=exec_tools, system_prompt=executor_prompt)
+    else:
+        react_executor = _create_agent_fn(model, exec_tools, prompt=executor_prompt)
 
     # ---- planner ----
     def planner(state: PlanExecState) -> dict[str, Any]:
