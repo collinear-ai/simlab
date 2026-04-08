@@ -1,8 +1,9 @@
-"""CLI commands for environment management — init, up, down, seed."""
+"""CLI commands for environment management — init, up, down, seed, list, delete."""
 
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import EnvConfig
 from simlab.composer.engine import get_mcp_gateway_host_port
 from simlab.config import get_env_dir
+from simlab.config import get_environments_dir
 from simlab.config import get_global_config_from_ctx
 from simlab.config import resolve_collinear_api_key
 from simlab.config import resolve_env_dir
@@ -46,10 +48,14 @@ from simlab.runtime.env_lifecycle import _run_profiled_services_local
 from simlab.runtime.env_lifecycle import _seed_local
 from simlab.runtime.env_lifecycle import _verify_seed_daytona
 from simlab.runtime.env_lifecycle import _verify_seed_local
+from simlab.runtime.env_lifecycle import detect_env_status
 from simlab.runtime.env_lifecycle import ensure_env_started_daytona
 from simlab.runtime.env_lifecycle import ensure_env_started_local
 from simlab.runtime.env_lifecycle import env_down_daytona
 from simlab.runtime.env_lifecycle import env_down_local
+from simlab.runtime.env_lifecycle import env_purge_docker_local
+from simlab.runtime.env_lifecycle import get_env_created_date
+from simlab.runtime.env_lifecycle import has_any_running_containers
 from simlab.runtime.env_lifecycle import run_env_seed_daytona
 from simlab.runtime.env_lifecycle import run_env_seed_local
 from simlab.telemetry import TelemetryCaptureConfig
@@ -1037,4 +1043,190 @@ def seed(ctx: click.Context, env_name: str, daytona: bool, verify_only: bool) ->
             "seed_service_count": len(seed_svc_names),
             "tool_count": len(config.tools),
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# env list / env delete
+# ---------------------------------------------------------------------------
+
+
+@env.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+@click.option("--quiet", "-q", is_flag=True, help="Print environment names only.")
+@click.pass_context
+@with_command_telemetry("env list", resolver=env_command_capture_config)
+def list_envs(ctx: click.Context, as_json: bool, quiet: bool) -> None:
+    """List all environments."""
+    envs_root = get_environments_dir(ctx=ctx)
+
+    if not envs_root.is_dir():
+        click.echo(f"No environments directory found at {envs_root}.")
+        return
+
+    entries: list[dict[str, Any]] = []
+    for child in sorted(envs_root.iterdir()):
+        if not child.is_dir():
+            continue
+        env_yaml = child / "env.yaml"
+        if not env_yaml.is_file():
+            continue
+
+        status = detect_env_status(child)
+        created = get_env_created_date(child)
+        tools: list[str] = []
+        if status != "error":
+            try:
+                config = load_env_config(child)
+                tools = list(config.tools)
+            except Exception:  # noqa: S110
+                pass
+
+        entries.append(
+            {
+                "name": child.name,
+                "status": status,
+                "tools": tools,
+                "created": created,
+                "path": str(child),
+            }
+        )
+
+    if not entries:
+        click.echo("No environments found.")
+        emit_cli_event("env_list_completed", {"env_count": 0})
+        return
+
+    if quiet:
+        for entry in entries:
+            click.echo(entry["name"])
+        emit_cli_event("env_list_completed", {"env_count": len(entries)})
+        return
+
+    if as_json:
+        click.echo(json.dumps(entries, indent=2))
+        emit_cli_event("env_list_completed", {"env_count": len(entries)})
+        return
+
+    # Table output
+    name_width = max(*(len(e["name"]) for e in entries), 14)
+    status_width = 10
+    tools_width = 20
+    header = (
+        f"{'NAME':<{name_width}}  {'STATUS':<{status_width}}  {'TOOLS':<{tools_width}}  CREATED"
+    )
+    click.echo(header)
+    for entry in entries:
+        tools_str = ", ".join(entry["tools"]) if entry["tools"] else ""
+        click.echo(
+            f"{entry['name']:<{name_width}}  {entry['status']:<{status_width}}  "
+            f"{tools_str:<{tools_width}}  {entry['created']}"
+        )
+
+    emit_cli_event("env_list_completed", {"env_count": len(entries)})
+
+
+@env.command()
+@click.argument("env_name")
+@click.option("--force", "-f", is_flag=True, help="Skip deletion confirmation.")
+@click.option("--daytona", is_flag=True, help="Also tear down Daytona sandbox.")
+@click.pass_context
+@with_command_telemetry("env delete", resolver=env_command_capture_config)
+def delete(ctx: click.Context, env_name: str, force: bool, daytona: bool) -> None:
+    """Delete an environment and clean up Docker resources."""
+    env_dir = resolve_env_dir(env_name, ctx=ctx, require_env_yaml=False)
+
+    # Refuse if path escapes the environments root.
+    envs_root = get_environments_dir(ctx=ctx)
+    if not env_dir.resolve().is_relative_to(envs_root.resolve()):
+        click.echo(
+            click.style(
+                f"Refusing to delete '{env_name}': resolves outside the environments directory.",
+                fg="red",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # Refuse if not a SimLab environment.
+    if not (env_dir / "env.yaml").is_file():
+        click.echo(
+            click.style(
+                f"'{env_name}' is not a SimLab environment (no env.yaml).",
+                fg="red",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # Refuse if any local container is running.
+    if has_any_running_containers(env_dir):
+        click.echo(
+            click.style(
+                f"Environment '{env_name}' is currently running.",
+                fg="red",
+            ),
+            err=True,
+        )
+        click.echo(
+            f"Stop it first with 'simlab env down {env_name}'.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # Daytona state handling.
+    daytona_state_file = env_dir / "daytona-state.json"
+    has_daytona_state = daytona_state_file.is_file()
+    if has_daytona_state and not daytona:
+        click.echo(
+            click.style(
+                "This environment has Daytona state. "
+                "Pass --daytona to also clean up the remote sandbox.",
+                fg="yellow",
+            ),
+        )
+
+    # Confirmation prompt.
+    if not force:
+        confirmed = click.confirm(
+            f"This will remove all data for '{env_name}' (config, tasks, results). Are you sure?",
+            default=False,
+        )
+        if not confirmed:
+            click.echo("Aborted.")
+            return
+
+    # Tear down Daytona sandbox if requested.
+    if daytona and has_daytona_state:
+        global_cfg = get_global_config_from_ctx(ctx)
+        env_down_daytona(env_dir, daytona_api_key=global_cfg.daytona_api_key)
+
+    # Clean up Docker resources (volumes, networks).
+    click.echo("Cleaning up Docker resources...")
+    docker_ok = env_purge_docker_local(env_dir)
+    if not docker_ok:
+        click.echo(
+            click.style(
+                "Aborting: Docker resources could not be cleaned up. "
+                "Resolve the Docker errors above, then retry.",
+                fg="red",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # Remove the environment directory.
+    try:
+        shutil.rmtree(env_dir)
+    except OSError as exc:
+        click.echo(
+            click.style(f"Failed to delete environment directory: {exc}", fg="red"),
+            err=True,
+        )
+        raise SystemExit(1) from exc
+
+    click.echo(click.style(f"Environment '{env_name}' deleted.", fg="green"))
+    emit_cli_event(
+        "env_delete_completed",
+        {"docker_purged": True},
     )

@@ -134,8 +134,16 @@ def test_simlab_agent_records_workflows_in_metadata(monkeypatch) -> None:
                 "meeting-prep-packet",
             ]
 
-        def run(self, task: str, tools: object, recorder: object) -> object:
+        def run(
+            self,
+            task: str,
+            tools: object,
+            recorder: object,
+            *,
+            record_usage: object | None = None,
+        ) -> object:
             _ = task, tools, recorder
+            _ = record_usage
 
             class Result:
                 final_output = "## Inbox Triage\nok\n## Todo List\n- [P1] follow up\n## Sales Call Brief\nok"

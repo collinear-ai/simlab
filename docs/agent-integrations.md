@@ -54,6 +54,48 @@ That contract is enforced by shared tests under `cli/simlab/tests/`. Framework-
 specific adapters can add stricter compatibility checks on top of it when a
 backend has tighter schema or invocation requirements.
 
+## Rollout Metrics
+
+SimLab evaluation will show cost, tokens, and duration when the run artifacts
+include a `metadata["rollout_metrics"]` payload.
+
+The canonical shape is
+
+- `metadata["rollout_metrics"]["token_usage"]["prompt_tokens_total"]`
+- `metadata["rollout_metrics"]["token_usage"]["completion_tokens_total"]`
+- `metadata["rollout_metrics"]["timing"]["duration_seconds"]`
+- `metadata["rollout_metrics"]["cost"]["estimated_cost_usd"]`
+- `metadata["rollout_metrics"]["extensions"]` for adapter-specific metrics
+
+The `simlab.agents.rollout_metrics` helpers are designed to work across
+LiteLLM, OpenAI Agents SDK, and LangChain usage payloads by structurally
+parsing token usage objects and building the shared rollout schema.
+
+Treat rollout metrics as additive data. Prefer merging into
+`metadata["rollout_metrics"]` so other layers can also attach metrics without
+overwriting what is already there.
+
+```python
+from simlab.agents.rollout_metrics import RolloutMetricsTracker
+from simlab.agents.rollout_metrics import Timer
+
+
+tracker = RolloutMetricsTracker()
+run_timer = Timer.start()
+
+# After each model call, record usage from the framework response.
+# - LiteLLM response usage is response.usage
+# - OpenAI Agents SDK model response usage is model_response.usage
+# - LangChain AI message usage is ai_message.usage_metadata
+tracker.record_token_usage(getattr(response, "usage", None))
+
+tracker.record_duration_seconds(run_timer.elapsed_seconds())
+tracker.merge_into(context.metadata, model="gpt-4o-mini")
+```
+
+Cost is an estimate based on LiteLLM's pricing maps. It is not the provider
+billed amount.
+
 ## Why This Layer Exists
 
 We want SimLab integrations to scale across multiple ecosystems without making

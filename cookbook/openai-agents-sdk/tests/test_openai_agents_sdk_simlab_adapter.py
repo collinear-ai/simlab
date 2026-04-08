@@ -76,7 +76,26 @@ def test_simlab_agent_errors_on_empty_final_output(monkeypatch) -> None:
     monkeypatch.setattr(
         simlab_adapter,
         "run_custom_agent",
-        lambda **_: type("Result", (), {"final_output": ""})(),
+        lambda **_: type(
+            "Result",
+            (),
+            {
+                "final_output": "",
+                "raw_responses": [
+                    type(
+                        "Response",
+                        (),
+                        {
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 5,
+                                "total_tokens": 15,
+                            }
+                        },
+                    )()
+                ],
+            },
+        )(),
     )
 
     artifacts = RunArtifacts(task_id="task-1", task="demo")
@@ -87,6 +106,11 @@ def test_simlab_agent_errors_on_empty_final_output(monkeypatch) -> None:
     )
 
     assert artifacts.error == "OpenAI Agents SDK agent produced no final output"
+    assert artifacts.metadata["rollout_metrics"]["token_usage"] == {
+        "prompt_tokens_total": 10,
+        "completion_tokens_total": 5,
+        "total_tokens_total": 15,
+    }
 
 
 def test_simlab_agent_wraps_runtime_errors(monkeypatch) -> None:

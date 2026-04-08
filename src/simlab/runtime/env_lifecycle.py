@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -907,6 +909,29 @@ def is_env_running_local(env_dir: Path) -> bool:
     return running >= expected
 
 
+def has_any_running_containers(env_dir: Path) -> bool:
+    """Return True when ANY Docker Compose service is running.
+
+    Unlike ``is_env_running_local`` (which requires *all* expected services),
+    this returns True if even a single container is up.  Used by ``env delete``
+    where any running container should block deletion.
+    """
+    compose_file = env_dir / "docker-compose.yml"
+    if not compose_file.exists():
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "ps", "--status", "running", "-q"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    return bool(result.stdout.strip())
+
+
 def is_env_running_daytona(env_dir: Path, daytona_api_key: str | None = None) -> bool:
     """Return True when a Daytona sandbox for this env is active.
 
@@ -934,6 +959,30 @@ def is_env_running_daytona(env_dir: Path, daytona_api_key: str | None = None) ->
     except Exception:
         return False
     return _daytona_sandbox_status(sandbox) in {"running", "started", "active", "ready"}
+
+
+def detect_env_status(env_dir: Path) -> str:
+    """Return ``'running'``, ``'stopped'``, or ``'error'`` for an environment."""
+    env_yaml = env_dir / "env.yaml"
+    if not env_yaml.is_file():
+        return "error"
+    try:
+        yaml.safe_load(env_yaml.read_text(encoding="utf-8"))
+    except Exception:
+        return "error"
+    if has_any_running_containers(env_dir):
+        return "running"
+    return "stopped"
+
+
+def get_env_created_date(env_dir: Path) -> str:
+    """Return the creation date of ``env.yaml`` as ``YYYY-MM-DD``."""
+    env_yaml = env_dir / "env.yaml"
+    try:
+        mtime = env_yaml.stat().st_mtime
+        return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+    except OSError:
+        return "unknown"
 
 
 def ensure_daytona_sandbox_ready(env_dir: Path, daytona_api_key: str | None = None) -> bool:
@@ -1195,6 +1244,40 @@ def env_down_local(env_dir: Path) -> None:
         raise SystemExit(1)
 
     click.echo(click.style("Environment stopped.", fg="green"))
+
+
+def env_purge_docker_local(env_dir: Path) -> bool:
+    """Remove Docker resources (containers, networks, volumes) for this environment.
+
+    Runs ``docker compose down -v --remove-orphans`` to ensure a clean slate.
+    Returns True if cleanup succeeded (or no compose file exists), False if
+    Docker reported errors.
+    """
+    compose_file = env_dir / "docker-compose.yml"
+    if not compose_file.exists():
+        return True
+
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(compose_file),
+            "down",
+            "-v",
+            "--remove-orphans",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        click.echo(
+            click.style("Docker cleanup failed:", fg="red"),
+            err=True,
+        )
+        click.echo(result.stderr, err=True)
+        return False
+    return True
 
 
 def env_down_daytona(

@@ -9,6 +9,8 @@ from simlab.agents import BaseEnvironment
 from simlab.agents import RunArtifacts
 from simlab.agents.adapters import RunArtifactsRecorder
 from simlab.agents.adapters.langchain import build_langchain_tools
+from simlab.agents.rollout_metrics import RolloutMetricsTracker
+from simlab.agents.rollout_metrics import Timer
 
 from langgraph_email_agent.email_assistant import LangGraphEmailAssistant
 from langgraph_email_agent.model_factory import build_chat_model_from_env
@@ -33,7 +35,15 @@ class SimLabLangGraphEmailAgent(BaseAgent):
         context: RunArtifacts,
     ) -> None:
         """Run the standalone assistant against the provided SimLab environment."""
+        run_timer = Timer.start()
+        tracker = RolloutMetricsTracker()
         model = build_chat_model_from_env()
+        model_name = (
+            getattr(model, "model_name", None)
+            or getattr(model, "model", None)
+            or os.getenv("LANGGRAPH_EMAIL_MODEL", "").strip()
+        )
+        resolved_model_name = str(model_name).strip() if model_name else None
         assistant = LangGraphEmailAssistant(
             model=model,
             tool_recursion_limit=8,
@@ -51,11 +61,22 @@ class SimLabLangGraphEmailAgent(BaseAgent):
             "workflows": assistant.workflow_names(),
         }
         try:
-            result = assistant.run(instruction, tools, recorder)
+            result = assistant.run(
+                instruction,
+                tools,
+                recorder,
+                record_usage=tracker.record_token_usage,
+            )
         except Exception as exc:
             context.error = f"LangGraph assistant failed: {exc}"
+            tracker.record_duration_seconds(run_timer.elapsed_seconds())
+            tracker.merge_into(context.metadata, model=resolved_model_name)
             return
         if not result.final_output:
             context.error = "LangGraph assistant produced no final output"
+            tracker.record_duration_seconds(run_timer.elapsed_seconds())
+            tracker.merge_into(context.metadata, model=resolved_model_name)
             return
         context.final_observation = result.final_output
+        tracker.record_duration_seconds(run_timer.elapsed_seconds())
+        tracker.merge_into(context.metadata, model=resolved_model_name)

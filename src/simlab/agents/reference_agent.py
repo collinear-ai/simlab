@@ -15,6 +15,8 @@ from simlab.agents.base import RunArtifacts
 from simlab.agents.base import ToolCall
 from simlab.agents.base import ToolCallResult
 from simlab.agents.base import _run_async_compat
+from simlab.agents.rollout_metrics import RolloutMetricsTracker
+from simlab.agents.rollout_metrics import Timer
 
 
 class ReferenceAgent(BaseAgent):
@@ -59,6 +61,9 @@ class ReferenceAgent(BaseAgent):
         if not self._api_key:
             raise ValueError("ReferenceAgent requires an API key")
 
+        run_timer = Timer.start()
+        rollout_metrics = RolloutMetricsTracker()
+
         raw_model = context.model or "gpt-4o-mini"
         litellm_model = raw_model
         if self._provider and not raw_model.startswith(f"{self._provider}/"):
@@ -89,8 +94,11 @@ class ReferenceAgent(BaseAgent):
         for _ in range(max_steps):
             if stop_event is not None and stop_event.is_set():
                 context.error = "Cancelled"
+                rollout_metrics.record_duration_seconds(run_timer.elapsed_seconds())
+                rollout_metrics.merge_into(context.metadata, model=litellm_model)
                 return
 
+            completion_timer = Timer.start()
             response = litellm.completion(
                 model=litellm_model,
                 messages=messages,
@@ -98,6 +106,8 @@ class ReferenceAgent(BaseAgent):
                 api_key=self._api_key,
                 base_url=self._base_url,
             )
+            rollout_metrics.record_llm_inference_seconds(completion_timer.elapsed_seconds())
+            rollout_metrics.record_token_usage(getattr(response, "usage", None))
             message = response.choices[0].message  # type: ignore[union-attr]
             tool_calls = message.tool_calls or []
 
@@ -145,6 +155,7 @@ class ReferenceAgent(BaseAgent):
                         fn.name,
                         ("unknown", fn.name),
                     )
+                    tool_timer = Timer.start()
                     result = _run_async_compat(
                         _aexecute_tool_call(
                             tool_call_id=tool_call.id,
@@ -155,6 +166,7 @@ class ReferenceAgent(BaseAgent):
                             context=context,
                         )
                     )
+                    rollout_metrics.record_tool_execution_seconds(tool_timer.elapsed_seconds())
                     messages.append(
                         {
                             "role": "tool",
@@ -176,9 +188,13 @@ class ReferenceAgent(BaseAgent):
             assistant_text = message.content or ""
             context.record_message("assistant", assistant_text)
             context.final_observation = assistant_text
+            rollout_metrics.record_duration_seconds(run_timer.elapsed_seconds())
+            rollout_metrics.merge_into(context.metadata, model=litellm_model)
             return
 
         context.error = "Max steps reached without final assistant response"
+        rollout_metrics.record_duration_seconds(run_timer.elapsed_seconds())
+        rollout_metrics.merge_into(context.metadata, model=litellm_model)
 
 
 async def _abuild_openai_tools(

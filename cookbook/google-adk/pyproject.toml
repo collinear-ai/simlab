@@ -6,7 +6,7 @@ readme = "google-adk.md"
 requires-python = ">=3.13"
 dependencies = [
     "google-adk>=1.28.0",
-    "litellm<=1.82.6",
+    "litellm==1.82.6",
     "simulationlab",
 ]
 
@@ -30,4 +30,3 @@ testpaths = ["tests"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["INP001"]
-

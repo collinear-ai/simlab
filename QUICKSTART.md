@@ -170,4 +170,13 @@ Custom agents use their own model configuration — `--agent-model` and `--agent
 
 ---
 
+## What's Next
+
+- [Global Config](./docs/global-config.md) — config file, environment variables, and CLI flags
+- [Verifiers](./docs/verifiers.md) — reward model setup, output formats
+- [Harbor Tasks](./docs/harbor.md) — self-contained coding tasks with test-based verifiers
+- [Daytona](./docs/daytona.md) — remote sandbox execution and parallel rollouts
+- [Custom MCP Servers](./docs/custom-mcp-servers.md) — add custom MCP tools to environments
+- [Troubleshooting](./docs/troubleshooting.md) — verifier cache, local API
+
 Have ideas or hit an issue? Run `simlab feedback` or email simlab@collinear.ai.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import operator
+from collections.abc import Callable
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -63,6 +64,7 @@ def build_plan_and_execute_graph(
     tools: list[BaseTool],
     *,
     safe_tool_filter: bool = True,
+    record_usage: Callable[[object], None] | None = None,
 ) -> StateGraph:
     """Build a 4-node StateGraph: planner -> executor (react) -> reviewer -> compiler.
 
@@ -109,6 +111,8 @@ def build_plan_and_execute_graph(
             )
         )
         response = model.invoke([plan_prompt, HumanMessage(content=state["task"])])
+        if record_usage is not None:
+            record_usage(getattr(response, "usage_metadata", None))
         text = _message_text(response.content).strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -136,6 +140,9 @@ def build_plan_and_execute_graph(
         result = react_executor.invoke(
             {"messages": [HumanMessage(content=instruction)]}
         )
+        if record_usage is not None:
+            for message in result.get("messages", []):
+                record_usage(getattr(message, "usage_metadata", None))
         final_text = ""
         for m in reversed(result.get("messages", [])):
             if isinstance(m, AIMessage) and m.content and not m.tool_calls:
@@ -171,6 +178,8 @@ def build_plan_and_execute_graph(
                 ),
             ]
         )
+        if record_usage is not None:
+            record_usage(getattr(response, "usage_metadata", None))
         return {"final_output": _message_text(response.content)}
 
     # ---- graph ----

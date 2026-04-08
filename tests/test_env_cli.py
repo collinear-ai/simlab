@@ -1631,3 +1631,458 @@ def test_env_seed_emits_telemetry_when_no_seed_services(tmp_path: Path) -> None:
             "tool_count": 1,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# env list
+# ---------------------------------------------------------------------------
+
+
+def _create_env(envs_root: Path, name: str, tools: list[str]) -> Path:
+    """Helper to create a minimal environment directory."""
+    env_dir = envs_root / name
+    env_dir.mkdir(parents=True, exist_ok=True)
+    (env_dir / "env.yaml").write_text(
+        yaml.dump({"name": name, "tools": tools}, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    return env_dir
+
+
+def test_env_list_shows_environments(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    _create_env(envs_root, "alpha", ["hr", "coding"])
+    _create_env(envs_root, "beta", ["email"])
+
+    runner = CliRunner()
+    with (
+        patch("simlab.runtime.env_lifecycle.has_any_running_containers", return_value=False),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["list"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "NAME" in result.output
+    assert "STATUS" in result.output
+    assert "TOOLS" in result.output
+    assert "CREATED" in result.output
+    assert "alpha" in result.output
+    assert "beta" in result.output
+    assert "hr, coding" in result.output
+    assert "email" in result.output
+
+
+def test_env_list_json_output(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    _create_env(envs_root, "my-env", ["hr"])
+
+    runner = CliRunner()
+    with (
+        patch("simlab.runtime.env_lifecycle.has_any_running_containers", return_value=False),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["list", "--json"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert len(data) == 1
+    assert data[0]["name"] == "my-env"
+    assert data[0]["status"] == "stopped"
+    assert data[0]["tools"] == ["hr"]
+    assert "created" in data[0]
+    assert "path" in data[0]
+
+
+def test_env_list_quiet_output(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    _create_env(envs_root, "env-a", ["hr"])
+    _create_env(envs_root, "env-b", ["coding"])
+
+    runner = CliRunner()
+    with (
+        patch("simlab.runtime.env_lifecycle.has_any_running_containers", return_value=False),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["list", "--quiet"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.strip().splitlines()
+    assert lines == ["env-a", "env-b"]
+
+
+def test_env_list_empty_dir(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    envs_root.mkdir()
+
+    runner = CliRunner()
+    with patch("simlab.cli.env.emit_cli_event"):
+        result = runner.invoke(
+            env,
+            ["list"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "No environments found" in result.output
+
+
+def test_env_list_no_dir(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"  # does not exist
+
+    runner = CliRunner()
+    with patch("simlab.cli.env.emit_cli_event"):
+        result = runner.invoke(
+            env,
+            ["list"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "No environments directory found" in result.output
+
+
+def test_env_list_skips_non_env_dirs(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    _create_env(envs_root, "real-env", ["hr"])
+    # Create a directory without env.yaml
+    (envs_root / "not-an-env").mkdir()
+
+    runner = CliRunner()
+    with (
+        patch("simlab.runtime.env_lifecycle.has_any_running_containers", return_value=False),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["list", "--quiet"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "real-env"
+
+
+def test_env_list_status_running(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    _create_env(envs_root, "running-env", ["hr"])
+
+    runner = CliRunner()
+    with (
+        patch("simlab.runtime.env_lifecycle.has_any_running_containers", return_value=True),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["list"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "running" in result.output
+
+
+def test_env_list_error_status(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    bad_dir = envs_root / "bad-env"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "env.yaml").write_text("{{invalid yaml", encoding="utf-8")
+
+    runner = CliRunner()
+    with patch("simlab.cli.env.emit_cli_event"):
+        result = runner.invoke(
+            env,
+            ["list"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "error" in result.output
+
+
+# ---------------------------------------------------------------------------
+# env delete
+# ---------------------------------------------------------------------------
+
+
+def test_env_delete_removes_directory(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    env_dir = _create_env(envs_root, "doomed", ["hr"])
+
+    runner = CliRunner()
+    completed = SimpleNamespace(returncode=0, stderr="")
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "doomed", "--force"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "deleted" in result.output.lower()
+    assert not env_dir.exists()
+
+
+def test_env_delete_refuses_running_env(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    _create_env(envs_root, "active", ["hr"])
+
+    runner = CliRunner()
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=True),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "active", "--force"],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code != 0
+    assert "currently running" in result.output
+    assert "simlab env down" in result.output
+
+
+def test_env_delete_calls_purge_docker(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    env_dir = _create_env(envs_root, "purge-me", ["hr"])
+    (env_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    runner = CliRunner()
+    completed = SimpleNamespace(returncode=0, stderr="")
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed) as mocked_run,
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "purge-me", "--force"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    mocked_run.assert_called_once()
+    call_args = mocked_run.call_args[0][0]
+    assert "-v" in call_args
+    assert "--remove-orphans" in call_args
+
+
+def test_env_delete_prompts_without_force(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    env_dir = _create_env(envs_root, "ask-me", ["hr"])
+
+    runner = CliRunner()
+    completed = SimpleNamespace(returncode=0, stderr="")
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "ask-me"],
+            input="y\n",
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert not env_dir.exists()
+
+
+def test_env_delete_aborts_on_no(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    env_dir = _create_env(envs_root, "keep-me", ["hr"])
+
+    runner = CliRunner()
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "keep-me"],
+            input="n\n",
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Aborted" in result.output
+    assert env_dir.exists()
+
+
+def test_env_delete_not_found(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    envs_root.mkdir()
+
+    runner = CliRunner()
+    with patch("simlab.cli.env.emit_cli_event"):
+        result = runner.invoke(
+            env,
+            ["delete", "ghost"],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code != 0
+
+
+def test_env_delete_warns_daytona_state(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    env_dir = _create_env(envs_root, "with-daytona", ["hr"])
+    (env_dir / "daytona-state.json").write_text('{"sandbox_id": "abc"}', encoding="utf-8")
+
+    runner = CliRunner()
+    completed = SimpleNamespace(returncode=0, stderr="")
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "with-daytona", "--force"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Daytona state" in result.output
+    assert "--daytona" in result.output
+
+
+def test_env_delete_no_compose_skips_docker_cleanup(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    env_dir = _create_env(envs_root, "no-compose", ["hr"])
+    # No docker-compose.yml in the env dir
+
+    runner = CliRunner()
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.runtime.env_lifecycle.subprocess.run") as mocked_run,
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "no-compose", "--force"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    mocked_run.assert_not_called()
+    assert not env_dir.exists()
+
+
+def test_env_delete_refuses_non_simlab_directory(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    stray_dir = envs_root / "not-an-env"
+    stray_dir.mkdir(parents=True)
+    (stray_dir / "random-file.txt").write_text("not simlab", encoding="utf-8")
+
+    runner = CliRunner()
+    with patch("simlab.cli.env.emit_cli_event"):
+        result = runner.invoke(
+            env,
+            ["delete", "not-an-env", "--force"],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code != 0
+    assert "not a SimLab environment" in result.output
+    assert stray_dir.exists()
+
+
+def test_env_delete_refuses_path_traversal(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    envs_root.mkdir(parents=True)
+    # Create a victim directory outside the environments root that has env.yaml
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "env.yaml").write_text("name: victim\ntools: []\n", encoding="utf-8")
+
+    runner = CliRunner()
+    with patch("simlab.cli.env.emit_cli_event"):
+        result = runner.invoke(
+            env,
+            ["delete", "../victim", "--force"],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code != 0
+    assert "outside the environments directory" in result.output
+    assert victim.exists()
+
+
+def test_env_delete_aborts_on_docker_failure(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    env_dir = _create_env(envs_root, "docker-fail", ["hr"])
+    (env_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    runner = CliRunner()
+    failed = SimpleNamespace(returncode=1, stderr="Cannot connect to Docker daemon")
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=failed),
+        patch("simlab.cli.env.emit_cli_event"),
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "docker-fail", "--force"],
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code != 0
+    assert "Docker resources could not be cleaned up" in result.output
+    assert env_dir.exists()
+
+
+def test_env_delete_emits_telemetry(tmp_path: Path) -> None:
+    envs_root = tmp_path / "environments"
+    _create_env(envs_root, "telemetry-env", ["hr"])
+
+    runner = CliRunner()
+    completed = SimpleNamespace(returncode=0, stderr="")
+    with (
+        patch("simlab.cli.env.has_any_running_containers", return_value=False),
+        patch("simlab.runtime.env_lifecycle.subprocess.run", return_value=completed),
+        patch("simlab.cli.env.emit_cli_event") as mocked_emit,
+    ):
+        result = runner.invoke(
+            env,
+            ["delete", "telemetry-env", "--force"],
+            catch_exceptions=False,
+            env={"SIMLAB_ENVIRONMENTS_DIR": str(envs_root)},
+        )
+
+    assert result.exit_code == 0, result.output
+    mocked_emit.assert_any_call(
+        "env_delete_completed",
+        {"docker_purged": True},
+    )

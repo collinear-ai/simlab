@@ -179,9 +179,19 @@ def test_reference_agent_runs_tool_loop(monkeypatch) -> None:  # noqa: ANN001
                 ),
             )
             message = SimpleNamespace(content="", tool_calls=[tool_call])
-            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+            usage = {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            }
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
         message = SimpleNamespace(content="task complete", tool_calls=[])
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        usage = {
+            "prompt_tokens": 7,
+            "completion_tokens": 8,
+            "total_tokens": 15,
+        }
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
 
     import litellm  # noqa: PLC0415
 
@@ -223,6 +233,14 @@ def test_reference_agent_runs_tool_loop(monkeypatch) -> None:  # noqa: ANN001
     assert tool_payload["tool_server"] == "email-env"
     assert tool_payload["tool_name"] == "send_email"
     assert tool_payload["is_error"] is False
+    rollout_metrics = artifacts.metadata.get("rollout_metrics")
+    assert isinstance(rollout_metrics, dict)
+    token_usage = rollout_metrics.get("token_usage")
+    assert token_usage == {
+        "prompt_tokens_total": 17,
+        "completion_tokens_total": 13,
+        "total_tokens_total": 30,
+    }
 
 
 def test_run_artifacts_on_step_callback_is_invoked() -> None:

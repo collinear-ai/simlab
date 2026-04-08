@@ -12,8 +12,11 @@ from simlab.agents import BaseEnvironment
 from simlab.agents import RunArtifacts
 from simlab.agents.adapters import RunArtifactsRecorder
 from simlab.agents.adapters import build_openai_agents_tools
+from simlab.agents.rollout_metrics import RolloutMetricsTracker
+from simlab.agents.rollout_metrics import Timer
 
 from openai_agents_sdk.custom_agent import run_custom_agent
+from openai_agents_sdk.custom_agent import resolve_model
 from openai_agents_sdk.custom_agent import stringify_final_output
 
 
@@ -36,6 +39,8 @@ class BaseSimLabOpenAIAgentsSDKAgent(BaseAgent):
         context: RunArtifacts,
     ) -> None:
         """Run a custom SDK app against the provided SimLab environment."""
+        run_timer = Timer.start()
+        tracker = RolloutMetricsTracker()
         recorder = RunArtifactsRecorder(context)
         recorder.on_user_message(instruction)
         tools = build_openai_agents_tools(environment, recorder=recorder)
@@ -56,7 +61,16 @@ class BaseSimLabOpenAIAgentsSDKAgent(BaseAgent):
             if failed_tool is not None:
                 context.metadata["cookbook_agent"]["failed_tool_name"] = failed_tool
             context.error = f"OpenAI Agents SDK agent failed: {exc}"
+            tracker.record_duration_seconds(run_timer.elapsed_seconds())
+            tracker.merge_into(context.metadata, model=resolve_model(context.model))
             return
+
+        tracker.record_duration_seconds(run_timer.elapsed_seconds())
+        raw_responses = getattr(result, "raw_responses", None)
+        if isinstance(raw_responses, list):
+            for response in raw_responses:
+                tracker.record_token_usage(getattr(response, "usage", None))
+        tracker.merge_into(context.metadata, model=resolve_model(context.model))
 
         final_output = getattr(result, "final_output", None)
         if final_output is None or not str(final_output).strip():

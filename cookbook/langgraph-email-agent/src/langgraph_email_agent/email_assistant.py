@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
 from textwrap import dedent
@@ -249,6 +250,8 @@ class LangGraphEmailAssistant:
         self,
         prompt: str,
         tools: list[BaseTool],
+        *,
+        record_usage: Callable[[object], None] | None = None,
     ) -> str:
         if not tools:
             raise ValueError("LangGraphEmailAssistant requires at least one tool")
@@ -262,20 +265,38 @@ class LangGraphEmailAssistant:
             },
             config={"recursion_limit": self._tool_recursion_limit},
         )
+        if record_usage is not None and isinstance(result, dict):
+            messages = result.get("messages")
+            if isinstance(messages, list):
+                for message in messages:
+                    usage = getattr(message, "usage_metadata", None)
+                    if usage is None and isinstance(message, dict):
+                        usage = message.get("usage_metadata")
+                    record_usage(usage)
         return _extract_final_output(result).strip()
 
-    def _run_text_step(self, system_prompt: str, user_prompt: str) -> str:
+    def _run_text_step(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        record_usage: Callable[[object], None] | None = None,
+    ) -> str:
         response = self._model.invoke(
             [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_prompt),
             ]
         )
+        if record_usage is not None:
+            record_usage(getattr(response, "usage_metadata", None))
         return _message_text(response).strip()
 
     def _build_graph(
         self,
         tools: list[BaseTool],
+        *,
+        record_usage: Callable[[object], None] | None = None,
     ) -> CompiledStateGraph[AssistantState, None, AssistantState, AssistantState]:
         def plan_request(state: AssistantState) -> AssistantState:
             task = state["task"]
@@ -302,7 +323,13 @@ class LangGraphEmailAssistant:
                 - which threads are low priority noise
                 """
             ).strip()
-            return {"inbox_research": self._run_tool_research(prompt, tools)}
+            return {
+                "inbox_research": self._run_tool_research(
+                    prompt,
+                    tools,
+                    record_usage=record_usage,
+                )
+            }
 
         def research_sales(state: AssistantState) -> AssistantState:
             requested_sections = state.get("requested_sections", [])
@@ -330,7 +357,13 @@ class LangGraphEmailAssistant:
                 - the most important discussion topics to prepare for
                 """
             ).strip()
-            return {"sales_research": self._run_tool_research(prompt, tools)}
+            return {
+                "sales_research": self._run_tool_research(
+                    prompt,
+                    tools,
+                    record_usage=record_usage,
+                )
+            }
 
         def infer_counterparty_target(state: AssistantState) -> AssistantState:
             requested_sections = state.get("requested_sections", [])
@@ -357,7 +390,11 @@ class LangGraphEmailAssistant:
                 """
             ).strip()
             target = _extract_json_object(
-                self._run_text_step(self._build_system_prompt(), user_prompt)
+                self._run_text_step(
+                    self._build_system_prompt(),
+                    user_prompt,
+                    record_usage=record_usage,
+                )
             )
             account = str(target.get("account", "")).strip()
             ticker = str(target.get("ticker", "")).strip().upper()
@@ -390,7 +427,13 @@ class LangGraphEmailAssistant:
                 - one useful public-company context fact relevant to this meeting or deal
                 """
             ).strip()
-            return {"counterparty_research": self._run_tool_research(prompt, tools)}
+            return {
+                "counterparty_research": self._run_tool_research(
+                    prompt,
+                    tools,
+                    record_usage=record_usage,
+                )
+            }
 
         def compose_inbox_triage(state: AssistantState) -> AssistantState:
             if "inbox_triage" not in state.get("requested_sections", []):
@@ -411,7 +454,9 @@ class LangGraphEmailAssistant:
             ).strip()
             return {
                 "inbox_triage": self._run_text_step(
-                    self._build_system_prompt(), user_prompt
+                    self._build_system_prompt(),
+                    user_prompt,
+                    record_usage=record_usage,
                 )
             }
 
@@ -435,7 +480,9 @@ class LangGraphEmailAssistant:
             ).strip()
             return {
                 "todo_list": self._run_text_step(
-                    self._build_system_prompt(), user_prompt
+                    self._build_system_prompt(),
+                    user_prompt,
+                    record_usage=record_usage,
                 )
             }
 
@@ -472,7 +519,9 @@ class LangGraphEmailAssistant:
             ).strip()
             return {
                 "sales_call_brief": self._run_text_step(
-                    self._build_system_prompt(), user_prompt
+                    self._build_system_prompt(),
+                    user_prompt,
+                    record_usage=record_usage,
                 )
             }
 
@@ -511,7 +560,9 @@ class LangGraphEmailAssistant:
             ).strip()
             return {
                 "meeting_prep_packet": self._run_text_step(
-                    self._build_system_prompt(), user_prompt
+                    self._build_system_prompt(),
+                    user_prompt,
+                    record_usage=record_usage,
                 )
             }
 
@@ -633,7 +684,9 @@ class LangGraphEmailAssistant:
             ).strip()
             return {
                 "final_output": self._run_text_step(
-                    self._build_system_prompt(), user_prompt
+                    self._build_system_prompt(),
+                    user_prompt,
+                    record_usage=record_usage,
                 ),
                 "revision_count": revision_count,
             }
@@ -686,13 +739,13 @@ class LangGraphEmailAssistant:
         task: str,
         tools: list[BaseTool],
         recorder: AssistantRecorder | None = None,
+        *,
+        record_usage: Callable[[object], None] | None = None,
     ) -> AssistantRunResult:
         """Execute the task through an explicit LangGraph workflow."""
         active_recorder = recorder or NullRecorder()
         active_recorder.on_user_message(task)
-        graph: CompiledStateGraph[
-            AssistantState, None, AssistantState, AssistantState
-        ] = self._build_graph(tools)
+        graph = self._build_graph(tools, record_usage=record_usage)
         result = graph.invoke(
             {"task": task},
             config={"recursion_limit": self._workflow_recursion_limit},

@@ -105,7 +105,11 @@ def test_email_assistant_uses_distinct_tool_and_workflow_recursion_limits(
         "create_agent",
         lambda _model, _tools: _InnerGraph(),
     )
-    monkeypatch.setattr(assistant, "_build_graph", lambda _tools: _OuterGraph())
+    monkeypatch.setattr(
+        assistant,
+        "_build_graph",
+        lambda _tools, *, record_usage=None: _OuterGraph(),
+    )
     tools = [cast(BaseTool, object())]
 
     assert assistant._run_tool_research("inspect inbox", tools) == "research"

@@ -1645,7 +1645,7 @@ requires-dist = [
     { name = "google-adk", marker = "extra == 'google-adk'", specifier = ">=1.28.0" },
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
     { name = "langgraph", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
-    { name = "litellm", specifier = ">=1.80.0" },
+    { name = "litellm", specifier = "==1.82.6" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.9.0" },
