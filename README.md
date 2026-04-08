@@ -17,107 +17,59 @@
 
 ---
 
-SimLab is the data layer for adaptively composing RL simulations and evaluating and refining agents. SimLab is toolset, agent harness and sandbox agnostic. Browse pre-built scenario templates or bring your own CLI/MCP toolset.
+Agents fail in production on multi-step workflows: malformed tool calls, state drift, unrecoverable retry loops. Traditional evals don't catch these. SimLab is a self-serve CLI for spinning up realistic simulation environments, running your agent through long-horizon tasks, and verifying the results programmatically.
 
-- **Browse & compose** environments from a catalog of tool servers and scenario templates
-- **Run agents** against tasks using any LLM provider (OpenAI, Fireworks, custom endpoints)
+SimLab is toolset, agent harness, and sandbox agnostic. Browse pre-built scenario templates or bring your own CLI/MCP toolset.
+
+- **Simulate realistic workflows** — spin up environments with seeded data, tool servers, and NPC interactions that mirror production
+- **Run any agent** against tasks using any LLM provider (OpenAI, Gemini, Anthropic, Fireworks, or custom endpoints)
 - **Run Harbor tasks directly** from a Harbor task directory with `tasks run --harbor`
 - **Generate custom tasks** with built-in task generation pipelines
-- **Evaluate automatically** with verifiers and reward model scoring
-- **Scale to the cloud** with Daytona for remote sandbox execution (if you want to experiment with large-scale parallel rollouts, reach out to us or join the Discord!)
+- **Verify programmatically** — deterministic verifiers score pass/fail on actual environment state, not LLM-as-judge
+- **Scale to the cloud** with [Daytona](https://daytona.io) for remote sandbox execution — no local Docker required
+
+## How it works
+
+1. **Pick a scenario** — choose from pre-built templates (HR, coding, project management, etc.)
+2. **Run your agent** — SimLab handles seeding, tool servers, and orchestration
+3. **Get a verdict** — programmatic verifiers score pass/fail with detailed execution traces
+4. *(Optional)* **Generate more tasks** — use the built-in task generation pipeline to create custom tasks for your scenario
 
 ## Quickstart
 
 ### Install
+
 ```bash
-# Recommended: install with all extras
-uv tool install --python 3.13 "simulationlab[npc,daytona,langchain]"
-
-# Or install only what you need:
-uv tool install --python 3.13 simulationlab
-uv tool install --python 3.13 "simulationlab[npc]"        # NPC chat simulation
-uv tool install --python 3.13 "simulationlab[daytona]"    # Remote sandbox execution
-uv tool install --python 3.13 "simulationlab[langchain]"  # LangChain/LangGraph agents
-
-# pipx works too:
-pipx install --python 3.13 simulationlab
+uv tool install --python 3.13 "simulationlab[daytona]"
 ```
 
-The PyPI package is named `simulationlab`. The installed CLI command is `simlab`.
-SimLab currently supports Python 3.13.
+Requires Python 3.13.
 
-<details>
-<summary><strong>Install from source</strong></summary>
+### Authenticate
+
+You need two keys to get started: a Collinear API key and an LLM provider key. Daytona is optional (omit `--daytona` to run locally via Docker).
 
 ```bash
-git clone https://github.com/collinear-ai/simlab.git
-cd simlab/cli/simlab
-uv tool install --python 3.13 .
-# or with extras:
-uv tool install --python 3.13 ".[daytona]"
+simlab auth login                          # saves Collinear key (required)
+export SIMLAB_AGENT_API_KEY="sk-..."       # your LLM key — OpenAI/Anthropic/etc (required)
+export DAYTONA_API_KEY="dtn_..."           # optional — omit to use local Docker
+# Provider examples: openai, anthropic, gemini, groq, mistral, together_ai, deepseek, openrouter
 ```
 
-Then run with `simlab <command>`. To run directly from the repo without installing:
+### Run your first task
 
 ```bash
-uv run simlab <command>
-```
-
-</details>
-
-Get your API keys and export them:
-```bash
-export SIMLAB_COLLINEAR_API_KEY="col_..."   # from platform.collinear.ai (Developers > API Keys)
-export DAYTONA_API_KEY="dtn_..."            # from app.daytona.io
-export OPENAI_API_KEY="sk-..."              # from platform.openai.com/api-keys
-export SIMLAB_VERIFIER_MODEL="gpt-5.2"      # reward model (tasks also come with a programmatic verifier so can skip this)
-export SIMLAB_VERIFIER_PROVIDER="openai"    # litellm compatible provider name
-export SIMLAB_VERIFIER_API_KEY="$OPENAI_API_KEY" # corresponding key
-```
-
-### Create an environment:
-```bash
-simlab env init my-env --template hr
-```
-> To list templates run `simlab templates list` (or `simlab templates list --env my-env` to use that env's Scenario Manager URL)
-
-Create and list tasks in directory `./generated-tasks`
-```bash
-simlab tasks-gen init --template hr # Can go to the config.toml to setup number of tasks etc.
-simlab tasks list --tasks-dir ./generated-tasks # takes 5-10 mins with the default setting, choose haiku and 2 tasks for a faster generation.
-```
-
-
-### Run a task with task id `task_id`.
-
-`tasks run` automatically starts the environment, seeds data, runs the agent, and tears down when done.
-
-```bash
+simlab templates list                      # see available templates
+simlab env init my-env --template hr       # HR workflows: recruiting, onboarding, compensation
+simlab tasks list --env my-env
 simlab tasks run --env my-env \
-  --task task_id \
-  --tasks-dir ./generated-tasks \
+  --task hr__0_weaver_flag_biased_compensation_adjustment_request \
   --daytona \
-  --agent-model gpt-5.2 \
-  --agent-api-key "$OPENAI_API_KEY"
+  --agent-model <model> \
+  --agent-api-key "$SIMLAB_AGENT_API_KEY"
 ```
 
-<details>
-<summary><strong>Running locally with Docker</strong></summary>
-
-If you have Docker + Docker Compose installed, you can run environments on your machine instead of Daytona. Just omit `--daytona`:
-
-```bash
-simlab env init my-env --template hr
-simlab tasks run --env my-env --task task_id --agent-model gpt-5.2 --agent-api-key "$OPENAI_API_KEY"
-```
-
-No `DAYTONA_API_KEY` required. First run may take several minutes while images are pulled/built.
-
-</details>
-
-For the full walkthrough — configuration, custom agents, task generation, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md)**. For framework adapters and custom agent integration patterns, see **[Agent Integrations](https://github.com/collinear-ai/simlab/blob/main/docs/agent-integrations.md)**.
-
-For environment-scoped tool definitions, see **[Env-Local Custom Tools](https://github.com/collinear-ai/simlab/blob/main/docs/custom-tools.md)**.
+For the full walkthrough — task generation, custom agents, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md)**.
 
 ### Run a Harbor task directly
 
@@ -126,7 +78,7 @@ named SimLab environment first:
 
 ```bash
 simlab tasks run --harbor ./examples/harbor/hello-world \
-  --agent-model gpt-5.2
+  --agent-model <model>
 ```
 
 This compiles the Harbor task into a generated SimLab env and local task
@@ -140,8 +92,8 @@ inspection after the run.
 | Key | Required | How to get it |
 |-----|----------|---------------|
 | **Collinear API key** | Yes | [platform.collinear.ai](https://platform.collinear.ai) (Developers > API Keys) |
-| **OpenAI API key** | For running agents | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| **Daytona API key** | Yes (default runtime) | [app.daytona.io](https://app.daytona.io) |
+| **LLM API key** | For running agents | Any [LiteLLM-supported](https://docs.litellm.ai/docs/providers) provider (OpenAI, Gemini, Anthropic, Fireworks, etc.) |
+| **Daytona API key** | Optional (recommended) | [app.daytona.io](https://app.daytona.io) — cloud sandboxes so you don't need local Docker |
 
 ## Configuration
 
