@@ -320,6 +320,70 @@ def _collinear_runtime_module_names() -> list[str]:
     return [name for name in sys.modules if name in exact_names or name.startswith(prefixes)]
 
 
+@dataclass
+class _Action:
+    """Shim for collinear.core.models.Action used by verifiers."""
+    
+    tool_name: str
+    parameters: dict[str, Any]
+
+
+@dataclass
+class _ObservationResult:
+    """Shim for observation result returned by ToolCallingClient."""
+    
+    text: str
+    is_error: bool = False
+
+
+@dataclass
+class _StepResult:
+    """Shim for step result returned by ToolCallingClient."""
+    
+    observation: _ObservationResult
+
+
+class _ToolCallingClient:
+    """Shim for collinear.core.tool_calling_client.ToolCallingClient used by verifiers."""
+    
+    def __init__(self, base_url: str) -> None:
+        """Initialize with tool server base URL."""
+        self.base_url = base_url.rstrip("/")
+    
+    def step(self, action: _Action) -> _StepResult:
+        """Execute a tool call and return the result."""
+        import json  # noqa: PLC0415
+        import urllib.request  # noqa: PLC0415
+        
+        payload = json.dumps({
+            "action": {
+                "tool_name": action.tool_name,
+                "parameters": action.parameters,
+            }
+        }).encode()
+        
+        req = urllib.request.Request(  # noqa: S310
+            f"{self.base_url}/step",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
+                result = json.loads(resp.read())
+                # Handle both string and dict observation formats
+                if isinstance(result, dict):
+                    text = json.dumps(result) if not isinstance(result.get("observation"), str) else result.get("observation", "")
+                else:
+                    text = str(result)
+                return _StepResult(observation=_ObservationResult(text=text, is_error=False))
+        except Exception as exc:
+            return _StepResult(observation=_ObservationResult(text=str(exc), is_error=True))
+    
+    def close(self) -> None:
+        """Close the client (no-op for HTTP client)."""
+
+
 def _install_collinear_core_shims(injected_modules: list[str]) -> None:
     """Inject minimal collinear.core modules for verifier imports."""
 
@@ -337,6 +401,14 @@ def _install_collinear_core_shims(injected_modules: list[str]) -> None:
     run_artifacts_module.RunArtifacts = _VerifierArtifactsAdapter  # type: ignore[attr-defined]
     verifier_module = ensure_shim("collinear.core.verifier")
     verifier_module.VerifierResult = VerifierResult  # type: ignore[attr-defined]
+    
+    # Add models module with Action class
+    models_module = ensure_shim("collinear.core.models")
+    models_module.Action = _Action  # type: ignore[attr-defined]
+    
+    # Add tool_calling_client module with ToolCallingClient class
+    tool_calling_client_module = ensure_shim("collinear.core.tool_calling_client")
+    tool_calling_client_module.ToolCallingClient = _ToolCallingClient  # type: ignore[attr-defined]
 
 
 class VerifierBundleError(Exception):
