@@ -95,7 +95,7 @@ def build_task_batches(
         random.shuffle(task_ids)
 
     batches = []
-    current_batch = []
+    current_batch: list = []
 
     for task_id in task_ids:
         group = task_groups[task_id]
