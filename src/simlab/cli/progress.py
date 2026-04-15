@@ -19,6 +19,50 @@ from rich.table import Table
 from rich.text import Text
 
 
+@runtime_checkable
+class StepContextLike(Protocol):
+    """Minimal context interface used by rollout runners for step detail updates."""
+
+    def detail(self, message: str) -> None:
+        """Emit a detail line for the active step."""
+        ...
+
+    def flush_buffer(self) -> None:
+        """Flush any buffered output."""
+        ...
+
+    def update(self, message: str) -> None:
+        """Update the active step status line."""
+        ...
+
+
+@runtime_checkable
+class StepProgressLike(Protocol):
+    """Minimal progress interface for step-based rollouts."""
+
+    def step(
+        self, label: str, *, success_label: str | None = None
+    ) -> contextlib.AbstractContextManager[StepContextLike]:
+        """Return a context manager that tracks the lifecycle of one step."""
+        ...
+
+
+@runtime_checkable
+class ParallelRolloutProgressLike(Protocol):
+    """Minimal progress interface for parallel rollout runners."""
+
+    def update(
+        self,
+        rollout_idx: int,
+        *,
+        status: str | None = None,
+        steps_taken: int | None = None,
+        result: str | None = None,
+    ) -> None:
+        """Update one row in the parallel progress table."""
+        ...
+
+
 class StepContext:
     """Handle passed into a ``step()`` block for emitting verbose detail."""
 
@@ -241,15 +285,24 @@ class ParallelRolloutProgress:
         task_name: str,
         max_steps: int | None,
         console: Console | None = None,
+        row_labels: list[str] | None = None,
+        index_label: str = "Rollout",
+        transient: bool = True,
     ) -> None:
         """Initialize the table with all rollouts queued."""
         self._console = console or Console()
         self._lock = threading.Lock()
         self._rollout_count = rollout_count
+        self._index_label = index_label
+        self._transient = transient
+        if row_labels is not None and len(row_labels) != rollout_count:
+            raise ValueError(
+                f"row_labels length ({len(row_labels)}) must match rollout_count ({rollout_count})"
+            )
         self._rows: dict[int, ParallelRolloutRow] = {
             idx: ParallelRolloutRow(
                 rollout_idx=idx,
-                task_name=task_name,
+                task_name=row_labels[idx] if row_labels is not None else task_name,
                 status="Queued",
                 steps_taken=None,
                 max_steps=max_steps,
@@ -267,7 +320,7 @@ class ParallelRolloutProgress:
             self,
             console=self._console,
             refresh_per_second=8,
-            transient=True,
+            transient=self._transient,
         )
         self._live.__enter__()
         return self
@@ -316,7 +369,7 @@ class ParallelRolloutProgress:
             rows = [self._rows[i] for i in range(self._rollout_count)]
 
         table = Table(show_header=True, header_style="bold", padding=(0, 1))
-        table.add_column("Rollout", no_wrap=True)
+        table.add_column(self._index_label, no_wrap=True)
         table.add_column("Task", overflow="fold")
         table.add_column("Status", no_wrap=True)
         table.add_column("Steps", justify="right", no_wrap=True)

@@ -98,5 +98,5 @@ def test_ensure_env_artifacts_current_fails_noninteractive_when_stale(
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "Generated environment files are stale before tasks run." in captured.err
+    assert "Generated setup files are stale before tasks run." in captured.err
     assert f"simlab env init {tmp_path.name} --force" in captured.err

@@ -62,8 +62,9 @@ def _get_daytona(api_key: str | None = None):  # noqa: ANN202
     if DAYTONA_IMPORT_ERROR is not None:
         click.echo(
             click.style(
-                "Daytona support requires optional dependency 'daytona'. "
-                "Install with: pip install 'simulationlab[daytona]'",
+                "Daytona support requires the optional 'daytona' package.\n"
+                "Source checkout: uv sync --extra daytona\n"
+                'Installed CLI: uv tool install --python 3.13 "simulationlab[daytona]"',
                 fg="red",
             ),
             err=True,
@@ -123,6 +124,10 @@ def _prepare_compose_for_remote(
                 rewritten_volumes.append(f"{remote_source}:{remainder}")
             service["volumes"] = rewritten_volumes
 
+        raw_image = service.get("image")
+        existing_image = raw_image.strip() if isinstance(raw_image, str) else None
+        existing_image = existing_image or None
+
         build = service.pop("build", None)
         if build is None:
             continue
@@ -145,18 +150,28 @@ def _prepare_compose_for_remote(
                 "Daytona only supports Docker build contexts inside the environment bundle: "
                 f"{context_path}"
             ) from exc
-        image_tag = str(service.get("image", f"{service_name}:latest"))
-        service["image"] = image_tag
         if context_path.is_dir():
+            image_tag = existing_image or f"{service_name}:latest"
+            service["image"] = image_tag
             build_contexts[service_name] = (context_path, image_tag, dockerfile)
-        else:
+            continue
+
+        if existing_image:
             click.echo(
                 click.style(
-                    f"Warning: build context not found for {service_name}: {context_path}",
+                    "Warning: build context not found for "
+                    f"{service_name}: {context_path}. Using image {existing_image}.",
                     fg="yellow",
                 ),
                 err=True,
             )
+            service["image"] = existing_image
+            continue
+
+        raise RuntimeError(
+            "Daytona requires Docker build contexts to be present in the environment bundle. "
+            f"Missing build context for {service_name}: {context_path}."
+        )
 
     compose_bytes = yaml.dump(
         compose_data,

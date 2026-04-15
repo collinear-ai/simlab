@@ -12,6 +12,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +56,43 @@ jobs:
                   f"  expected tag: {expected_tag!r}\n"
               )
           PY
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update GHCR latest tags to match release version
+        env:
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tool_dir="src/simlab/catalog/tools"
+
+          images="$(
+            awk '$1 == "image:" { print $2 }' "${tool_dir}"/*.yaml \
+              | tr -d "'\"" \
+              | sed -n 's|^\(collinear/[^[:space:]#]*\):latest$|\1|p' \
+              | sort -u
+          )"
+
+          if [ -z "$images" ]; then
+            echo "No tool images found under ${tool_dir}." >&2
+            exit 1
+          fi
+
+          echo "Tool images to retag:"
+          echo "$images"
+
+          while IFS= read -r image; do
+            source_image="${REGISTRY}/${image}:${version}"
+            target_image="${REGISTRY}/${image}:latest"
+            echo "Pinning ${target_image} <- ${source_image}"
+            docker buildx imagetools create --tag "${target_image}" "${source_image}"
+          done <<< "$images"
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
       - name: Build distribution

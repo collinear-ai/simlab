@@ -812,7 +812,6 @@ def generate_run_analysis_markdown(
             ],
             api_key=api_key,
             base_url=base_url,
-            temperature=0.2,
         )
         content = response.choices[0].message.content
     except Exception as exc:

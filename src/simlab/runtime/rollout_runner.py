@@ -1,0 +1,2295 @@
+"""Shared rollout runner helpers for task, parallel, and autoresearch execution.
+
+This module is the stable internal surface for running SimLab task rollouts.
+CLI commands in `simlab.cli.tasks` and runtime utilities such as autoresearch and
+the Daytona parallel orchestrator import from here so rollout behavior stays
+aligned without reaching into CLI-private helpers.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import copy
+import importlib
+import json
+import logging
+import os
+import re
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+from typing import Any
+from typing import Protocol
+from typing import cast
+
+import click
+import yaml
+
+from simlab.agents.mcp_client import MCPClientHandle
+from simlab.cli.progress import StepProgressLike
+from simlab.composer.engine import ComposeEngine
+from simlab.composer.engine import EnvConfig
+from simlab.composer.engine import get_mcp_gateway_host_port
+from simlab.config import AgentRuntimeConfigLike
+from simlab.config import DaytonaApiKeyConfigLike
+from simlab.config import resolve_agent_api_key
+from simlab.env_artifacts import load_env_config
+from simlab.env_registry import build_registry
+from simlab.mcp_config import get_mcp_command_servers
+from simlab.mcp_config import get_mcp_server_urls
+from simlab.mcp_config import load_mcp_servers_from_env_dir
+from simlab.npc_chat.activation import NpcChatSession
+from simlab.runtime.adapters.harbor import trajectory as harbor_trajectory
+from simlab.runtime.adapters.harbor import urls as harbor_urls
+from simlab.runtime.adapters.harbor import verifier as harbor_verifier_runtime
+from simlab.runtime.daytona_client import get_daytona_client
+from simlab.seeder import get_tool_endpoints
+from simlab.seeder import query_tool_server
+from simlab.telemetry import emit_cli_event
+
+logger = logging.getLogger(__name__)
+
+ROLLOUT_FORMAT_DEFAULT = "default"
+ROLLOUT_FORMAT_ATIF = "atif"
+_ROLLOUT_FORMAT_CHOICES = (ROLLOUT_FORMAT_DEFAULT, ROLLOUT_FORMAT_ATIF)
+
+# Maps Docker service names (used in task JSONs) to tool-catalog names.
+SERVICE_TO_TOOL = {
+    "coding-env": "coding",
+    "crm-env": "crm",
+    "email-env": "email",
+    "erp-env": "erp",
+    "chronos-server": "calendar",
+    "frappe-helpdesk-env": "frappe-helpdesk",
+    "frappe-hrms-env": "frappe-hrms",
+    "google-workspace-tool-server": "google-workspace",
+    "playwright-mcp": "playwright",
+    "project-management-env": "project-management",
+    "rocketchat-env": "rocketchat",
+    "sec-edgar-env": "sec-edgar",
+    "twelve-data-env": "twelve-data",
+    "web-search-env": "web-search",
+}
+TOOL_TO_SERVICE = {tool: service for service, tool in SERVICE_TO_TOOL.items()}
+
+TOOL_WEB_SERVICE_META = {
+    "frappe-helpdesk": {
+        "compose_service": "frappe-helpdesk",
+        "label": "Frappe Helpdesk",
+        "default_port": 8000,
+        "credentials": " (login: Administrator / admin)",
+    },
+    "frappe-hrms": {
+        "compose_service": "frappe-hrms",
+        "label": "Frappe HRMS",
+        "default_port": 8000,
+        "credentials": " (login: Administrator / admin)",
+    },
+    "rocketchat": {
+        "compose_service": "rocketchat",
+        "label": "Rocket.Chat",
+        "default_port": 3000,
+        "credentials": " (login: agent / agent123)",
+    },
+    "email": {
+        "compose_service": "mailhog",
+        "label": "MailHog",
+        "default_port": 8025,
+        "credentials": "",
+    },
+    "calendar": {
+        "compose_service": "baikal",
+        "label": "Baikal Calendar",
+        "default_port": 80,
+        "credentials": "",
+    },
+}
+
+CALENDAR_INTERNAL_BASE_URL = "http://baikal:80/dav.php"
+CALENDAR_DEFAULT_USERNAME = "chronos"
+CALENDAR_DEFAULT_PASSWORD = "admin"  # noqa: S105 - seeded test credential for Baikal
+
+ProfiledServiceNamesFn = Callable[..., list[str]]
+LocalProfileRunnerFn = Callable[..., None]
+ToolEnvironmentFactory = Callable[..., object]
+AgentContractRunner = Callable[..., Any]
+VerifierArtifactsBuilder = Callable[..., Any]
+InferScenarioFromEvaluator = Callable[..., str | None]
+RunVerifier = Callable[..., Any]
+
+
+class RolloutFormatConfigLike(Protocol):
+    """Config shape that can provide a default rollout format."""
+
+    tasks_rollout_format: str | None
+
+
+class SharedAgentRuntimeConfigLike(AgentRuntimeConfigLike, Protocol):
+    """Config shape needed to resolve the shared agent runtime contract."""
+
+    agent_model: str | None
+    agent_base_url: str | None
+
+
+class VerifierRuntimeConfigLike(Protocol):
+    """Config shape needed to run verifier and rubric judge helpers."""
+
+    verifier_model: str | None
+    verifier_provider: str | None
+    verifier_base_url: str | None
+    verifier_api_key: str | None
+
+
+class RolloutRunnerGlobalConfigLike(DaytonaApiKeyConfigLike, VerifierRuntimeConfigLike, Protocol):
+    """Config shape needed by rollout runner helpers that touch Daytona and verifier settings."""
+
+
+class DaytonaRunnerLike(Protocol):
+    """Minimal Daytona runner shape used by rollout helpers."""
+
+    def run_profiled_services(self, *args: object, **kwargs: object) -> object:
+        """Run a compose profile inside Daytona."""
+
+    def restart_sandbox_services(self, *args: object, **kwargs: object) -> object:
+        """Restart compose services inside an existing Daytona sandbox."""
+
+
+DaytonaRunnerFactory = Callable[..., DaytonaRunnerLike]
+
+
+class DaytonaClientLike(Protocol):
+    """Minimal Daytona client shape used by rollout helpers."""
+
+    def get(self, sandbox_id: str) -> object:
+        """Return a sandbox object by id."""
+
+
+class RubricJudgeResultLike(Protocol):
+    """Minimal rubric judge result surface used by task rollouts."""
+
+    success: bool
+    score: float
+    confidence: float
+    verdict: str
+    error: str | None
+    failed_criteria: list[str]
+    evaluation_results: list[dict[str, Any]] | None
+    reasoning: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Render the rubric result to the persisted task-run payload."""
+
+
+RubricJudgeRunner = Callable[..., RubricJudgeResultLike]
+
+
+def get_env_runtime_helpers() -> tuple[ProfiledServiceNamesFn, LocalProfileRunnerFn]:
+    """Return the environment helpers used for profiled service orchestration."""
+    env_lifecycle = importlib.import_module("simlab.runtime.env_lifecycle")
+    get_profiled_service_names = getattr(env_lifecycle, "get_profiled_service_names", None)
+    run_profiled_services_local = getattr(env_lifecycle, "run_profiled_services_local", None)
+    if get_profiled_service_names is None or not callable(get_profiled_service_names):
+        raise AttributeError("Missing simlab.runtime.env_lifecycle.get_profiled_service_names")
+    if run_profiled_services_local is None or not callable(run_profiled_services_local):
+        raise AttributeError("Missing simlab.runtime.env_lifecycle.run_profiled_services_local")
+    return (
+        cast(ProfiledServiceNamesFn, get_profiled_service_names),
+        cast(LocalProfileRunnerFn, run_profiled_services_local),
+    )
+
+
+def get_daytona_runner_class() -> DaytonaRunnerFactory:
+    """Return the Daytona runner class without importing the SDK on module import."""
+    daytona_runner = importlib.import_module("simlab.runtime.daytona_runner")
+    return daytona_runner.DaytonaRunner
+
+
+def get_rubric_judge_runner() -> RubricJudgeRunner:
+    """Return the rubric judge runner only when verifier flows need it."""
+    verifiers = importlib.import_module("simlab.verifiers")
+    return verifiers.run_rubric_judge
+
+
+def get_agent_runtime_helpers() -> tuple[ToolEnvironmentFactory, AgentContractRunner]:
+    """Return the external-agent runtime helpers only when tasks run."""
+    agents = importlib.import_module("simlab.agents")
+    return agents.UnifiedToolEnvironment, agents.run_with_agent_contract
+
+
+def get_verifier_runtime_helpers() -> tuple[
+    VerifierArtifactsBuilder,
+    InferScenarioFromEvaluator,
+    RunVerifier,
+]:
+    """Return verifier helpers only when task runs need verifier execution."""
+    verifiers = importlib.import_module("simlab.verifiers")
+    return (
+        verifiers.build_verifier_artifacts,
+        verifiers.infer_scenario_from_evaluator,
+        verifiers.run_verifier,
+    )
+
+
+def _normalize_rollout_format(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in _ROLLOUT_FORMAT_CHOICES:
+        return normalized
+    return None
+
+
+def resolve_rollout_format(
+    *,
+    requested: str | None,
+    config: EnvConfig,
+    global_cfg: RolloutFormatConfigLike,
+    harbor: bool,
+) -> str:
+    """Resolve rollout format from CLI, env config, global config, then defaults."""
+    requested_format = _normalize_rollout_format(requested)
+    if requested_format is not None:
+        return requested_format
+
+    env_format = _normalize_rollout_format(getattr(config, "rollout_format", None))
+    if env_format is not None:
+        return env_format
+
+    global_format = _normalize_rollout_format(getattr(global_cfg, "tasks_rollout_format", None))
+    if global_format is not None:
+        return global_format
+
+    return ROLLOUT_FORMAT_ATIF if harbor else ROLLOUT_FORMAT_DEFAULT
+
+
+def load_local_task(
+    bundle_dir: Path,
+    task_id: str,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], Path | None]:
+    """Load a task, profiles, and source file path from a local bundle."""
+    task_entry = _find_task_entry(bundle_dir, task_id)
+    if task_entry is None:
+        click.echo(click.style(f"Task not found: {task_id}", fg="red"), err=True)
+        raise SystemExit(1)
+    task_dict, task_file = task_entry
+    return task_dict, load_profiles(bundle_dir), task_file
+
+
+def normalize_tasks_bundle_dir(bundle_dir: Path) -> Path:
+    """Normalize a tasks bundle path so it always points at the bundle root.
+
+    Canonical representation is the bundle root directory that contains `tasks/`.
+    For convenience, we also accept passing the `tasks/` directory itself and
+    return its parent directory.
+    """
+    bundle_dir = bundle_dir.expanduser()
+    try:
+        bundle_dir = bundle_dir.resolve()
+    except OSError:
+        bundle_dir = bundle_dir.absolute()
+
+    if (bundle_dir / "tasks").is_dir():
+        return bundle_dir
+
+    if bundle_dir.name == "tasks" and (bundle_dir.parent / "tasks").is_dir():
+        return bundle_dir.parent
+
+    return bundle_dir
+
+
+def resolve_agent_runtime_settings(
+    global_cfg: SharedAgentRuntimeConfigLike,
+    model: str | None,
+    provider: str | None,
+    api_key: str | None,
+    base_url: str | None,
+) -> tuple[str, str, str | None, str | None]:
+    """Resolve the agent runtime contract used by task and autoresearch runs."""
+    resolved_model = (model or getattr(global_cfg, "agent_model", None) or "").strip()
+    provider_value = (provider or getattr(global_cfg, "agent_provider", None) or "openai").strip()
+    resolved_provider = (provider_value or "openai").lower()
+    resolved_api_key = resolve_agent_api_key(
+        api_key,
+        provider=resolved_provider,
+        config=global_cfg,
+    )
+    resolved_base_url = (
+        base_url or getattr(global_cfg, "agent_base_url", None) or ""
+    ).strip() or None
+    return resolved_model, resolved_provider, resolved_api_key, resolved_base_url
+
+
+def load_tasks(scenario_dir: Path) -> list[dict[str, Any]]:
+    """Load all task JSON files from ``<scenario_dir>/tasks/``."""
+    tasks_dir = scenario_dir / "tasks"
+    if not tasks_dir.is_dir():
+        click.echo(click.style(f"Tasks directory not found: {tasks_dir}", fg="red"), err=True)
+        raise SystemExit(1)
+    tasks: list[dict[str, Any]] = []
+    for path in sorted(tasks_dir.glob("*.json")):
+        try:
+            tasks.append(json.loads(path.read_text()))
+        except json.JSONDecodeError as exc:
+            click.echo(click.style(f"Invalid JSON in {path}: {exc}", fg="red"), err=True)
+            raise SystemExit(1) from exc
+    return tasks
+
+
+def _find_task_entry(
+    scenario_dir: Path,
+    task_id: str,
+) -> tuple[dict[str, Any], Path] | None:
+    """Find a local task payload and its source file using the same match order."""
+    task_entries: list[tuple[dict[str, Any], Path]] = []
+    tasks_dir = scenario_dir / "tasks"
+    if not tasks_dir.is_dir():
+        click.echo(click.style(f"Tasks directory not found: {tasks_dir}", fg="red"), err=True)
+        raise SystemExit(1)
+    for path in sorted(tasks_dir.glob("*.json")):
+        try:
+            task_entries.append((json.loads(path.read_text()), path))
+        except json.JSONDecodeError as exc:
+            click.echo(click.style(f"Invalid JSON in {path}: {exc}", fg="red"), err=True)
+            raise SystemExit(1) from exc
+
+    for task, path in task_entries:
+        current_id = task.get("meta", {}).get("task_id", "")
+        if current_id == task_id:
+            return task, path
+
+    for task, path in task_entries:
+        current_id = task.get("meta", {}).get("task_id", "")
+        if current_id.endswith(task_id) or task_id in current_id:
+            return task, path
+
+    return None
+
+
+def build_mcp_clients(
+    mcp_config: dict[str, Any] | None,
+    endpoints: dict[str, str],
+) -> dict[str, MCPClientHandle]:
+    """Build MCP client handles for URL-based and command-based MCP servers."""
+    if mcp_config is None:
+        return {}
+
+    clients: dict[str, MCPClientHandle] = {}
+    for server_name, url in get_mcp_server_urls(mcp_config).items():
+        clients[server_name] = MCPClientHandle(url, server_name)
+
+    command_servers = get_mcp_command_servers(mcp_config)
+    if command_servers:
+        gateway_url = endpoints.get(ComposeEngine.MCP_GATEWAY_SERVICE_NAME) or (
+            f"http://localhost:{ComposeEngine.MCP_GATEWAY_PORT}/mcp"
+        )
+        for server_name in command_servers:
+            clients[server_name] = MCPClientHandle(
+                gateway_url,
+                server_name,
+                tool_prefix=f"{server_name}_",
+            )
+    return clients
+
+
+def _collect_mcp_tool_failures(
+    mcp_clients: dict[str, MCPClientHandle],
+) -> list[str]:
+    """Return discovery failures for configured MCP clients."""
+    failures: list[str] = []
+    for server_name, client in mcp_clients.items():
+        try:
+            tools = asyncio.run(client.alist_tools())
+        except Exception as exc:
+            failures.append(f"{server_name}: tool discovery failed ({exc})")
+            continue
+        if not tools:
+            failures.append(f"{server_name}: exposed no tools")
+    return failures
+
+
+def require_mcp_tools_available(
+    mcp_clients: dict[str, MCPClientHandle],
+) -> None:
+    """Fail fast when configured MCP servers cannot enumerate any tools."""
+    if not mcp_clients:
+        return
+
+    failures = _collect_mcp_tool_failures(mcp_clients)
+
+    if failures:
+        click.echo(
+            click.style(
+                "Configured MCP servers are not usable for task run:",
+                fg="red",
+            ),
+            err=True,
+        )
+        for failure in failures:
+            click.echo(f"  - {failure}", err=True)
+        click.echo(
+            click.style(
+                "Check the MCP server command/args or upstream authentication, then retry.",
+                fg="yellow",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+
+
+def wait_for_mcp_tools_available(
+    mcp_clients: dict[str, MCPClientHandle],
+    *,
+    timeout: int = 120,
+    poll_interval: int = 5,
+    log_prefix: str = "",
+    quiet: bool = False,
+) -> None:
+    """Poll MCP tool discovery until every configured client exposes tools."""
+    if not mcp_clients:
+        return
+
+    prefix = f"{log_prefix} " if log_prefix else ""
+    deadline = time.monotonic() + timeout
+    failures = _collect_mcp_tool_failures(mcp_clients)
+    while failures:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{prefix}Timed out waiting for MCP tools: {'; '.join(failures)}")
+        if not quiet:
+            click.echo(f"{prefix}Waiting for MCP tools...")
+        time.sleep(poll_interval)
+        failures = _collect_mcp_tool_failures(mcp_clients)
+
+
+def get_local_verifier_file_path(tasks_dir: Path, module_path: str) -> Path | None:
+    """Return the local verifier file matching a task's module path."""
+    verifiers_dir = tasks_dir / "verifiers"
+    if not verifiers_dir.is_dir():
+        return None
+    module_stem = module_path.rsplit(".", 1)[-1].strip()
+    if not module_stem:
+        return None
+    verifier_file = verifiers_dir / f"{module_stem}.py"
+    if verifier_file.is_file():
+        return verifier_file
+    if module_stem and module_stem[0].isdigit():
+        prefixed = verifiers_dir / f"v{module_stem}.py"
+        if prefixed.is_file():
+            return prefixed
+    return None
+
+
+def load_profiles(scenario_dir: Path) -> dict[str, dict[str, Any]]:
+    """Load NPC profiles, keyed by ``profile_id``."""
+    profiles_path = scenario_dir / "npcs" / "profiles.json"
+    if not profiles_path.exists():
+        return {}
+    try:
+        data = json.loads(profiles_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return {p["profile_id"]: p for p in data if "profile_id" in p}
+
+
+def load_skills_markdown(
+    *,
+    config: EnvConfig,
+    bundle_dir: Path | None,
+) -> str | None:
+    """Load scenario guidance from the environment config."""
+    _ = bundle_dir
+    if config.scenario_guidance_md:
+        content = config.scenario_guidance_md.strip()
+        if content:
+            return content
+    return None
+
+
+def build_skills_guidance_section(skills_md: str | None) -> str:
+    """Format scenario-level skills guidance for the task instruction."""
+    if not skills_md:
+        return ""
+    return f"Scenario guidance:\n{skills_md}"
+
+
+def _parse_tool_response_payload(resp: object) -> object:
+    """Extract tool response payload from server response shape."""
+    if resp is None:
+        return None
+
+    if not isinstance(resp, dict):
+        return resp
+
+    if "output" in resp:
+        return resp.get("output")
+    if "result" in resp:
+        return resp.get("result")
+    if "payload" in resp:
+        return resp.get("payload")
+
+    observation = resp.get("observation")
+    if isinstance(observation, dict):
+        structured = observation.get("structured_content")
+        if structured is not None:
+            return structured
+        text = observation.get("text")
+        if isinstance(text, str):
+            stripped = text.strip()
+            if not stripped:
+                return None
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return stripped
+        return observation
+
+    if isinstance(observation, str):
+        stripped = observation.strip()
+        if not stripped:
+            return None
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+
+    return resp
+
+
+def _tool_response_is_error(
+    resp: object,
+    *,
+    allowed_error_codes: set[str] | None = None,
+) -> bool:
+    """Return True when tool server response indicates error."""
+    if resp is None or not isinstance(resp, dict):
+        return True
+
+    allowed = allowed_error_codes or set()
+    obs = resp.get("observation")
+    payload = _parse_tool_response_payload(resp)
+
+    error_code = ""
+    payload_error = False
+    if isinstance(payload, dict):
+        raw_error_code = payload.get("error_code")
+        if isinstance(raw_error_code, str):
+            error_code = raw_error_code.strip()
+        payload_error = payload.get("success") is False or bool(payload.get("error"))
+
+    if isinstance(obs, dict) and bool(obs.get("is_error")):
+        return error_code not in allowed
+    if error_code:
+        return error_code not in allowed
+    return payload_error
+
+
+def task_uses_calendar(task: dict[str, Any]) -> bool:
+    """Return True when the task references the calendar tool."""
+    apps = task.get("apps", [])
+    if isinstance(apps, list) and "calendar" in apps:
+        return True
+    for tool_server in task.get("tool_servers", []):
+        if not isinstance(tool_server, dict):
+            continue
+        if SERVICE_TO_TOOL.get(tool_server.get("name", "")) == "calendar":
+            return True
+    return False
+
+
+def needed_task_endpoints(
+    task: dict[str, Any],
+    endpoints: dict[str, str],
+    *,
+    include_tool_servers: bool,
+) -> dict[str, str]:
+    """Return only the endpoints a task seed or run path will actually call."""
+    needed: dict[str, str] = {}
+    if task.get("seed_emails") and "email" in endpoints:
+        needed["email"] = endpoints["email"]
+
+    if (
+        task.get("seed_calendar_events")
+        or (task_uses_calendar(task) and collect_task_calendar_accounts(task))
+    ) and "calendar" in endpoints:
+        needed["calendar"] = endpoints["calendar"]
+
+    if not include_tool_servers:
+        return needed
+
+    for tool_server in task.get("tool_servers", []):
+        if not isinstance(tool_server, dict):
+            continue
+        tool_name = SERVICE_TO_TOOL.get(str(tool_server.get("name") or "").strip())
+        if tool_name and tool_name in endpoints:
+            needed[tool_name] = endpoints[tool_name]
+    return needed
+
+
+def _profile_display_name(profile_id: str, profile: dict[str, Any]) -> str:
+    """Return a human-readable display name for a profile/account."""
+    first_name = str(profile.get("first_name") or "").strip()
+    last_name = str(profile.get("last_name") or "").strip()
+    display_name = f"{first_name} {last_name}".strip()
+    return display_name or profile_id.replace("_", " ").title()
+
+
+def collect_task_calendar_accounts(
+    task: dict[str, Any],
+) -> list[str]:
+    """Collect task-specific calendar account aliases to register."""
+    accounts: list[str] = []
+    for npc in task.get("npcs", []):
+        if not isinstance(npc, dict):
+            continue
+        npc_id = str(npc.get("id") or "").strip()
+        if npc_id:
+            accounts.append(npc_id)
+    for event in task.get("seed_calendar_events", []):
+        if not isinstance(event, dict):
+            continue
+        account = str(event.get("account") or "").strip()
+        if account:
+            accounts.append(account)
+    return list(dict.fromkeys(accounts))
+
+
+def _compose_dir_from_config(config_path: str | Path) -> Path:
+    """Return the env directory (parent of env.yaml)."""
+    return Path(config_path).parent.resolve()
+
+
+def _resolve_calendar_account_settings(config: EnvConfig) -> tuple[str, str, str]:
+    """Resolve the internal CalDAV URL and shared credentials for account registration."""
+    overrides = config.overrides.get("calendar", {})
+    base_url = str(overrides.get("CALDAV_BASE_URL", CALENDAR_INTERNAL_BASE_URL)).strip()
+    username = str(overrides.get("CALDAV_USERNAME", CALENDAR_DEFAULT_USERNAME)).strip()
+    password = str(overrides.get("CALDAV_PASSWORD", CALENDAR_DEFAULT_PASSWORD)).strip()
+    return (
+        base_url or CALENDAR_INTERNAL_BASE_URL,
+        username or CALENDAR_DEFAULT_USERNAME,
+        password or CALENDAR_DEFAULT_PASSWORD,
+    )
+
+
+def _extract_calendar_account_aliases(resp: object) -> set[str]:
+    """Extract registered calendar account aliases from ``list_accounts`` output."""
+    payload = _parse_tool_response_payload(resp)
+    if not isinstance(payload, dict):
+        return set()
+    accounts = payload.get("accounts")
+    if not isinstance(accounts, list):
+        return set()
+
+    aliases: set[str] = set()
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        alias = str(account.get("alias") or account.get("name") or "").strip()
+        if alias:
+            aliases.add(alias)
+    return aliases
+
+
+def _calendar_account_is_connected(resp: object) -> bool:
+    """Return True when a ``test_account`` response says the account is connected."""
+    if _tool_response_is_error(resp):
+        return False
+    payload = _parse_tool_response_payload(resp)
+    if isinstance(payload, dict):
+        connected = payload.get("connected")
+        if isinstance(connected, bool):
+            return connected
+        status = payload.get("status")
+        if isinstance(status, str):
+            return status.strip().lower() == "connected"
+    return False
+
+
+def _query_tool_server_with_retries(
+    endpoint_url: str,
+    tool_name: str,
+    params: dict[str, Any],
+    *,
+    retries: int = 3,
+) -> object | None:
+    """Query a tool server with simple retry/backoff."""
+    for attempt in range(1, retries + 1):
+        resp = query_tool_server(endpoint_url, tool_name, params)
+        if resp is not None:
+            return resp
+        if attempt < retries:
+            time.sleep(1.0 * attempt)
+    return None
+
+
+def _resolve_calendar_uid(
+    cal_url: str,
+    *,
+    account: str,
+    calendar_id: str,
+    cache: dict[tuple[str, str], str],
+) -> str | None:
+    """Resolve a task ``calendar_id`` to the Chronos ``calendar_uid`` for an account."""
+    cache_key = (account, calendar_id)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    resp = _query_tool_server_with_retries(
+        cal_url,
+        "list_calendars",
+        {"account": account},
+    )
+    if _tool_response_is_error(resp):
+        return None
+
+    payload = _parse_tool_response_payload(resp)
+    if not isinstance(payload, dict):
+        return None
+
+    calendars = payload.get("calendars")
+    if not isinstance(calendars, list):
+        return None
+
+    requested = calendar_id.strip()
+    fallback_uid: str | None = None
+    for calendar in calendars:
+        if not isinstance(calendar, dict):
+            continue
+        uid = str(calendar.get("uid") or "").strip()
+        if not uid:
+            continue
+        if fallback_uid is None:
+            fallback_uid = uid
+        candidates = {
+            uid,
+            str(calendar.get("name") or "").strip(),
+            str(calendar.get("display_name") or "").strip(),
+            str(calendar.get("id") or "").strip(),
+        }
+        if requested in candidates:
+            cache[cache_key] = uid
+            return uid
+
+    if requested == "default" and fallback_uid is not None and len(calendars) == 1:
+        cache[cache_key] = fallback_uid
+        return fallback_uid
+    return None
+
+
+def provision_task_calendar_users(
+    task: dict[str, Any],
+    config: EnvConfig,
+    config_path: str,
+    *,
+    using_daytona: bool,
+    daytona_api_key: str | None = None,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Ensure Baikal has backing CalDAV users/calendars for task-specific accounts."""
+    if not task_uses_calendar(task):
+        return
+
+    accounts = [
+        account
+        for account in collect_task_calendar_accounts(task)
+        if account and account != CALENDAR_DEFAULT_USERNAME
+    ]
+    if not accounts:
+        return
+
+    config_file = Path(config_path)
+    compose_dir = _compose_dir_from_config(config_file)
+    env_overrides = {"CALDAV_USERS": ",".join(accounts)}
+    get_profiled_service_names, run_profiled_services_local = get_env_runtime_helpers()
+
+    preseed_svc_names = get_profiled_service_names(
+        config,
+        profile="preseed",
+        config_path=config_file,
+        tool_names=["calendar"],
+    )
+    seed_svc_names = get_profiled_service_names(
+        config,
+        profile="seed",
+        config_path=config_file,
+        tool_names=["calendar"],
+    )
+
+    if log is None:
+        click.echo(f"  Provisioning calendar users: {', '.join(accounts)}")
+    else:
+        log(f"Provisioning calendar users: {', '.join(accounts)}")
+    if using_daytona:
+        daytona_runner_cls = get_daytona_runner_class()
+        runner = daytona_runner_cls(daytona_api_key=daytona_api_key)
+        if preseed_svc_names:
+            runner.run_profiled_services(
+                compose_dir,
+                preseed_svc_names,
+                profile="preseed",
+                env_overrides=env_overrides,
+            )
+        if seed_svc_names:
+            runner.run_profiled_services(
+                compose_dir,
+                seed_svc_names,
+                profile="seed",
+                env_overrides=env_overrides,
+            )
+        return
+
+    if preseed_svc_names:
+        run_profiled_services_local(
+            compose_dir,
+            preseed_svc_names,
+            profile="preseed",
+            env_overrides=env_overrides,
+        )
+    if seed_svc_names:
+        run_profiled_services_local(
+            compose_dir,
+            seed_svc_names,
+            profile="seed",
+            env_overrides=env_overrides,
+        )
+
+
+def provision_task_group_channels(
+    task: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+    config: EnvConfig,
+    config_path: str,
+    *,
+    using_daytona: bool,
+    daytona_api_key: str | None = None,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Re-run rocketchat-seed with task-specific NPC users and group channels."""
+    group_channels = task.get("seed_group_channels") or []
+    if not group_channels:
+        return
+
+    if "rocketchat" not in config.tools:
+        return
+
+    npc_ids: list[str] = []
+    for npc in task.get("npcs", []):
+        if isinstance(npc, dict):
+            npc_id = str(npc.get("id") or "").strip()
+            if npc_id:
+                npc_ids.append(npc_id)
+    for ch in group_channels:
+        if isinstance(ch, dict):
+            for mid in ch.get("member_profile_ids", []):
+                mid_str = str(mid).strip()
+                if mid_str:
+                    npc_ids.append(mid_str)
+    npc_ids = list(dict.fromkeys(npc_ids))
+
+    if not npc_ids:
+        return
+
+    npc_configs: dict[str, dict[str, Any]] = {}
+    for pid in npc_ids:
+        profile = profiles.get(pid, {})
+        rc_username = str(profile.get("rocketchat_username") or "").strip() or pid
+        first = str(profile.get("first_name") or "").strip()
+        last = str(profile.get("last_name") or "").strip()
+        display_name = (
+            f"{first} {last}".strip() if (first or last) else pid.replace("_", " ").title()
+        )
+        email = str(profile.get("email") or f"{rc_username}@example.com").strip()
+        npc_configs[pid] = {
+            "username": rc_username,
+            "password": "npc123",
+            "name": display_name,
+            "email": email,
+        }
+
+    env_overrides: dict[str, str] = {
+        "ROCKETCHAT_NPC_CONFIGS": json.dumps(npc_configs),
+        "ROCKETCHAT_SEED_GROUP_CHANNELS": json.dumps(group_channels),
+    }
+
+    config_file = Path(config_path)
+    compose_dir = _compose_dir_from_config(config_file)
+    get_profiled_service_names, run_profiled_services_local = get_env_runtime_helpers()
+
+    seed_svc_names = get_profiled_service_names(
+        config,
+        profile="seed",
+        config_path=config_file,
+        tool_names=["rocketchat"],
+    )
+    if not seed_svc_names:
+        return
+
+    channel_names = [ch.get("channel_name", "?") for ch in group_channels if isinstance(ch, dict)]
+    if log is None:
+        click.echo(
+            f"  Provisioning group channels: {', '.join(channel_names)} "
+            f"({len(npc_ids)} NPC user(s))"
+        )
+    else:
+        log(f"Provisioning group channels: {', '.join(channel_names)} ({len(npc_ids)} NPC user(s))")
+
+    if using_daytona:
+        daytona_runner_cls = get_daytona_runner_class()
+        runner = daytona_runner_cls(daytona_api_key=daytona_api_key)
+        runner.run_profiled_services(
+            compose_dir,
+            seed_svc_names,
+            profile="seed",
+            env_overrides=env_overrides,
+        )
+        return
+
+    run_profiled_services_local(
+        compose_dir,
+        seed_svc_names,
+        profile="seed",
+        env_overrides=env_overrides,
+    )
+
+
+def run_env_seed_services(
+    config: EnvConfig,
+    config_path: str,
+    *,
+    using_daytona: bool,
+    daytona_api_key: str | None = None,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Run environment seed services so mutable tools start each run from seed state."""
+    config_file = Path(config_path)
+    compose_dir = _compose_dir_from_config(config_file)
+    get_profiled_service_names, run_profiled_services_local = get_env_runtime_helpers()
+    seed_svc_names = get_profiled_service_names(config, profile="seed", config_path=config_file)
+    if not seed_svc_names:
+        return
+
+    if log is None:
+        click.echo("  Resetting environment state from seed services")
+    else:
+        log("Resetting environment state from seed services")
+    if using_daytona:
+        daytona_runner_cls = get_daytona_runner_class()
+        runner = daytona_runner_cls(daytona_api_key=daytona_api_key)
+        runner.run_profiled_services(compose_dir, seed_svc_names, profile="seed")
+        return
+
+    run_profiled_services_local(compose_dir, seed_svc_names, profile="seed")
+
+
+def ensure_task_calendar_accounts(
+    task: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+    endpoints: dict[str, str],
+    config: EnvConfig,
+    *,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Register task-specific calendar accounts before seed/run."""
+    if not task_uses_calendar(task):
+        return
+
+    cal_url = endpoints.get("calendar")
+    if not cal_url:
+        return
+
+    required_accounts = collect_task_calendar_accounts(task)
+    if not required_accounts:
+        return
+
+    caldav_base_url, default_username, caldav_password = _resolve_calendar_account_settings(config)
+
+    existing_aliases: set[str] = set()
+    list_resp = _query_tool_server_with_retries(cal_url, "list_accounts", {})
+    if not _tool_response_is_error(list_resp):
+        existing_aliases = _extract_calendar_account_aliases(list_resp)
+
+    for account in required_accounts:
+        if account == default_username:
+            continue
+
+        profile = profiles.get(account, {})
+        test_resp = None
+        if account in existing_aliases:
+            test_resp = _query_tool_server_with_retries(
+                cal_url,
+                "test_account",
+                {"alias": account},
+            )
+            if _calendar_account_is_connected(test_resp):
+                if log is None:
+                    click.echo(
+                        f"  {click.style('✓', fg='green')} Calendar account: [{account}] ready"
+                    )
+                else:
+                    log(f"✓ Calendar account ready: {account}")
+                continue
+
+        resp = _query_tool_server_with_retries(
+            cal_url,
+            "add_account",
+            {
+                "alias": account,
+                "url": caldav_base_url,
+                "username": account,
+                "password": caldav_password,
+                "display_name": _profile_display_name(account, profile),
+            },
+        )
+        if _tool_response_is_error(resp, allowed_error_codes={"ACCOUNT_EXISTS"}):
+            payload = _parse_tool_response_payload(resp)
+            detail = (
+                payload if isinstance(payload, str) else json.dumps(payload or resp, default=str)
+            )
+            click.echo(
+                click.style(
+                    f"  ✗ Calendar account failed: {account} ({detail})",
+                    fg="red",
+                )
+            )
+            raise SystemExit(1)
+
+        test_resp = _query_tool_server_with_retries(
+            cal_url,
+            "test_account",
+            {"alias": account},
+        )
+        if not _calendar_account_is_connected(test_resp):
+            payload = _parse_tool_response_payload(test_resp)
+            detail = (
+                payload
+                if isinstance(payload, str)
+                else json.dumps(payload or test_resp, default=str)
+            )
+            click.echo(
+                click.style(
+                    f"  ✗ Calendar account failed: {account} ({detail})",
+                    fg="red",
+                )
+            )
+            raise SystemExit(1)
+
+        existing_aliases.add(account)
+        if log is None:
+            click.echo(f"  {click.style('✓', fg='green')} Calendar account: [{account}] ready")
+        else:
+            log(f"✓ Calendar account ready: {account}")
+
+
+def seed_task_data(
+    task: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+    endpoints: dict[str, str],
+    *,
+    log: Callable[[str], None] | None = None,
+) -> tuple[int, int]:
+    """Seed task emails and calendar events. Returns ``(ok, fail)`` counts."""
+
+    def _emit(message: str, *, styled: str | None = None) -> None:
+        if log is None:
+            click.echo(styled or message)
+        else:
+            log(message)
+
+    emails = task.get("seed_emails", [])
+    cal_events = task.get("seed_calendar_events", [])
+    ok, fail = 0, 0
+    calendar_uid_cache: dict[tuple[str, str], str] = {}
+
+    if emails:
+        email_url = endpoints.get("email")
+        if not email_url:
+            _emit(
+                "No email tool server in environment config.",
+                styled=click.style("  No email tool server in environment config.", fg="yellow"),
+            )
+        else:
+            for em in emails:
+                from_id = em.get("from_profile_id", "")
+                profile = profiles.get(from_id, {})
+                if profile:
+                    from_addr = profile.get("email", f"{from_id}@unknown.com")
+                elif "@" in from_id:
+                    from_addr = from_id
+                else:
+                    from_addr = f"{from_id}@unknown.com"
+                    warning = (
+                        f"! from_profile_id '{from_id}' not in profiles, "
+                        f"falling back to {from_addr}"
+                    )
+                    _emit(
+                        warning,
+                        styled=click.style(f"  {warning}", fg="yellow"),
+                    )
+
+                params: dict[str, Any] = {
+                    "from_email": from_addr,
+                    "to": em["to_addr"],
+                    "subject": em["subject"],
+                    "body": em.get("body_text", ""),
+                }
+                if em.get("body_html"):
+                    params["body_html"] = em["body_html"]
+
+                resp = _query_tool_server_with_retries(email_url, "send_email", params)
+                if not _tool_response_is_error(resp):
+                    ok += 1
+                    _emit(
+                        f'✓ Email: {from_addr} → {em["to_addr"]}  "{em["subject"]}"',
+                        styled=(
+                            f"  {click.style('✓', fg='green')} Email: "
+                            f'{from_addr} → {em["to_addr"]}  "{em["subject"]}"'
+                        ),
+                    )
+                else:
+                    fail += 1
+                    _emit(
+                        f'✗ Email failed: "{em["subject"]}" (endpoint: {email_url})',
+                        styled=click.style(
+                            f'  ✗ Email failed: "{em["subject"]}" (endpoint: {email_url})',
+                            fg="red",
+                        ),
+                    )
+
+    if cal_events:
+        cal_url = endpoints.get("calendar")
+        if not cal_url:
+            _emit(
+                "No calendar tool server in environment config.",
+                styled=click.style("  No calendar tool server in environment config.", fg="yellow"),
+            )
+        else:
+            for ev in cal_events:
+                account = str(ev.get("account") or "").strip()
+                calendar_id = str(ev.get("calendar_id", "default")).strip() or "default"
+                calendar_uid = _resolve_calendar_uid(
+                    cal_url,
+                    account=account,
+                    calendar_id=calendar_id,
+                    cache=calendar_uid_cache,
+                )
+                if not calendar_uid:
+                    fail += 1
+                    failure = (
+                        f"✗ Calendar UID lookup failed: [{account}] {calendar_id} "
+                        f"(endpoint: {cal_url})"
+                    )
+                    _emit(
+                        failure,
+                        styled=click.style(f"  {failure}", fg="red"),
+                    )
+                    continue
+                params = {
+                    "account": account,
+                    "calendar_uid": calendar_uid,
+                    "summary": ev["summary"],
+                    "description": ev.get("description", ""),
+                    "start": ev["start"],
+                    "end": ev["end"],
+                }
+                resp = _query_tool_server_with_retries(cal_url, "create_event", params)
+                if not _tool_response_is_error(resp):
+                    ok += 1
+                    _emit(
+                        f"✓ Calendar: [{ev['account']}] {ev['summary']}  {ev['start']}",
+                        styled=(
+                            f"  {click.style('✓', fg='green')} Calendar: "
+                            f"[{ev['account']}] {ev['summary']}  {ev['start']}"
+                        ),
+                    )
+                else:
+                    fail += 1
+                    _emit(
+                        f"✗ Calendar event failed: {ev['summary']} (endpoint: {cal_url})",
+                        styled=click.style(
+                            f"  ✗ Calendar event failed: {ev['summary']} (endpoint: {cal_url})",
+                            fg="red",
+                        ),
+                    )
+
+    return ok, fail
+
+
+def rewrite_tool_server_urls(
+    task_data: dict[str, Any],
+    endpoints: dict[str, str],
+) -> dict[str, Any]:
+    """Replace Docker-internal tool_server_urls with actual endpoints."""
+    task_copy = copy.deepcopy(task_data)
+    for ts in task_copy.get("tool_servers", []):
+        service_name = ts.get("name", "")
+        if service_name in endpoints:
+            ts["tool_server_url"] = endpoints[service_name]
+            continue
+        tool_name = SERVICE_TO_TOOL.get(service_name)
+        if tool_name and tool_name in endpoints:
+            ts["tool_server_url"] = endpoints[tool_name]
+        else:
+            url = ts.get("tool_server_url", "")
+            ts["tool_server_url"] = re.sub(r"http://[^:]+:(\d+)", r"http://localhost:\1", url)
+    return task_copy
+
+
+def effective_tool_servers(
+    rewritten_task: dict[str, Any],
+    endpoints: dict[str, str],
+) -> dict[str, str]:
+    """Return merged tool-server URLs from task JSON plus environment endpoints."""
+    merged: dict[str, str] = {}
+    for server in rewritten_task.get("tool_servers", []):
+        name = server.get("name")
+        url = server.get("tool_server_url")
+        if name and url:
+            merged[name] = url
+
+    for tool_name, url in endpoints.items():
+        service_name = TOOL_TO_SERVICE.get(tool_name, tool_name)
+        merged.setdefault(service_name, url)
+    return merged
+
+
+def verifier_tool_servers(
+    rewritten_task: dict[str, Any],
+    endpoints: dict[str, str],
+    mcp_clients: dict[str, MCPClientHandle] | None = None,
+) -> dict[str, str]:
+    """Return verifier-facing tool URLs across HTTP and MCP namespaces."""
+    merged = effective_tool_servers(rewritten_task, endpoints)
+    for server_name, client in (mcp_clients or {}).items():
+        url = getattr(client, "_url", None)
+        if not isinstance(url, str) or not url:
+            continue
+        merged.setdefault(
+            server_name,
+            url.removesuffix("/mcp"),
+        )
+    return merged
+
+
+def build_services_available_section(
+    config: EnvConfig,
+    *,
+    daytona: bool,
+    config_path: str,
+    endpoints: dict[str, str],
+) -> str:
+    """Build website access notes appended to the task prompt."""
+    lines: list[str] = []
+    if daytona:
+        for tool in config.tools:
+            endpoint = endpoints.get(tool)
+            if endpoint:
+                lines.append(f"* {tool}: {endpoint}")
+        if not lines:
+            return ""
+        return "Tool endpoints available to you:\n" + "\n".join(lines)
+    compose_path = Path(config_path).parent / "docker-compose.yml"
+    compose_data: dict[str, Any] = {}
+    if compose_path.exists():
+        loaded = yaml.safe_load(compose_path.read_text())
+        if isinstance(loaded, dict):
+            compose_data = loaded
+
+    lines.clear()
+    for tool in config.tools:
+        meta = TOOL_WEB_SERVICE_META.get(tool)
+        if not meta:
+            continue
+        compose_svc = meta["compose_service"]
+        default_port = meta["default_port"]
+        host_port = harbor_urls.compose_service_host_port(compose_data, str(compose_svc))
+        if host_port is None:
+            host_port = cast(int, default_port)
+        line = f"* {meta['label']}: http://localhost:{host_port}{meta['credentials']}"
+        lines.append(line)
+    if not lines:
+        return ""
+    return "Services available to you as websites:\n" + "\n".join(lines)
+
+
+def _sandbox_status(sandbox: object) -> str:
+    """Best-effort status extraction across Daytona SDK versions."""
+    for attr in ("state", "status"):
+        value = getattr(sandbox, attr, None)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            return value.lower()
+        value_name = getattr(value, "value", None)
+        if isinstance(value_name, str):
+            return value_name.lower()
+        return str(value).lower()
+    return "unknown"
+
+
+def _is_active_sandbox_status(status: str) -> bool:
+    return status in {"running", "started", "active", "ready"}
+
+
+def _invoke_daytona_resume(daytona: object, sandbox: object, sandbox_id: str) -> bool:
+    """Try multiple SDK-compatible resume/start methods."""
+    candidates: list[tuple[object, str, tuple[object, ...]]] = [
+        (sandbox, "resume", ()),
+        (sandbox, "start", ()),
+        (daytona, "resume", (sandbox_id,)),
+        (daytona, "start", (sandbox_id,)),
+    ]
+    for obj, method_name, args in candidates:
+        method = getattr(obj, method_name, None)
+        if method is None or not callable(method):
+            continue
+        try:
+            method(*args)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            logger.debug(
+                "Daytona resume candidate %s.%s failed",
+                type(obj).__name__,
+                method_name,
+                exc_info=True,
+            )
+        else:
+            return True
+    return False
+
+
+def _resume_daytona_sandbox_interactively(
+    daytona: DaytonaClientLike,
+    sandbox: object,
+    sandbox_id: str,
+    status: str,
+) -> object:
+    """Prompt user to resume a stopped/paused sandbox and wait until active."""
+    should_resume = False
+    try:
+        should_resume = click.confirm(
+            f"Daytona sandbox is '{status}'. Resume it now?",
+            default=True,
+        )
+    except (click.Abort, EOFError):
+        should_resume = False
+
+    if not should_resume:
+        click.echo(
+            click.style(
+                "Run `simlab env up <env-name> --daytona` before tasks run/seed.",
+                fg="yellow",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+
+    click.echo("Resuming Daytona sandbox...", err=True)
+    if not _invoke_daytona_resume(daytona, sandbox, sandbox_id):
+        click.echo(
+            click.style(
+                "Unable to resume sandbox via Daytona SDK. "
+                "Run `simlab env up <env-name> --daytona`.",
+                fg="red",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        refreshed = daytona.get(sandbox_id)
+        refreshed_status = _sandbox_status(refreshed)
+        if _is_active_sandbox_status(refreshed_status):
+            click.echo(click.style(f"Sandbox resumed ({refreshed_status}).", fg="green"), err=True)
+            return refreshed
+        time.sleep(2)
+
+    click.echo(
+        click.style(
+            "Timed out waiting for Daytona sandbox to become active. "
+            "Try `simlab env up <env-name> --daytona`.",
+            fg="red",
+        ),
+        err=True,
+    )
+    raise SystemExit(1)
+
+
+def _requires_daytona_sandbox(
+    config: EnvConfig,
+    mcp_config: dict[str, Any] | None,
+    *,
+    env_dir: Path,
+) -> bool:
+    """Return True when the env needs a Daytona sandbox for tool execution."""
+    registry = build_registry(env_dir=env_dir)
+    for tool_name in config.tools:
+        tool = registry.get_tool(tool_name)
+        if tool is not None and tool.tool_server_port is not None:
+            return True
+    return bool(mcp_config and get_mcp_command_servers(mcp_config))
+
+
+def get_daytona_endpoints(
+    config_path: str,
+    daytona_api_key: str | None = None,
+    *,
+    allow_resume: bool = True,
+) -> dict[str, str]:
+    """Get tool endpoint URLs from a running Daytona sandbox via Python SDK."""
+    config_file = Path(config_path)
+    if not config_file.exists():
+        click.echo(click.style(f"Config not found: {config_file}", fg="red"), err=True)
+        raise SystemExit(1)
+
+    config = load_env_config(config_file.parent)
+    local_endpoints = get_tool_endpoints(config, config_path=config_file)
+    env_dir = config_file.parent
+    mcp_config = load_mcp_servers_from_env_dir(env_dir)
+    if not _requires_daytona_sandbox(config, mcp_config, env_dir=env_dir):
+        return local_endpoints
+
+    state_file = Path(config_path).parent / "daytona-state.json"
+    if not state_file.exists():
+        click.echo(
+            click.style(f"No Daytona state at {state_file}. Is the env running?", fg="red"),
+            err=True,
+        )
+        raise SystemExit(1)
+    state = json.loads(state_file.read_text())
+    sandbox_id = state.get("sandbox_id")
+    if not sandbox_id:
+        click.echo(click.style("Invalid Daytona state: missing sandbox_id", fg="red"), err=True)
+        raise SystemExit(1)
+
+    daytona = get_daytona_client(daytona_api_key=daytona_api_key)
+    sandbox = daytona.get(sandbox_id)
+    status = _sandbox_status(sandbox)
+    resumed = False
+    if not _is_active_sandbox_status(status):
+        if not allow_resume:
+            click.echo(
+                click.style(
+                    f"Daytona sandbox is '{status}' and --skip-env-setup prevents auto-resume. "
+                    "Start it manually with `simlab env up <env-name> --daytona`.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
+        sandbox = _resume_daytona_sandbox_interactively(daytona, sandbox, sandbox_id, status)
+        resumed = True
+    if resumed:
+        get_profiled_service_names, _ = get_env_runtime_helpers()
+        preseed_svc_names = get_profiled_service_names(config, "preseed", config_file)
+        daytona_runner_cls = get_daytona_runner_class()
+        runner = daytona_runner_cls(daytona_api_key=daytona_api_key)
+        try:
+            runner.restart_sandbox_services(
+                sandbox,
+                preseed_svc_names=preseed_svc_names,
+            )
+        except RuntimeError as exc:
+            click.echo(
+                click.style(
+                    "Unable to restart services in the resumed Daytona sandbox.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            click.echo(click.style(str(exc), fg="red"), err=True)
+            click.echo(
+                click.style(
+                    f"Run `simlab env up {config.name} --daytona` to rebuild and restart it.",
+                    fg="yellow",
+                ),
+                err=True,
+            )
+            raise SystemExit(1) from exc
+
+    registry = build_registry(env_dir=env_dir)
+
+    urls: dict[str, str] = {}
+    for tool_name in config.tools:
+        tool = registry.get_tool(tool_name)
+        if tool is None:
+            continue
+        if tool.tool_server_port is not None:
+            preview = sandbox.get_preview_link(tool.tool_server_port)
+            urls[tool_name] = preview.url
+        elif tool.tool_server_url:
+            urls[tool_name] = tool.tool_server_url
+
+    if mcp_config and get_mcp_command_servers(mcp_config):
+        preview = sandbox.get_preview_link(get_mcp_gateway_host_port(env_dir))
+        urls[ComposeEngine.MCP_GATEWAY_SERVICE_NAME] = preview.url.rstrip("/") + "/mcp"
+    return urls
+
+
+def _endpoint_has_tools(base_url: str) -> bool:
+    """Return True if the endpoint responds to /tools with a tools list."""
+    req = urllib.request.Request(f"{base_url}/tools")  # noqa: S310
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
+            payload = json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("tools"), list)
+
+
+def _endpoint_is_reachable(url: str) -> bool:
+    """Return True when an HTTP endpoint responds at all."""
+    req = urllib.request.Request(url)  # noqa: S310
+    try:
+        with urllib.request.urlopen(req, timeout=5):  # noqa: S310
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, TimeoutError):
+        return False
+
+
+def _reachable_endpoints(endpoints: dict[str, str]) -> dict[str, bool]:
+    """Return per-endpoint reachability map via /tools."""
+    return {name: _endpoint_has_tools(url) for name, url in endpoints.items()}
+
+
+def require_reachable_endpoints(
+    *,
+    endpoints: dict[str, str],
+    action: str,
+    using_daytona: bool,
+    config_path: str | None = None,
+    wait: bool = False,
+    timeout: int = 120,
+    poll_interval: int = 5,
+    log_prefix: str = "",
+    quiet: bool = False,
+) -> None:
+    """Fail fast when endpoints are not reachable before seed/run."""
+    if not endpoints:
+        click.echo(click.style(f"No endpoints resolved for {action}.", fg="red"), err=True)
+        raise SystemExit(1)
+
+    prefix = f"{log_prefix} " if log_prefix else ""
+
+    if wait:
+        deadline = time.monotonic() + timeout
+        while True:
+            reachability = _reachable_endpoints(endpoints)
+            check = {
+                k: v for k, v in reachability.items() if k != ComposeEngine.MCP_GATEWAY_SERVICE_NAME
+            }
+            if not check or all(check.values()):
+                return
+            remaining = [n for n, ok in check.items() if not ok]
+            if time.monotonic() >= deadline:
+                click.echo(
+                    click.style(
+                        f"{prefix}Timed out waiting for endpoints: {', '.join(remaining)}",
+                        fg="yellow",
+                    ),
+                    err=True,
+                )
+                break
+            if not quiet:
+                click.echo(f"{prefix}Waiting for: {', '.join(remaining)}...")
+            time.sleep(poll_interval)
+    else:
+        reachability = _reachable_endpoints(endpoints)
+
+    check = {k: v for k, v in reachability.items() if k != ComposeEngine.MCP_GATEWAY_SERVICE_NAME}
+    if any(check.values()):
+        return
+    gateway_url = endpoints.get(ComposeEngine.MCP_GATEWAY_SERVICE_NAME)
+    if not check and gateway_url and _endpoint_is_reachable(gateway_url):
+        return
+
+    mode = "daytona" if using_daytona else "local"
+    click.echo(
+        click.style(
+            f"None of the resolved {mode} endpoints are reachable for {action}.",
+            fg="red",
+        ),
+        err=True,
+    )
+    if config_path:
+        click.echo(f"  Config: {config_path}", err=True)
+    for name, url in endpoints.items():
+        click.echo(f"  - {name}: {url}", err=True)
+    if using_daytona:
+        click.echo(
+            click.style(
+                "Daytona endpoints were requested, but the sandbox is not reachable. "
+                "Check the sandbox state or restart it with: simlab env up <env-name> --daytona",
+                fg="yellow",
+            ),
+            err=True,
+        )
+    else:
+        if config_path:
+            state_path = Path(config_path).parent / "daytona-state.json"
+            if state_path.exists():
+                click.echo(
+                    click.style(
+                        "This environment has a daytona-state.json. "
+                        "If you meant to use Daytona, rerun with --daytona.",
+                        fg="yellow",
+                    ),
+                    err=True,
+                )
+        click.echo(
+            click.style(
+                "Local tool servers are not reachable. "
+                "Start the environment with simlab env up <env-name> and inspect "
+                "docker compose ps / docker compose logs if a service failed to start.",
+                fg="yellow",
+            ),
+            err=True,
+        )
+    raise SystemExit(1)
+
+
+def resolve_endpoints(
+    *,
+    config_path: str,
+    config: EnvConfig,
+    daytona_requested: bool,
+    daytona_api_key: str | None = None,
+    allow_resume: bool = True,
+) -> tuple[dict[str, str], bool]:
+    """Resolve endpoints for the explicitly requested execution backend."""
+    if daytona_requested:
+        return (
+            get_daytona_endpoints(
+                config_path, daytona_api_key=daytona_api_key, allow_resume=allow_resume
+            ),
+            True,
+        )
+
+    return get_tool_endpoints(config, config_path=Path(config_path)), False
+
+
+def find_rubric_file(bundle_dir: Path | None, task_id: str) -> Path | None:
+    """Locate rubric markdown for a task in the bundle's rubrics/ directory."""
+    if bundle_dir is None:
+        return None
+    rubric_path = bundle_dir / "rubrics" / f"{task_id}.md"
+    if rubric_path.is_file():
+        return rubric_path
+    alt_id = task_id.replace("-", "_")
+    alt_path = bundle_dir / "rubrics" / f"{alt_id}.md"
+    if alt_path.is_file():
+        return alt_path
+    alt_id = task_id.replace("_", "-")
+    alt_path = bundle_dir / "rubrics" / f"{alt_id}.md"
+    if alt_path.is_file():
+        return alt_path
+    return None
+
+
+def maybe_run_rubric_judge(
+    *,
+    task_data: dict[str, Any],
+    bundle_dir: Path | None,
+    messages: list[dict[str, Any]],
+    global_cfg: VerifierRuntimeConfigLike,
+    log: bool = True,
+) -> dict[str, Any] | None:
+    """Run the rubric-based LLM judge if a rubric is available and config allows it."""
+    meta = task_data.get("meta", {})
+    task_id = meta.get("task_id", "")
+    task_description = task_data.get("task", "")
+
+    rubric_path = find_rubric_file(bundle_dir, task_id)
+    if rubric_path is None:
+        return None
+
+    model = (global_cfg.verifier_model or "").strip()
+    if not model:
+        if log:
+            click.echo("  Rubric found but no verifier_model configured — skipping rubric judge.")
+        return None
+
+    provider = (global_cfg.verifier_provider or "").strip() or None
+    api_key = (global_cfg.verifier_api_key or "").strip() or None
+    base_url_val = (global_cfg.verifier_base_url or "").strip() or None
+
+    rubric_markdown = rubric_path.read_text(encoding="utf-8")
+    if log:
+        click.echo(click.style("\nRunning rubric judge...", bold=True))
+        click.echo(f"  Rubric: {rubric_path}")
+        click.echo(f"  Model:  {provider}/{model}" if provider else f"  Model:  {model}")
+
+    run_rubric_judge = get_rubric_judge_runner()
+    result = run_rubric_judge(
+        task_description=task_description,
+        rubric_markdown=rubric_markdown,
+        messages=messages,
+        model=model,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url_val,
+    )
+
+    if log:
+        if result.error:
+            click.echo(click.style(f"  Rubric judge error: {result.error}", fg="yellow"))
+        else:
+            color = "green" if result.score >= 0.6 else "red"
+            click.echo(
+                click.style(
+                    f"  Rubric verdict: {result.verdict} (score={result.score:.2f}, "
+                    f"confidence={result.confidence:.2f})",
+                    fg=color,
+                )
+            )
+            if result.failed_criteria:
+                click.echo(f"  Failed criteria: {', '.join(result.failed_criteria)}")
+
+    return result.to_dict()
+
+
+def apply_verifier_env_overrides(
+    global_cfg: VerifierRuntimeConfigLike,
+) -> tuple[dict[str, str | None], dict[str, str]]:
+    """Apply verifier env vars from config, returning originals and applied overrides."""
+    env_updates = {
+        "SIMLAB_VERIFIER_MODEL": (global_cfg.verifier_model or "").strip(),
+        "SIMLAB_VERIFIER_PROVIDER": (global_cfg.verifier_provider or "").strip(),
+        "SIMLAB_VERIFIER_BASE_URL": (global_cfg.verifier_base_url or "").strip(),
+        "SIMLAB_VERIFIER_API_KEY": (global_cfg.verifier_api_key or "").strip(),
+    }
+    original_env: dict[str, str | None] = {}
+    applied: dict[str, str] = {}
+    for key, value in env_updates.items():
+        original_env[key] = os.environ.get(key)
+        if value:
+            os.environ[key] = value
+            applied[key] = value
+        else:
+            os.environ.pop(key, None)
+    return original_env, applied
+
+
+def restore_env(original_env: dict[str, str | None], applied: dict[str, str]) -> None:
+    """Restore env vars modified by ``apply_verifier_env_overrides``."""
+    for key in applied:
+        previous = original_env.get(key)
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
+@dataclass(frozen=True)
+class SingleRolloutOutcome:
+    """Outcome data for rendering the post-run rollout summary card."""
+
+    task_id: str
+    model: str | None
+    provider: str | None
+    steps_taken: int
+    max_steps: int
+    reward: float | None
+    verification_passed: bool | None
+    run_error: str | None
+    verifier_results: list[dict[str, Any]]
+    output_dir: Path
+    exit_code: int
+
+
+def run_single_rollout(
+    *,
+    env_dir: Path,
+    config: EnvConfig,
+    config_path: str,
+    global_cfg: RolloutRunnerGlobalConfigLike,
+    task_data: dict[str, Any],
+    task_id: str,
+    profiles: dict[str, dict[str, Any]],
+    meta: dict[str, Any],
+    display: str,
+    model: str,
+    provider: str,
+    api_key: str | None,
+    base_url: str | None,
+    max_steps: int,
+    agent_import_path: str | None,
+    agent_timeout_seconds: float,
+    no_seed: bool,
+    verbose: bool,
+    daytona: bool,
+    tasks_dir: str | None,
+    bundle_dir: Path | None,
+    backend_id: str | None,
+    base_url_api: str,
+    scenario_manager_api_key: str | None,
+    managed_env: bool,
+    keep_alive: bool,
+    skip_env_setup: bool,
+    rollout_format: str,
+    progress: StepProgressLike | None,
+    output_root: Path = Path("output"),
+) -> SingleRolloutOutcome:
+    """Execute a single task rollout: resolve endpoints, seed, run agent, verify."""
+    show_progress = progress is not None
+    endpoints, using_daytona = resolve_endpoints(
+        config_path=config_path,
+        config=config,
+        daytona_requested=daytona,
+        daytona_api_key=global_cfg.daytona_api_key,
+        allow_resume=not skip_env_setup,
+    )
+    mcp_config = harbor_urls.rewrite_mcp_config_for_runtime(
+        load_mcp_servers_from_env_dir(env_dir),
+        env_dir=env_dir,
+        using_daytona=using_daytona,
+        daytona_client_factory=get_daytona_client,
+        daytona_api_key=global_cfg.daytona_api_key,
+    )
+    mcp_clients = build_mcp_clients(mcp_config, endpoints)
+    needed_run_endpoints = needed_task_endpoints(
+        task_data,
+        endpoints,
+        include_tool_servers=True,
+    )
+    if needed_run_endpoints:
+        require_reachable_endpoints(
+            endpoints=needed_run_endpoints,
+            action="task run",
+            using_daytona=using_daytona,
+            config_path=config_path,
+            wait=using_daytona,
+            quiet=show_progress,
+        )
+    require_mcp_tools_available(mcp_clients)
+
+    if not no_seed:
+        seed_step = contextlib.nullcontext() if progress is None else progress.step("Seeded")
+        with seed_step as ctx:
+            log = ctx.detail if ctx is not None else None
+            if not managed_env:
+                run_env_seed_services(
+                    config,
+                    config_path,
+                    using_daytona=using_daytona,
+                    daytona_api_key=global_cfg.daytona_api_key,
+                    log=log,
+                )
+
+            provision_task_group_channels(
+                task_data,
+                profiles,
+                config,
+                config_path,
+                using_daytona=using_daytona,
+                daytona_api_key=global_cfg.daytona_api_key,
+                log=log,
+            )
+            provision_task_calendar_users(
+                task_data,
+                config,
+                config_path,
+                using_daytona=using_daytona,
+                daytona_api_key=global_cfg.daytona_api_key,
+                log=log,
+            )
+            ensure_task_calendar_accounts(task_data, profiles, endpoints, config, log=log)
+
+            emails = task_data.get("seed_emails", [])
+            cal_events = task_data.get("seed_calendar_events", [])
+            group_channels = task_data.get("seed_group_channels", [])
+            if emails or cal_events or group_channels:
+                if progress is None:
+                    click.echo(click.style(f"\nSeeding task: {display}\n", bold=True))
+                ok, fail = seed_task_data(task_data, profiles, endpoints, log=log)
+                if progress is None:
+                    if fail:
+                        click.echo(
+                            click.style(f"\n  Seeding had {fail} failure(s).", fg="yellow"),
+                        )
+                    else:
+                        click.echo(click.style(f"\n  {ok} item(s) seeded.\n", fg="green"))
+                elif fail:
+                    click.echo(click.style(f"  Seeding had {fail} failure(s).", fg="yellow"))
+
+    rewritten = rewrite_tool_server_urls(task_data, endpoints)
+    tool_namespace_endpoints = effective_tool_servers(rewritten, endpoints)
+
+    npc_session = NpcChatSession.from_task_data(
+        task_data,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        provider=provider,
+    )
+    if npc_session is not None:
+        npc_url = npc_session.start()
+        tool_namespace_endpoints["npc-chat"] = npc_url
+        if progress is None:
+            click.echo(click.style("  NPC chat tool auto-activated", fg="cyan"))
+
+    artifacts = None
+    try:
+        if not tool_namespace_endpoints and not mcp_clients:
+            click.echo(
+                click.style(
+                    "Task has no valid tool_servers and no MCP servers. "
+                    "Add tools to the env or use --mcp-servers at env init.",
+                    fg="red",
+                )
+            )
+            raise SystemExit(1)
+        if not agent_import_path and not api_key:
+            click.echo(
+                click.style(
+                    "Reference agent requires --agent-api-key or SIMLAB_AGENT_API_KEY "
+                    "(or OPENAI_API_KEY for OpenAI). "
+                    "Custom agents (--agent-import-path) use their own credentials.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            raise SystemExit(1)
+
+        if progress is None:
+            click.echo(click.style(f"\nRunning task: {display}", bold=True))
+            click.echo(f"  Model:            {model} ({provider})")
+            click.echo(f"  Max steps:        {max_steps}")
+            click.echo(f"  Agent import:     {agent_import_path or 'builtin:ReferenceAgent'}")
+            click.echo(f"  Agent timeout (s): {agent_timeout_seconds:g}")
+            click.echo(f"  Endpoint mode:    {'daytona' if using_daytona else 'local'}")
+            click.echo(f"  Managed env:      {managed_env}")
+            if verbose:
+                click.echo(f"  Tool servers:     {', '.join(sorted(tool_namespace_endpoints))}")
+            click.echo()
+
+        unified_tool_env_cls, run_with_agent_contract = get_agent_runtime_helpers()
+        environment = unified_tool_env_cls(
+            tool_servers=tool_namespace_endpoints,
+            mcp_clients=mcp_clients or None,
+        )
+        instruction = rewritten.get("task", "")
+        skills_section = build_skills_guidance_section(
+            load_skills_markdown(config=config, bundle_dir=bundle_dir)
+        )
+        if skills_section:
+            instruction = f"{instruction}\n\n{skills_section}"
+        services_section = build_services_available_section(
+            config,
+            daytona=using_daytona,
+            config_path=config_path,
+            endpoints=endpoints,
+        )
+        if services_section:
+            instruction = f"{instruction}\n\n{services_section}"
+
+        on_step = None
+        agent_step = (
+            contextlib.nullcontext() if progress is None else progress.step("Agent running")
+        )
+        with agent_step as ctx:
+            if ctx is not None:
+                ctx.update(f"  Agent running (step 0/{max_steps})...")
+
+                ctx_on_step = getattr(ctx, "on_step", None)
+
+                def _on_step(steps_taken: int) -> None:
+                    if callable(ctx_on_step):
+                        ctx_on_step(steps_taken)
+                    ctx.update(f"  Agent running (step {steps_taken}/{max_steps})...")
+
+                on_step = _on_step
+
+            artifacts = run_with_agent_contract(
+                task_id=meta.get("task_id", task_id),
+                instruction=instruction,
+                model=model,
+                provider=provider,
+                max_steps=max_steps,
+                environment=environment,
+                agent_import_path=agent_import_path,
+                timeout_seconds=agent_timeout_seconds,
+                api_key=api_key,
+                base_url=base_url,
+                on_step=on_step,
+            )
+    finally:
+        if npc_session is not None:
+            if artifacts is not None:
+                npc_session.attach_to_artifacts(artifacts)
+            npc_session.stop()
+
+    artifacts.metadata.setdefault("cli_runtime", {})
+    artifacts.metadata["cli_runtime"].update(
+        {
+            "base_url": base_url,
+            "api_key_provided": bool(api_key),
+            "agent_import_path": agent_import_path,
+            "tool_servers": tool_namespace_endpoints,
+            "managed_env": managed_env,
+            "keep_alive": keep_alive,
+        }
+    )
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_id = f"agent_run_{meta.get('task_id', task_id)}_{ts}"
+    run_dir = output_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if npc_session is not None:
+        npc_session.save_transcripts(run_dir)
+
+    if rollout_format == ROLLOUT_FORMAT_DEFAULT:
+        output_path = run_dir / "artifacts.json"
+        artifacts.dump(output_path)
+
+    run_error = artifacts.error
+    if run_error:
+        emit_cli_event(
+            "tasks_run_failed",
+            {
+                "failure_stage": "agent_run",
+                "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
+                "mode": "daytona" if using_daytona else "local",
+                "seed_requested": not no_seed,
+                "tool_server_count": len(tool_namespace_endpoints),
+                "had_custom_agent": bool(agent_import_path),
+                "max_steps": max_steps,
+                "managed_env": managed_env,
+                "keep_alive": keep_alive,
+            },
+        )
+
+    evaluators = task_data.get("verifiers") or task_data.get("evaluators")
+    harbor_verifier = task_data.get("harbor_verifier")
+    verifier_results: list[dict[str, Any]] = []
+    reward: float | None = None
+    verification_passed: bool | None = None
+    exit_code = 0
+    harbor_reward_payload: dict[str, Any] | None = None
+    rollout_reward_payload: dict[str, Any] | None = None
+    if harbor_verifier:
+        click.echo(click.style("\nRunning Harbor verifier...", bold=True))
+        verification_passed, reward, harbor_reward_payload, verifier_output = (
+            harbor_verifier_runtime.run_harbor_verifier(
+                env_dir=env_dir,
+                verifier_config=harbor_verifier,
+                using_daytona=using_daytona,
+                daytona_client_factory=get_daytona_client,
+                daytona_api_key=global_cfg.daytona_api_key,
+            )
+        )
+        if verifier_output:
+            click.echo(verifier_output)
+        verifier_dir = run_dir / "verifier"
+        verifier_dir.mkdir(parents=True, exist_ok=True)
+        (verifier_dir / "reward.txt").write_text(
+            "1" if verification_passed else "0",
+            encoding="utf-8",
+        )
+        (verifier_dir / "reward.json").write_text(
+            json.dumps(harbor_reward_payload, indent=2),
+            encoding="utf-8",
+        )
+        verifier_results = (
+            [
+                entry
+                for entry in harbor_reward_payload.get("verifier_results", [])
+                if isinstance(entry, dict)
+            ]
+            if isinstance(harbor_reward_payload, dict)
+            else []
+        )
+        rollout_reward_payload = harbor_reward_payload
+        if rollout_format == ROLLOUT_FORMAT_ATIF:
+            harbor_trajectory.write_atif_trajectory(
+                run_dir / "agent" / "trajectory.json",
+                artifacts=artifacts,
+                run_id=run_id,
+                verification_passed=verification_passed,
+                reward=reward,
+                reward_payload=harbor_reward_payload,
+            )
+        click.echo(f"Reward: {reward:.1f}")
+        click.echo(f"Verifier reward: {verifier_dir / 'reward.txt'}")
+        if not verification_passed:
+            emit_cli_event(
+                "tasks_run_failed",
+                {
+                    "failure_stage": "verifier",
+                    "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
+                    "mode": "daytona" if using_daytona else "local",
+                    "seed_requested": not no_seed,
+                    "tool_server_count": len(tool_namespace_endpoints),
+                    "had_custom_agent": bool(agent_import_path),
+                    "max_steps": max_steps,
+                    "verifier_count": 1,
+                    "managed_env": managed_env,
+                    "keep_alive": keep_alive,
+                },
+            )
+            click.echo(click.style("\nVerification failed.", fg="red"), err=True)
+            exit_code = 1
+        else:
+            click.echo(click.style("\nVerification passed.", fg="green"))
+    elif evaluators:
+        build_verifier_artifacts, infer_scenario_from_evaluator, run_verifier = (
+            get_verifier_runtime_helpers()
+        )
+
+        verifier_scenario = infer_scenario_from_evaluator(evaluators[0]) or backend_id or ""
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            json.dump(task_data, f, indent=2)
+            task_file = Path(f.name)
+        try:
+            adapter = build_verifier_artifacts(
+                artifacts,
+                task_file,
+                verifier_tool_servers(rewritten, endpoints, mcp_clients),
+            )
+            verifier_step = (
+                contextlib.nullcontext() if progress is None else progress.step("Verifying")
+            )
+            with verifier_step:
+                original_env, applied_env = apply_verifier_env_overrides(global_cfg)
+                try:
+                    for i, ev in enumerate(evaluators, 1):
+                        if ev.get("func") != "python_module" or not ev.get("module"):
+                            continue
+                        mod_path = ev["module"]
+                        if progress is None and verbose:
+                            click.echo(f"  Verifier {i}/{len(evaluators)}: {mod_path}")
+                        result = run_verifier(
+                            mod_path,
+                            adapter,
+                            verifier_scenario,
+                            scenario_manager_base_url=base_url_api,
+                            scenario_manager_api_key=scenario_manager_api_key,
+                            local_verifier_path=(
+                                get_local_verifier_file_path(bundle_dir, mod_path)
+                                if bundle_dir is not None
+                                else None
+                            ),
+                            verifier_cache_root=env_dir / "verifiers",
+                        )
+                        verifier_results.append(
+                            {
+                                "module": mod_path,
+                                "success": result.success,
+                                "message": result.message or "",
+                                "output": result.output or "",
+                            }
+                        )
+                        if progress is None and verbose and (result.output or result.message):
+                            click.echo(result.output or result.message)
+                finally:
+                    restore_env(original_env, applied_env)
+            all_passed = all(r["success"] for r in verifier_results)
+
+            rubric_result_dict = maybe_run_rubric_judge(
+                task_data=task_data,
+                bundle_dir=bundle_dir,
+                messages=list(artifacts.messages),
+                global_cfg=global_cfg,
+            )
+
+            reward = 1.0 if all_passed else 0.0
+            verification_passed = all_passed
+
+            verifier_dir = run_dir / "verifier"
+            verifier_dir.mkdir(parents=True, exist_ok=True)
+            (verifier_dir / "reward.txt").write_text(
+                "1" if all_passed else "0",
+                encoding="utf-8",
+            )
+            verifier_reward_payload: dict[str, Any] = {
+                "reward": reward,
+                "verifier_results": verifier_results,
+            }
+            if rubric_result_dict is not None:
+                verifier_reward_payload["rubric_result"] = rubric_result_dict
+            (verifier_dir / "reward.json").write_text(
+                json.dumps(verifier_reward_payload, indent=2),
+                encoding="utf-8",
+            )
+            rollout_reward_payload = verifier_reward_payload
+            if not all_passed:
+                emit_cli_event(
+                    "tasks_run_failed",
+                    {
+                        "failure_stage": "verifier",
+                        "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
+                        "mode": "daytona" if using_daytona else "local",
+                        "seed_requested": not no_seed,
+                        "tool_server_count": len(tool_namespace_endpoints),
+                        "had_custom_agent": bool(agent_import_path),
+                        "max_steps": max_steps,
+                        "verifier_count": len(evaluators),
+                        "managed_env": managed_env,
+                        "keep_alive": keep_alive,
+                    },
+                )
+                exit_code = 1
+        finally:
+            if task_file is not None:
+                task_file.unlink(missing_ok=True)
+
+    elif run_error:
+        exit_code = 1
+
+    if rollout_format == ROLLOUT_FORMAT_ATIF and not harbor_verifier:
+        harbor_trajectory.write_atif_trajectory(
+            run_dir / "agent" / "trajectory.json",
+            artifacts=artifacts,
+            run_id=run_id,
+            verification_passed=verification_passed,
+            reward=reward,
+            reward_payload=rollout_reward_payload,
+        )
+
+    if exit_code == 0:
+        emit_cli_event(
+            "tasks_run_completed",
+            {
+                "task_source": "local_bundle" if tasks_dir else "scenario_manager_api",
+                "mode": "daytona" if using_daytona else "local",
+                "seed_requested": not no_seed,
+                "tool_server_count": len(tool_namespace_endpoints),
+                "had_custom_agent": bool(agent_import_path),
+                "max_steps": max_steps,
+                "steps_taken": artifacts.steps_taken,
+                "tool_calls_made": len(artifacts.tool_calls),
+                "verifier_count": len(evaluators or []),
+                "verifier_passed": verification_passed,
+                "reward": reward,
+                "managed_env": managed_env,
+                "keep_alive": keep_alive,
+            },
+        )
+
+    return SingleRolloutOutcome(
+        task_id=str(meta.get("task_id") or task_id),
+        model=model,
+        provider=provider,
+        steps_taken=artifacts.steps_taken,
+        max_steps=max_steps,
+        reward=reward,
+        verification_passed=verification_passed,
+        run_error=run_error,
+        verifier_results=verifier_results,
+        output_dir=run_dir,
+        exit_code=exit_code,
+    )

@@ -7,6 +7,7 @@ via the Scenario Manager API.
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 import time
 import tomllib
@@ -505,6 +506,9 @@ def run(
     out_path = Path(output_dir)
     _write_bundle(out_path, result)
 
+    # Report verifier coverage
+    _report_verifier_coverage(result)
+
     click.echo()
     task_count = len(result.tasks)
     if task_count < request.num_tasks:
@@ -536,6 +540,20 @@ def run(
         click.echo(f"    Instructions: {len(result.instructions)}")
         click.echo(f"    Rubrics:      {len(result.rubrics)}")
         click.echo(f"    Verifiers:    {len(result.verifiers)}")
+    safe_out = shlex.quote(str(out_path.resolve()))
+    click.echo()
+    click.echo(
+        click.style(f"Next: simlab tasks list --tasks-dir {safe_out}", bold=True),
+        err=True,
+    )
+    click.echo(
+        click.style(
+            f"  Then: simlab tasks run --env <env_name> --tasks-dir {safe_out}"
+            " --task <task_id> --agent-model <model>",
+            dim=True,
+        ),
+        err=True,
+    )
     emit_cli_event(
         "task_gen_run_completed",
         {
@@ -761,6 +779,48 @@ def _poll_with_progress(
             return job
 
         time.sleep(_POLL_INTERVAL_SECONDS)
+
+
+def _report_verifier_coverage(result: TaskGenResult) -> None:
+    """Warn when the generated bundle has tasks without verifier wiring."""
+    task_count = len(result.tasks)
+    if task_count == 0:
+        return
+
+    # Count failed verifier files (.FAILED.py suffix from older pipelines)
+    failed_files = [f for f in result.verifiers if f.filename.endswith(".FAILED.py")]
+
+    # Count tasks with verifier wiring
+    wired = 0
+    for bundle_file in result.tasks:
+        if not bundle_file.filename.endswith(".json"):
+            continue
+        try:
+            task_data = json.loads(bundle_file.content)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        has_verifier = (
+            task_data.get("verifiers")
+            or task_data.get("evaluators")
+            or task_data.get("harbor_verifier")
+        )
+        if has_verifier:
+            wired += 1
+
+    missing = task_count - wired
+    if missing == 0 and not failed_files:
+        return
+
+    parts: list[str] = []
+    if missing:
+        parts.append(f"{missing}/{task_count} task(s) have no verifier wiring")
+    if failed_files:
+        parts.append(f"{len(failed_files)} verifier(s) failed quality gates")
+    click.echo()
+    click.secho(
+        "  Warning: " + "; ".join(parts) + ". Unverified tasks will not be scored.",
+        fg="yellow",
+    )
 
 
 def _write_bundle(out_path: Path, result: TaskGenResult) -> None:

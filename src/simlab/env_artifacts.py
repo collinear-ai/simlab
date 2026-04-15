@@ -111,11 +111,16 @@ def _legacy_generation_is_stale(env_dir: Path) -> bool:
 
 def detect_generation_drift(env_dir: Path) -> tuple[bool, list[str]]:
     """Return whether generated env outputs are stale and why."""
+    missing_outputs = _missing_generated_outputs(env_dir)
     current_inputs = compute_generation_inputs(env_dir)
     stored_state = _read_generation_state(env_dir)
     if stored_state is None:
         if _legacy_generation_is_stale(env_dir):
-            return True, ["Generated env files are older than env inputs."]
+            legacy_reasons = ["Generated env files are older than env inputs."]
+            legacy_reasons = [*missing_outputs, *legacy_reasons]
+            return True, legacy_reasons
+        if missing_outputs:
+            return True, missing_outputs
         return False, []
 
     stored_inputs = stored_state["inputs"]
@@ -132,7 +137,74 @@ def detect_generation_drift(env_dir: Path) -> tuple[bool, list[str]]:
             reasons.append(f"Removed input: {key}")
         else:
             reasons.append(f"Changed input: {key}")
+    reasons = [*missing_outputs, *reasons]
     return bool(reasons), reasons
+
+
+def _missing_generated_outputs(env_dir: Path) -> list[str]:
+    """Return reasons when generated env outputs are missing or incomplete."""
+    reasons: list[str] = []
+    compose_file = env_dir / "docker-compose.yml"
+    env_file = env_dir / ".env"
+
+    if not compose_file.is_file():
+        reasons.append("Missing docker-compose.yml.")
+        return reasons
+
+    try:
+        compose = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        reasons.append("docker-compose.yml could not be read as YAML.")
+        return reasons
+
+    services = compose.get("services") if isinstance(compose, dict) else None
+    if not isinstance(services, dict):
+        reasons.append("docker-compose.yml has no services section.")
+        return reasons
+
+    if services and not env_file.is_file():
+        reasons.append("Missing .env.")
+
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        build = service.get("build")
+        if build is None:
+            continue
+
+        build_context = build.get("context") if isinstance(build, dict) else build
+        if not isinstance(build_context, str) or not build_context.strip():
+            continue
+
+        context_path = Path(build_context.strip())
+        if not context_path.is_absolute():
+            context_path = env_dir / context_path
+        if not context_path.exists():
+            reasons.append(f"Missing build context for service '{service_name}': {build_context}.")
+            continue
+        if not context_path.is_dir():
+            reasons.append(
+                f"Build context for service '{service_name}' is not a directory: {build_context}."
+            )
+            continue
+
+        if str(service_name) == ComposeEngine.MCP_GATEWAY_SERVICE_NAME:
+            missing_gateway_files = [
+                filename
+                for filename in ("Dockerfile", "requirements.txt", "run_gateway.py")
+                if not (context_path / filename).is_file()
+            ]
+            reasons.extend(
+                [
+                    f"Missing gateway build context file: {context_path / filename}."
+                    for filename in missing_gateway_files
+                ]
+            )
+            gateway_config = env_dir / ComposeEngine.MCP_GATEWAY_CONFIG_FILENAME
+            if not gateway_config.is_file():
+                reasons.append(f"Missing {ComposeEngine.MCP_GATEWAY_CONFIG_FILENAME}.")
+
+    return reasons
 
 
 def regenerate_env_artifacts(env_dir: Path) -> ComposeOutput:
@@ -155,7 +227,7 @@ def ensure_env_artifacts_current(env_dir: Path, *, action_label: str) -> None:
 
     click.echo(
         click.style(
-            f"Generated environment files are stale before {action_label}.",
+            f"Generated setup files are stale before {action_label}.",
             fg="yellow",
         ),
         err=True,
@@ -166,9 +238,9 @@ def ensure_env_artifacts_current(env_dir: Path, *, action_label: str) -> None:
         click.echo(f"  - ... and {len(reasons) - 5} more", err=True)
 
     if sys.stdin.isatty() and sys.stdout.isatty():
-        if click.confirm("Regenerate generated environment files now?", default=True):
+        if click.confirm("Regenerate generated setup files now?", default=True):
             regenerate_env_artifacts(env_dir)
-            click.echo(click.style("Environment files regenerated.", fg="green"))
+            click.echo(click.style("Setup files regenerated.", fg="green"))
             return
         click.echo(click.style("Cannot continue with stale generated files.", fg="red"), err=True)
         raise SystemExit(1)

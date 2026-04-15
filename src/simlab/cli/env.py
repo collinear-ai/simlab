@@ -133,14 +133,14 @@ _CODING_TASK_BUNDLE_README = dedent(
     If this environment lives under your configured Simlab environments directory:
 
     ```bash
-    simlab env up <env-name>
-
     simlab tasks run \
       --env <env-name> \
       --tasks-dir ./task-bundle \
       --task example_task \
       --agent-model <model>
     ```
+
+    `tasks run` automatically starts the environment if it is not already running.
 
     If the environment lives outside your default environments directory, add
     `--environments-dir <parent-dir>` to the command.
@@ -235,6 +235,88 @@ _CODING_VERIFIERS_INIT = dedent(
     \"\"\"Verifier modules for local custom coding tasks.\"\"\"
     """
 )
+
+_CODING_SAMPLE_VERIFIERS = [
+    {
+        "filename": "custom_coding.py",
+        "content": dedent(
+            """\
+            \"\"\"Verifier for the example custom coding task.\"\"\"
+
+            from __future__ import annotations
+
+            import json
+            import re
+            import urllib.request
+            from typing import Any
+            from typing import Protocol
+
+
+            class _RunArtifactsLike(Protocol):
+                tool_server_url: str | None
+
+                def server_url(self, name: str) -> str | None: ...
+
+
+            def _call_tool(
+                tool_server_url: str,
+                tool_name: str,
+                parameters: dict[str, Any],
+            ) -> dict[str, Any]:
+                payload = json.dumps(
+                    {"action": {"tool_name": tool_name, "parameters": parameters}}
+                ).encode()
+                request = urllib.request.Request(  # noqa: S310
+                    f"{tool_server_url}/step",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+                    return json.loads(response.read().decode("utf-8"))
+
+
+            def verify(run_artifacts: _RunArtifactsLike) -> tuple[bool, str]:
+                \"\"\"Verify the example task wrote a plausible workspace summary.\"\"\"
+                tool_server_url = (
+                    run_artifacts.server_url("coding-env") or run_artifacts.tool_server_url
+                )
+                if not tool_server_url:
+                    return False, "coding-env tool server URL was not available to the verifier."
+
+                report_result = _call_tool(
+                    tool_server_url,
+                    "read_file",
+                    {"path": "workspace_summary.md"},
+                )
+                observation = report_result.get("observation", {})
+                if observation.get("is_error"):
+                    return False, f"workspace_summary.md missing: {observation.get('text', '')}"
+
+                summary_text = str(observation.get("text", "")).lower()
+                if len(summary_text.strip()) < 40:
+                    return (
+                        False,
+                        "workspace_summary.md exists but is too short to be a useful summary.",
+                    )
+
+                expected_tools = ("read_file", "write_file", "list_dir", "run_command")
+                mentioned_tools = [
+                    tool_name
+                    for tool_name in expected_tools
+                    if re.search(rf"\\b{tool_name}\\b", summary_text)
+                ]
+                if len(mentioned_tools) < 2:
+                    return (
+                        False,
+                        "workspace_summary.md should mention at least two available tools such as "
+                        "read_file, write_file, list_dir, or run_command.",
+                    )
+
+                return True, "workspace_summary.md describes the available tools."
+            """
+        ),
+    }
+]
 
 
 def _extract_tools_from_scenario(
@@ -598,7 +680,14 @@ def init(
         click.echo(f"  3. Add reusable skills under {skills_path}")
         click.echo(f"  4. Edit tasks and verifiers under {task_bundle_path}")
     click.echo()
-    click.echo(f"Next: simlab env up {env_name}")
+    click.echo(click.style(f"Next: simlab tasks list --env {env_name}", bold=True), err=True)
+    click.echo(
+        click.style(
+            f"  Then: simlab tasks run --env {env_name} --task <task_id> --agent-model <model>",
+            dim=True,
+        ),
+        err=True,
+    )
     emit_cli_event(
         "env_init_completed",
         {
@@ -678,16 +767,14 @@ def _generate_coding_env_readme(env_name: str) -> str:
         If this environment lives under your configured Simlab environments directory:
 
         ```bash
-        simlab env up {env_name}
-
         simlab tasks run \\
           --env {env_name} \\
           --tasks-dir ./task-bundle \\
           --task example_task \\
           --agent-model <model>
-
-        simlab env down {env_name}
         ```
+
+        `tasks run` automatically starts and tears down the environment.
 
         If the environment lives outside your default environments directory, add
         `--environments-dir <parent-dir>` to the command.
@@ -720,6 +807,11 @@ def _scaffold_coding_environment(env_dir: Path, env_name: str) -> None:
         env_dir / "task-bundle" / "verifiers" / "__init__.py",
         _CODING_VERIFIERS_INIT,
     )
+    for sample in _CODING_SAMPLE_VERIFIERS:
+        _write_text_if_missing(
+            env_dir / "task-bundle" / "verifiers" / sample["filename"],
+            sample["content"],
+        )
     _write_text_if_missing(env_dir / "README.md", _generate_coding_env_readme(env_name))
 
 

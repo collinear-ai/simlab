@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import shutil
+import sys
 from pathlib import Path
+from typing import Self
 from urllib.error import URLError
 
 import pytest
@@ -169,6 +173,235 @@ def test_run_verifier_supports_local_bundle_collinear_core_imports(tmp_path: Pat
     )
 
     assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# collinear.* shim tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeUrlopenResponse:
+    """Minimal context-manager response for monkeypatching urlopen."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+def _cleanup_shim_modules(injected: list[str]) -> None:
+    for mod_name in injected:
+        sys.modules.pop(mod_name, None)
+
+
+def test_install_collinear_core_shims_exposes_required_symbols() -> None:
+    """The shim must expose Action, Observation, ToolCallingClient, StepResult, VerifierResult."""
+    injected: list[str] = []
+    try:
+        runner._install_collinear_core_shims(injected)
+
+        models_mod = importlib.import_module("collinear.core.models")
+        client_mod = importlib.import_module("collinear.core.tool_calling_client")
+        verifier_mod = importlib.import_module("collinear.core.verifier")
+        ws_task_mod = importlib.import_module("collinear.workspace_controller.task_execution")
+
+        action = models_mod.Action(tool_name="read_file", parameters={"path": "hello.txt"})
+        assert action.tool_name == "read_file"
+        assert action.parameters == {"path": "hello.txt"}
+
+        # Action with no parameters defaults to {} (mirrors the real contract)
+        bare = models_mod.Action(tool_name="list")
+        assert bare.parameters == {}
+
+        obs = models_mod.Observation(is_error=False, text="ok")
+        assert obs.content == []
+        assert obs.metadata == {}
+
+        client = client_mod.ToolCallingClient(base_url="http://server:8020/")
+        assert client.base_url == "http://server:8020"
+        client.close()  # no-op
+
+        # Both VerifierResult shims point at the same class so verifiers using
+        # either import path get the same type back.
+        assert ws_task_mod.VerifierResult is verifier_mod.VerifierResult
+        assert client_mod.StepResult is not None
+    finally:
+        _cleanup_shim_modules(injected)
+
+
+def test_shim_tool_calling_client_step_parses_observation_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shim must read /step responses with the real envelope shape."""
+    injected: list[str] = []
+    captured: dict[str, object] = {}
+
+    def _fake_urlopen(req: object, timeout: float) -> _FakeUrlopenResponse:
+        captured["url"] = req.full_url  # type: ignore[attr-defined]
+        captured["data"] = req.data  # type: ignore[attr-defined]
+        captured["timeout"] = timeout
+        payload = json.dumps(
+            {
+                "observation": {
+                    "is_error": False,
+                    "text": "Hello World\n",
+                    "content": [{"type": "text", "text": "Hello World"}],
+                    "metadata": {"path": "hello.txt"},
+                },
+                "reward": 1.0,
+                "done": False,
+            }
+        ).encode()
+        return _FakeUrlopenResponse(payload)
+
+    try:
+        runner._install_collinear_core_shims(injected)
+        monkeypatch.setattr(runner, "urlopen", _fake_urlopen)
+
+        models_mod = importlib.import_module("collinear.core.models")
+        client_mod = importlib.import_module("collinear.core.tool_calling_client")
+
+        client = client_mod.ToolCallingClient(base_url="http://server:8020/")
+        result = client.step(
+            models_mod.Action(tool_name="read_file", parameters={"path": "hello.txt"})
+        )
+
+        assert captured["url"] == "http://server:8020/step"
+        body = json.loads(captured["data"].decode("utf-8"))  # type: ignore[attr-defined]
+        assert body["action"]["tool_name"] == "read_file"
+        assert body["action"]["parameters"] == {"path": "hello.txt"}
+
+        assert result.observation.is_error is False
+        assert result.observation.text == "Hello World\n"
+        assert result.observation.content == [{"type": "text", "text": "Hello World"}]
+        assert result.observation.metadata == {"path": "hello.txt"}
+        assert result.reward == 1.0
+        assert result.done is False
+    finally:
+        _cleanup_shim_modules(injected)
+
+
+def test_shim_tool_calling_client_step_surfaces_server_error_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When /step returns is_error=true, the shim must surface it (not coerce to false)."""
+    injected: list[str] = []
+
+    def _fake_urlopen(_req: object, timeout: float) -> _FakeUrlopenResponse:
+        _ = timeout
+        payload = json.dumps(
+            {
+                "observation": {"is_error": True, "text": "ENOENT: no such file"},
+                "reward": 0.0,
+                "done": False,
+            }
+        ).encode()
+        return _FakeUrlopenResponse(payload)
+
+    try:
+        runner._install_collinear_core_shims(injected)
+        monkeypatch.setattr(runner, "urlopen", _fake_urlopen)
+
+        models_mod = importlib.import_module("collinear.core.models")
+        client_mod = importlib.import_module("collinear.core.tool_calling_client")
+
+        client = client_mod.ToolCallingClient(base_url="http://server:8020")
+        result = client.step(
+            models_mod.Action(tool_name="read_file", parameters={"path": "missing.txt"})
+        )
+
+        assert result.observation.is_error is True
+        assert result.observation.text == "ENOENT: no such file"
+    finally:
+        _cleanup_shim_modules(injected)
+
+
+def test_run_verifier_supports_local_bundle_collinear_action_and_client_imports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a verifier importing Action and ToolCallingClient runs via local bundle."""
+
+    def _fake_urlopen(_req: object, timeout: float) -> _FakeUrlopenResponse:
+        _ = timeout
+        payload = json.dumps({"observation": {"is_error": False, "text": "Hello World"}}).encode()
+        return _FakeUrlopenResponse(payload)
+
+    monkeypatch.setattr(runner, "urlopen", _fake_urlopen)
+
+    verifier_file = tmp_path / "hello_world.py"
+    verifier_file.write_text(
+        "\n".join(
+            [
+                "from collinear.core.models import Action",
+                "from collinear.core.run_artifacts import RunArtifacts",
+                "from collinear.core.tool_calling_client import ToolCallingClient",
+                "from collinear.core.verifier import VerifierResult",
+                "",
+                "",
+                "def verify(run_artifacts: RunArtifacts) -> VerifierResult:",
+                "    client = ToolCallingClient(base_url='http://server:8020')",
+                "    try:",
+                "        action = Action(tool_name='read_file', parameters={'path': 'hello.txt'})",
+                "        result = client.step(action)",
+                "        if result.observation.is_error:",
+                "            return VerifierResult(success=False, message=result.observation.text)",
+                "        if 'Hello World' in result.observation.text:",
+                "            return VerifierResult(success=True, message='ok')",
+                "        return VerifierResult(success=False, message='missing greeting')",
+                "    finally:",
+                "        client.close()",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.run_verifier(
+        "collinear.scenarios.coding.verifiers.hello_world",
+        run_artifacts_adapter=type("Artifacts", (), {"task_id": "hello_world"})(),
+        scenario_id="coding",
+        local_verifier_path=verifier_file,
+    )
+
+    assert result.success is True, result.message
+
+
+def test_run_verifier_supports_local_bundle_workspace_controller_verifier_result_import(
+    tmp_path: Path,
+) -> None:
+    """A verifier importing VerifierResult from workspace_controller.task_execution must run."""
+    verifier_file = tmp_path / "hr_task.py"
+    verifier_file.write_text(
+        "\n".join(
+            [
+                "from collinear.core.run_artifacts import RunArtifacts",
+                "from collinear.workspace_controller.task_execution import VerifierResult",
+                "",
+                "",
+                "def verify(run_artifacts: RunArtifacts) -> VerifierResult:",
+                "    return VerifierResult(success=True, message='ok')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.run_verifier(
+        "collinear.scenarios.hr_people_management.verifiers.hr_task",
+        run_artifacts_adapter=type("Artifacts", (), {"task_id": "hr_task"})(),
+        scenario_id="hr_people_management",
+        local_verifier_path=verifier_file,
+    )
+
+    assert result.success is True, result.message
 
 
 # ---------------------------------------------------------------------------

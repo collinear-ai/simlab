@@ -85,6 +85,7 @@ class BackgroundRequestPoster:
         thread_name: str,
         max_queue_size: int = 64,
         worker_count: int = 3,
+        post_fn: Callable[..., Any] | None = None,
     ) -> None:
         """Initialize the background poster and its bounded in-memory queue."""
         self.thread_name = thread_name
@@ -92,6 +93,7 @@ class BackgroundRequestPoster:
         self.queue: queue.Queue[QueuedTelemetryRequest] = queue.Queue(maxsize=max_queue_size)
         self.lock = threading.Lock()
         self.threads: list[threading.Thread] = []
+        self.post_fn = post_fn or requests.post
 
     def submit(self, request: QueuedTelemetryRequest) -> None:
         """Queue one telemetry request for background delivery."""
@@ -128,7 +130,7 @@ class BackgroundRequestPoster:
         while True:
             request = self.queue.get()
             try:
-                requests.post(
+                self.post_fn(
                     request.url,
                     json=request.payload,
                     headers=request.headers,

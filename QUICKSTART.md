@@ -33,6 +33,18 @@ export DAYTONA_API_KEY="dtn_..."
 
 ---
 
+## Quick option: `simlab quickstart`
+
+If you want the fastest path to running your first task, just run:
+
+```bash
+simlab quickstart
+```
+
+This sets up the HR environment, lets you pick a task, and runs your agent in one command. Add `--daytona` to run in a remote sandbox, or `--template <name>` to pick a different scenario. The steps below cover the same flow manually for more control.
+
+---
+
 ## 1) Run an OOTB Task
 
 Create an environment from a template, pick a task, and run it.

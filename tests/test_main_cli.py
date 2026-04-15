@@ -15,6 +15,7 @@ def test_cli_blocks_non_config_commands_without_api_key(
     tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "missing-config.toml"))
 
     runner = CliRunner()
@@ -32,6 +33,7 @@ def test_cli_root_api_key_unblocks_command(
     tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "missing-config.toml"))
 
     runner = CliRunner()
@@ -70,6 +72,7 @@ def test_cli_config_file_api_key_unblocks_command(
     tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     config_file = tmp_path / "config.toml"
     config_file.write_text('collinear_api_key = "file-key"\n', encoding="utf-8")
 
@@ -109,6 +112,7 @@ def test_cli_help_and_version_work_without_api_key(
     tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "missing-config.toml"))
 
     runner = CliRunner()
@@ -116,7 +120,11 @@ def test_cli_help_and_version_work_without_api_key(
     version_result = runner.invoke(cli, ["--version"])
 
     assert help_result.exit_code == 0, help_result.output
-    assert "Commands:" in help_result.output
+    # The branded help screen renders via Rich rather than Click's default
+    # formatter, so we check invariants of the new output: the tagline and
+    # at least one command name from the journey-ordered table.
+    assert "hill-climbing" in help_result.output
+    assert "auth" in help_result.output
     assert version_result.exit_code == 0, version_result.output
     assert "version" in version_result.output.lower()
 
@@ -142,6 +150,7 @@ def test_cli_subcommand_help_works_without_api_key(
     args: list[str],
 ) -> None:
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "missing-config.toml"))
 
     runner = CliRunner()

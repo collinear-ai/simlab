@@ -552,7 +552,7 @@ def test_env_init_template_auto_builds_compose_files(tmp_path: Path) -> None:
 
     assert "docker-compose.yml" in result.output
     assert "email" in result.output
-    assert "env up" in result.output
+    assert "tasks list" in result.output
 
 
 def test_env_init_coding_template_scaffolds_customization_files(tmp_path: Path) -> None:
@@ -612,6 +612,7 @@ def test_env_init_coding_template_scaffolds_customization_files(tmp_path: Path) 
     assert task_json["verifiers"][0]["module"] == "simlab.verifiers.custom_coding"
     assert not (env_dir / "task-bundle" / "verifiers" / "generated_task.py").exists()
     assert (env_dir / "task-bundle" / "verifiers" / "__init__.py").exists()
+    assert (env_dir / "task-bundle" / "verifiers" / "custom_coding.py").exists()
     assert not (env_dir / "task-bundle" / "skills.md").exists()
     assert (env_dir / "README.md").exists()
     assert str(env_dir / "coding" / "setup" / "install-tools.sh") in result.output
@@ -997,7 +998,7 @@ def test_validate_daytona_coding_assets_rejects_external_paths(
     )
 
     with pytest.raises(SystemExit) as exc_info:
-        lifecycle_module._validate_daytona_coding_assets(config, env_dir)
+        lifecycle_module.validate_daytona_coding_assets(config, env_dir)
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
@@ -1403,14 +1404,16 @@ def test_ensure_env_started_local_uses_compose_spinner(
     monkeypatch.setattr(
         lifecycle_module,
         "_run_compose_up_local",
-        lambda up_cmd, *, has_builds: called.update({"up_cmd": up_cmd, "has_builds": has_builds})
-        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda up_cmd, *, has_builds, quiet=False: (
+            called.update({"up_cmd": up_cmd, "has_builds": has_builds})
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
     )
     monkeypatch.setattr(lifecycle_module, "_local_health_fetcher", lambda _compose_file: dict)
     monkeypatch.setattr(
         lifecycle_module,
         "_poll_health",
-        lambda health_fetcher, timeout=180: called.update(
+        lambda health_fetcher, timeout=180, **_kw: called.update(
             {"health": health_fetcher(), "timeout": timeout}
         ),
     )

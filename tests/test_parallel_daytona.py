@@ -22,7 +22,8 @@ import pytest
 from simlab.agents.base import BaseEnvironment
 from simlab.agents.base import RunArtifacts
 from simlab.agents.reference_agent import ReferenceAgent
-from simlab.cli import tasks as tasks_cli
+from simlab.composer.engine import ComposeEngine
+from simlab.runtime import rollout_runner
 from simlab.runtime.daytona_runner import DaytonaNotFoundError
 from simlab.runtime.daytona_runner import DaytonaRunner
 from simlab.runtime.parallel_daytona import ParallelDaytonaOrchestrator
@@ -330,11 +331,11 @@ class TestRequireReachableEndpointsWaitMode:
                 return {"email": True, "calendar": False}
             return {"email": True, "calendar": True}
 
-        monkeypatch.setattr(tasks_cli, "_reachable_endpoints", fake_reachable)
-        monkeypatch.setattr(tasks_cli.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(rollout_runner, "_reachable_endpoints", fake_reachable)
+        monkeypatch.setattr(rollout_runner.time, "sleep", lambda _s: None)
 
         # Should not raise — all become reachable on 3rd poll
-        tasks_cli._require_reachable_endpoints(
+        rollout_runner.require_reachable_endpoints(
             endpoints={"email": "http://localhost:8040", "calendar": "http://localhost:8050"},
             action="test",
             using_daytona=True,
@@ -349,16 +350,16 @@ class TestRequireReachableEndpointsWaitMode:
     ) -> None:
         # Always return all unreachable
         monkeypatch.setattr(
-            tasks_cli,
+            rollout_runner,
             "_reachable_endpoints",
             lambda _e: {"email": False},
         )
-        monkeypatch.setattr(tasks_cli.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(rollout_runner.time, "sleep", lambda _s: None)
         # Force immediate timeout
-        monkeypatch.setattr(tasks_cli.time, "monotonic", lambda: 999999.0)
+        monkeypatch.setattr(rollout_runner.time, "monotonic", lambda: 999999.0)
 
         with pytest.raises(SystemExit) as exc_info:
-            tasks_cli._require_reachable_endpoints(
+            rollout_runner.require_reachable_endpoints(
                 endpoints={"email": "http://localhost:8040"},
                 action="test",
                 using_daytona=True,
@@ -370,13 +371,13 @@ class TestRequireReachableEndpointsWaitMode:
     def test_wait_false_is_unchanged_behavior(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default wait=False does a single check like before."""
         monkeypatch.setattr(
-            tasks_cli,
+            rollout_runner,
             "_reachable_endpoints",
             lambda _e: {"email": True},
         )
 
         # Should not raise
-        tasks_cli._require_reachable_endpoints(
+        rollout_runner.require_reachable_endpoints(
             endpoints={"email": "http://localhost:8040"},
             action="test",
             using_daytona=False,
@@ -563,7 +564,7 @@ class TestParallelDaytonaMcpSupport:
             lambda *args, **kwargs: {},
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._require_reachable_endpoints",
+            "simlab.runtime.parallel_daytona.require_reachable_endpoints",
             lambda **kwargs: pytest.fail(
                 "MCP-only URL-based rollout should not check HTTP endpoints"
             ),
@@ -573,11 +574,11 @@ class TestParallelDaytonaMcpSupport:
             lambda _env_dir: {"mcpServers": {"demo": {"url": "http://mcp.example/mcp"}}},
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_mcp_clients",
+            "simlab.runtime.parallel_daytona.build_mcp_clients",
             lambda _config, _endpoints: {"demo": demo_client},
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._require_mcp_tools_available",
+            "simlab.runtime.parallel_daytona.require_mcp_tools_available",
             lambda clients: captured.setdefault("validated_clients", clients),
         )
         monkeypatch.setattr(
@@ -600,15 +601,15 @@ class TestParallelDaytonaMcpSupport:
             lambda *args, **kwargs: (None, None, None),
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._load_skills_markdown",
+            "simlab.runtime.parallel_daytona.load_skills_markdown",
             lambda **kwargs: "",
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_skills_guidance_section",
+            "simlab.runtime.parallel_daytona.build_skills_guidance_section",
             lambda _skills: "",
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_services_available_section",
+            "simlab.runtime.parallel_daytona.build_services_available_section",
             lambda *args, **kwargs: "",
         )
         monkeypatch.setattr(
@@ -730,15 +731,15 @@ class TestParallelDaytonaMcpSupport:
             lambda _env_dir: 8081,
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_mcp_clients",
+            "simlab.runtime.parallel_daytona.build_mcp_clients",
             fake_build_mcp_clients,
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._require_mcp_tools_available",
+            "simlab.runtime.parallel_daytona.require_mcp_tools_available",
             fake_require_mcp_tools_available,
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._require_reachable_endpoints",
+            "simlab.runtime.parallel_daytona.require_reachable_endpoints",
             lambda **kwargs: captured.setdefault("reachable_endpoints", kwargs["endpoints"]),
         )
         monkeypatch.setattr("simlab.runtime.parallel_daytona.time.sleep", lambda _s: None)
@@ -762,15 +763,15 @@ class TestParallelDaytonaMcpSupport:
             lambda *args, **kwargs: (None, None, None),
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._load_skills_markdown",
+            "simlab.runtime.parallel_daytona.load_skills_markdown",
             lambda **kwargs: "",
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_skills_guidance_section",
+            "simlab.runtime.parallel_daytona.build_skills_guidance_section",
             lambda _skills: "",
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_services_available_section",
+            "simlab.runtime.parallel_daytona.build_services_available_section",
             lambda *args, **kwargs: "",
         )
         monkeypatch.setattr(
@@ -807,7 +808,7 @@ class TestParallelDaytonaMcpSupport:
         )
 
         expected_gateway = {
-            tasks_cli.ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "https://8081-x.daytonaproxy.net/mcp"
+            ComposeEngine.MCP_GATEWAY_SERVICE_NAME: "https://8081-x.daytonaproxy.net/mcp"
         }
         assert result.error is None
         assert captured["reachable_endpoints"] == expected_gateway
@@ -883,11 +884,11 @@ class TestParallelDaytonaMcpSupport:
             lambda _env_dir: {"mcpServers": {"demo": {"url": "http://mcp.example/mcp"}}},
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_mcp_clients",
+            "simlab.runtime.parallel_daytona.build_mcp_clients",
             lambda _config, _endpoints: {"demo": demo_client},
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._require_mcp_tools_available",
+            "simlab.runtime.parallel_daytona.require_mcp_tools_available",
             lambda clients: captured.setdefault("validated_clients", clients),
         )
         monkeypatch.setattr(
@@ -906,15 +907,15 @@ class TestParallelDaytonaMcpSupport:
         )
         monkeypatch.setattr(ParallelDaytonaOrchestrator, "_run_verifiers", fake_run_verifiers)
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._load_skills_markdown",
+            "simlab.runtime.parallel_daytona.load_skills_markdown",
             lambda **kwargs: "",
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_skills_guidance_section",
+            "simlab.runtime.parallel_daytona.build_skills_guidance_section",
             lambda _skills: "",
         )
         monkeypatch.setattr(
-            "simlab.runtime.parallel_daytona._build_services_available_section",
+            "simlab.runtime.parallel_daytona.build_services_available_section",
             lambda *args, **kwargs: "",
         )
         monkeypatch.setattr(

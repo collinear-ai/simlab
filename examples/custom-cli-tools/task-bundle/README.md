@@ -7,6 +7,10 @@ environment.
   - the task definition
 - `verifiers/workspace_asset_report.py`
   - the verifier for the task
+- `tasks/example_task.json`
+  - the task definition
+- `verifiers/custom_coding.py`
+  - the verifier for the task
 
 Run it from `cli/simlab` with:
 

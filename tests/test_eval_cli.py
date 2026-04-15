@@ -305,6 +305,7 @@ def test_main_cli_eval_requires_auth(
     write_rollout(output_dir / "run_a", task_id="task-a", model="gpt-4o-mini", reward=1.0)
 
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "missing-config.toml"))
 
     runner = CliRunner()

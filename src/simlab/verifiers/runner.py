@@ -18,6 +18,7 @@ import tempfile
 import zipfile
 from contextlib import suppress
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 from io import BytesIO
@@ -320,8 +321,102 @@ def _collinear_runtime_module_names() -> list[str]:
     return [name for name in sys.modules if name in exact_names or name.startswith(prefixes)]
 
 
+@dataclass
+class _ShimObservation:
+    """Shim for collinear.core.models.Observation used by bundled verifiers."""
+
+    is_error: bool = False
+    text: str = ""
+    content: list[dict[str, Any]] = field(default_factory=list)
+    structured_content: Any | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _ShimStepResult:
+    """Shim for collinear.core.tool_calling_client.StepResult used by bundled verifiers."""
+
+    observation: _ShimObservation
+    reward: float | None = None
+    done: bool = False
+
+
+@dataclass
+class _ShimAction:
+    """Shim for collinear.core.models.Action used by bundled verifiers."""
+
+    tool_name: str
+    parameters: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize parameters to a mutable dict (mirrors the real Action contract)."""
+        if self.parameters is None:
+            self.parameters = {}
+        else:
+            self.parameters = dict(self.parameters)
+
+
+class _ShimToolCallingClient:
+    """Shim for collinear.core.tool_calling_client.ToolCallingClient.
+
+    Bundled verifiers use this to call /step on a tool server. We mirror enough
+    of the real client's surface that scenario verifiers in
+    src/collinear/scenarios/*/verifiers/ run unchanged. Errors during step()
+    propagate as exceptions — verifiers expect server-side failures via
+    observation.is_error, transport failures via raised exceptions.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        request_timeout_s: float = 15.0,
+        default_headers: dict[str, str] | None = None,
+    ) -> None:
+        """Initialize with tool server base URL, timeout, and optional headers."""
+        self._base = base_url.rstrip("/")
+        self._timeout = float(request_timeout_s)
+        self._headers = default_headers or {}
+
+    @property
+    def base_url(self) -> str:
+        """Return the base URL used for Tool Server requests."""
+        return self._base
+
+    def step(self, action: _ShimAction) -> _ShimStepResult:
+        """Execute an action against /step and return the parsed result."""
+        body = json.dumps(
+            {
+                "action": {
+                    "tool_name": action.tool_name,
+                    "parameters": dict(action.parameters or {}),
+                },
+                "timeout_s": int(self._timeout),
+            }
+        ).encode()
+        request_headers = {"Content-Type": "application/json", **self._headers}
+        req = Request(f"{self._base}/step", data=body, headers=request_headers)  # noqa: S310
+        with urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+        obs = payload.get("observation") or {}
+        observation = _ShimObservation(
+            is_error=bool(obs.get("is_error", False)),
+            text=str(obs.get("text", "")),
+            content=list(obs.get("content") or []),
+            structured_content=obs.get("structured_content"),
+            metadata=dict(obs.get("metadata") or {}),
+        )
+        return _ShimStepResult(
+            observation=observation,
+            reward=payload.get("reward"),
+            done=bool(payload.get("done", False)),
+        )
+
+    def close(self) -> None:
+        """Close the client (no-op — urllib has no persistent session)."""
+
+
 def _install_collinear_core_shims(injected_modules: list[str]) -> None:
-    """Inject minimal collinear.core modules for verifier imports."""
+    """Inject minimal collinear.* shim modules so bundled verifier imports resolve."""
 
     def ensure_shim(name: str) -> ModuleType:
         if name not in sys.modules:
@@ -337,6 +432,18 @@ def _install_collinear_core_shims(injected_modules: list[str]) -> None:
     run_artifacts_module.RunArtifacts = _VerifierArtifactsAdapter  # type: ignore[attr-defined]
     verifier_module = ensure_shim("collinear.core.verifier")
     verifier_module.VerifierResult = VerifierResult  # type: ignore[attr-defined]
+
+    models_module = ensure_shim("collinear.core.models")
+    models_module.Action = _ShimAction  # type: ignore[attr-defined]
+    models_module.Observation = _ShimObservation  # type: ignore[attr-defined]
+
+    tool_calling_module = ensure_shim("collinear.core.tool_calling_client")
+    tool_calling_module.ToolCallingClient = _ShimToolCallingClient  # type: ignore[attr-defined]
+    tool_calling_module.StepResult = _ShimStepResult  # type: ignore[attr-defined]
+
+    ensure_shim("collinear.workspace_controller")
+    task_execution_module = ensure_shim("collinear.workspace_controller.task_execution")
+    task_execution_module.VerifierResult = VerifierResult  # type: ignore[attr-defined]
 
 
 class VerifierBundleError(Exception):
@@ -686,9 +793,13 @@ def run_rubric_judge(
         {_RUBRIC_JUDGE_RESPONSE_SCHEMA}
     """)
 
-    litellm_model = model
-    if provider and not model.startswith(f"{provider}/"):
-        litellm_model = f"{provider}/{model}"
+    litellm_model = (model or "").strip()
+    provider_normalized = (provider or "").strip().lower() or None
+    if provider_normalized:
+        if not litellm_model.startswith(f"{provider_normalized}/"):
+            litellm_model = f"{provider_normalized}/{litellm_model}"
+    elif "/" not in litellm_model:
+        litellm_model = f"openai/{litellm_model}"
 
     try:
         response = litellm.completion(
@@ -699,7 +810,6 @@ def run_rubric_judge(
             ],
             api_key=api_key,
             base_url=base_url,
-            temperature=0.2,
         )
         raw_text = response.choices[0].message.content or ""
     except Exception as e:

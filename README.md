@@ -58,6 +58,17 @@ export DAYTONA_API_KEY="dtn_..."           # optional — omit to use local Dock
 
 ### Run your first task
 
+The fastest way to get started — one guided command:
+
+```bash
+simlab quickstart
+```
+
+This sets up the HR environment, lets you pick a task, and runs your agent. Add `--daytona` to run in a remote sandbox instead of local Docker. Use `--template <name>` to pick a different scenario.
+
+<details>
+<summary><strong>Or run each step manually</strong></summary>
+
 ```bash
 simlab templates list                      # see available templates
 simlab env init my-env --template hr       # HR workflows: recruiting, onboarding, compensation
@@ -68,6 +79,8 @@ simlab tasks run --env my-env \
   --agent-model <model> \
   --agent-api-key "$SIMLAB_AGENT_API_KEY"
 ```
+
+</details>
 
 For the full walkthrough — task generation, custom agents, verifiers, and more — see the **[Quickstart Guide](https://github.com/collinear-ai/simlab/blob/main/QUICKSTART.md)**.
 

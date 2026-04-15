@@ -95,6 +95,14 @@ def login(ctx: click.Context) -> None:
             fg="yellow",
         )
     click.echo()
+    click.echo(click.style("Next: simlab quickstart", bold=True), err=True)
+    click.echo(
+        click.style(
+            "  Or for more control: simlab templates list, then simlab env init",
+            dim=True,
+        ),
+        err=True,
+    )
 
 
 @auth.command()

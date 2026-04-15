@@ -6,13 +6,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-import simlab.cli.tasks as tasks_module
 from click.testing import CliRunner
 from simlab.agents.base import RunArtifacts
 from simlab.api.schemas import ScenarioTask
 from simlab.api.schemas import ScenarioTasksResponse
 from simlab.cli.tasks import tasks
 from simlab.composer.engine import EnvConfig
+from simlab.runtime import rollout_runner
 from simlab.verifiers import VerifierResult
 
 
@@ -188,6 +188,30 @@ def test_tasks_list_supports_local_bundle_without_config(tmp_path: Path) -> None
     assert result.exit_code == 0, result.output
     assert "generated-task" in result.output
     assert "Generated Task" in result.output
+    assert "no verifier wiring" in result.output
+
+
+def test_tasks_list_warns_about_failed_local_bundle_verifiers(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "generated-tasks"
+    _write_local_bundle(bundle_dir, include_verifier=True)
+    verifiers_dir = bundle_dir / "verifiers"
+    (verifiers_dir / "vgenerated_task.FAILED.py").write_text(
+        "def verify(run_artifacts):\n    return False\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        tasks,
+        [
+            "list",
+            "--tasks-dir",
+            str(bundle_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "failed verifier file(s) are present" in result.output
 
 
 def test_load_skills_markdown_uses_inline_config_guidance_even_with_bundle_dir(
@@ -200,7 +224,7 @@ def test_load_skills_markdown_uses_inline_config_guidance_even_with_bundle_dir(
         scenario_guidance_md="# Inline Guidance\nUse the inline guidance.\n",
     )
 
-    result = tasks_module._load_skills_markdown(config=config, bundle_dir=bundle_dir)
+    result = rollout_runner.load_skills_markdown(config=config, bundle_dir=bundle_dir)
 
     assert result == "# Inline Guidance\nUse the inline guidance."
 
@@ -267,7 +291,7 @@ def test_load_local_task_keeps_payload_and_file_aligned_for_partial_matches(
     (tasks_dir / "a-task.json").write_text(json.dumps(partial_match_task), encoding="utf-8")
     (tasks_dir / "z-task.json").write_text(json.dumps(exact_match_task), encoding="utf-8")
 
-    task_dict, _, task_file = tasks_module._load_local_task(bundle_dir, "foo")
+    task_dict, _, task_file = rollout_runner.load_local_task(bundle_dir, "foo")
 
     assert task_dict["meta"]["task_id"] == "foo"
     assert task_file == tasks_dir / "z-task.json"
@@ -315,13 +339,13 @@ def test_tasks_run_supports_local_bundle_without_template(tmp_path: Path) -> Non
         patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch("simlab.cli.tasks.ScenarioManagerClient") as mocked_client_cls,
         patch(
-            "simlab.cli.tasks._resolve_endpoints",
+            "simlab.runtime.rollout_runner.resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
         ),
-        patch("simlab.cli.tasks._require_reachable_endpoints"),
-        patch("simlab.cli.tasks._provision_task_calendar_users"),
-        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
-        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch("simlab.runtime.rollout_runner.require_reachable_endpoints"),
+        patch("simlab.runtime.rollout_runner.provision_task_calendar_users"),
+        patch("simlab.runtime.rollout_runner.ensure_task_calendar_accounts"),
+        patch("simlab.runtime.rollout_runner.build_services_available_section", return_value=""),
         patch(
             "simlab.agents.run_with_agent_contract",
             return_value=RunArtifacts(
@@ -406,16 +430,20 @@ def test_tasks_run_custom_agent_does_not_require_reference_agent_credentials(
             return_value="https://api.example.com",
         ),
         patch("simlab.cli.tasks.ensure_env_artifacts_current"),
+        patch("simlab.agents.loader.load_agent_class"),
         patch(
-            "simlab.cli.tasks._resolve_endpoints",
+            "simlab.runtime.rollout_runner.resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
         ),
-        patch("simlab.cli.tasks._require_reachable_endpoints"),
-        patch("simlab.cli.tasks._provision_task_calendar_users"),
-        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
-        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
-        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
-        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch("simlab.runtime.rollout_runner.require_reachable_endpoints"),
+        patch("simlab.runtime.rollout_runner.provision_task_calendar_users"),
+        patch("simlab.runtime.rollout_runner.ensure_task_calendar_accounts"),
+        patch("simlab.runtime.rollout_runner.build_services_available_section", return_value=""),
+        patch(
+            "simlab.runtime.rollout_runner.load_mcp_servers_from_env_dir",
+            return_value={"mcpServers": {}},
+        ),
+        patch("simlab.runtime.rollout_runner.build_mcp_clients", return_value={}),
         patch(
             "simlab.agents.run_with_agent_contract",
             return_value=RunArtifacts(
@@ -492,16 +520,20 @@ def test_tasks_run_custom_agent_ignores_global_reference_agent_metadata(
             return_value="https://api.example.com",
         ),
         patch("simlab.cli.tasks.ensure_env_artifacts_current"),
+        patch("simlab.agents.loader.load_agent_class"),
         patch(
-            "simlab.cli.tasks._resolve_endpoints",
+            "simlab.runtime.rollout_runner.resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
         ),
-        patch("simlab.cli.tasks._require_reachable_endpoints"),
-        patch("simlab.cli.tasks._provision_task_calendar_users"),
-        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
-        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
-        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
-        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch("simlab.runtime.rollout_runner.require_reachable_endpoints"),
+        patch("simlab.runtime.rollout_runner.provision_task_calendar_users"),
+        patch("simlab.runtime.rollout_runner.ensure_task_calendar_accounts"),
+        patch("simlab.runtime.rollout_runner.build_services_available_section", return_value=""),
+        patch(
+            "simlab.runtime.rollout_runner.load_mcp_servers_from_env_dir",
+            return_value={"mcpServers": {}},
+        ),
+        patch("simlab.runtime.rollout_runner.build_mcp_clients", return_value={}),
         patch(
             "simlab.agents.run_with_agent_contract",
             return_value=RunArtifacts(
@@ -566,7 +598,7 @@ def test_load_skills_markdown_prefers_inline_config_guidance() -> None:
         scenario_guidance_md="# Inline Guidance\nUse the environment carefully.\n",
     )
 
-    loaded = tasks_module._load_skills_markdown(
+    loaded = rollout_runner.load_skills_markdown(
         config=config,
         bundle_dir=None,
     )
@@ -617,16 +649,19 @@ def test_tasks_run_passes_mcp_verifier_tool_urls_when_http_tool_servers_are_abse
             return_value="https://api.example.com",
         ),
         patch("simlab.cli.tasks.ensure_env_artifacts_current"),
-        patch("simlab.cli.tasks._resolve_endpoints", return_value=({}, False)),
-        patch("simlab.cli.tasks._provision_task_calendar_users"),
-        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
-        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
+        patch("simlab.runtime.rollout_runner.resolve_endpoints", return_value=({}, False)),
+        patch("simlab.runtime.rollout_runner.provision_task_calendar_users"),
+        patch("simlab.runtime.rollout_runner.ensure_task_calendar_accounts"),
+        patch("simlab.runtime.rollout_runner.build_services_available_section", return_value=""),
         patch(
-            "simlab.cli.tasks.load_mcp_servers_from_env_dir",
+            "simlab.runtime.rollout_runner.load_mcp_servers_from_env_dir",
             return_value={"mcpServers": {"demo": {"url": "http://localhost:8091/mcp"}}},
         ),
-        patch("simlab.cli.tasks._build_mcp_clients", return_value={"demo": fake_mcp_client}),
-        patch("simlab.cli.tasks._require_mcp_tools_available"),
+        patch(
+            "simlab.runtime.rollout_runner.build_mcp_clients",
+            return_value={"demo": fake_mcp_client},
+        ),
+        patch("simlab.runtime.rollout_runner.require_mcp_tools_available"),
         patch(
             "simlab.agents.run_with_agent_contract",
             return_value=RunArtifacts(
@@ -709,15 +744,18 @@ def test_tasks_run_writes_atif_when_rollout_format_flag_enabled(
         ),
         patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch(
-            "simlab.cli.tasks._resolve_endpoints",
+            "simlab.runtime.rollout_runner.resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
         ),
-        patch("simlab.cli.tasks._require_reachable_endpoints"),
-        patch("simlab.cli.tasks._provision_task_calendar_users"),
-        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
-        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
-        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
-        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch("simlab.runtime.rollout_runner.require_reachable_endpoints"),
+        patch("simlab.runtime.rollout_runner.provision_task_calendar_users"),
+        patch("simlab.runtime.rollout_runner.ensure_task_calendar_accounts"),
+        patch("simlab.runtime.rollout_runner.build_services_available_section", return_value=""),
+        patch(
+            "simlab.runtime.rollout_runner.load_mcp_servers_from_env_dir",
+            return_value={"mcpServers": {}},
+        ),
+        patch("simlab.runtime.rollout_runner.build_mcp_clients", return_value={}),
         patch(
             "simlab.agents.run_with_agent_contract",
             return_value=RunArtifacts(
@@ -798,15 +836,18 @@ def test_tasks_run_writes_atif_when_env_rollout_format_enabled(
         ),
         patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch(
-            "simlab.cli.tasks._resolve_endpoints",
+            "simlab.runtime.rollout_runner.resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
         ),
-        patch("simlab.cli.tasks._require_reachable_endpoints"),
-        patch("simlab.cli.tasks._provision_task_calendar_users"),
-        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
-        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
-        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
-        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch("simlab.runtime.rollout_runner.require_reachable_endpoints"),
+        patch("simlab.runtime.rollout_runner.provision_task_calendar_users"),
+        patch("simlab.runtime.rollout_runner.ensure_task_calendar_accounts"),
+        patch("simlab.runtime.rollout_runner.build_services_available_section", return_value=""),
+        patch(
+            "simlab.runtime.rollout_runner.load_mcp_servers_from_env_dir",
+            return_value={"mcpServers": {}},
+        ),
+        patch("simlab.runtime.rollout_runner.build_mcp_clients", return_value={}),
         patch(
             "simlab.agents.run_with_agent_contract",
             return_value=RunArtifacts(
@@ -886,15 +927,18 @@ def test_tasks_run_writes_atif_when_global_rollout_format_enabled(
         ),
         patch("simlab.cli.tasks.ensure_env_artifacts_current"),
         patch(
-            "simlab.cli.tasks._resolve_endpoints",
+            "simlab.runtime.rollout_runner.resolve_endpoints",
             return_value=({"email": "http://localhost:8040"}, False),
         ),
-        patch("simlab.cli.tasks._require_reachable_endpoints"),
-        patch("simlab.cli.tasks._provision_task_calendar_users"),
-        patch("simlab.cli.tasks._ensure_task_calendar_accounts"),
-        patch("simlab.cli.tasks._build_services_available_section", return_value=""),
-        patch("simlab.cli.tasks.load_mcp_servers_from_env_dir", return_value={"mcpServers": {}}),
-        patch("simlab.cli.tasks._build_mcp_clients", return_value={}),
+        patch("simlab.runtime.rollout_runner.require_reachable_endpoints"),
+        patch("simlab.runtime.rollout_runner.provision_task_calendar_users"),
+        patch("simlab.runtime.rollout_runner.ensure_task_calendar_accounts"),
+        patch("simlab.runtime.rollout_runner.build_services_available_section", return_value=""),
+        patch(
+            "simlab.runtime.rollout_runner.load_mcp_servers_from_env_dir",
+            return_value={"mcpServers": {}},
+        ),
+        patch("simlab.runtime.rollout_runner.build_mcp_clients", return_value={}),
         patch(
             "simlab.agents.run_with_agent_contract",
             return_value=RunArtifacts(

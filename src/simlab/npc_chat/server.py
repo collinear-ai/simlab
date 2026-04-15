@@ -215,9 +215,13 @@ class NpcChatServer:
         """Call LiteLLM and return the response text."""
         import litellm  # noqa: PLC0415
 
-        model = self._model
-        if self._provider and not model.startswith(f"{self._provider}/"):
-            model = f"{self._provider}/{model}"
+        model = (self._model or "").strip()
+        provider = (self._provider or "").strip().lower()
+        if provider:
+            if not model.startswith(f"{provider}/"):
+                model = f"{provider}/{model}"
+        elif "/" not in model:
+            model = f"openai/{model}"
 
         response = litellm.completion(
             model=model,

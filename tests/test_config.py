@@ -20,6 +20,7 @@ def test_load_global_config_no_file_no_env_no_overrides(
     assert not no_file.exists()
     for key in (
         "SIMLAB_COLLINEAR_API_KEY",
+        "COLLINEAR_API_KEY",
         "SIMLAB_CONFIG",
         "SIMLAB_SCENARIO_MANAGER_API_URL",
         "SIMLAB_DAYTONA_API_KEY",
@@ -48,6 +49,8 @@ def test_load_global_config_from_file_in_tmpdir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Config file in tmpdir is loaded and applied."""
+    monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.delenv("SIMLAB_DAYTONA_API_KEY", raising=False)
     monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
     config_file = tmp_path / "config.toml"
@@ -74,6 +77,8 @@ model = "gpt-4o"
 
 def test_load_global_config_partial_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Only keys present in the file are set; rest remain None."""
+    monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.delenv("SIMLAB_DAYTONA_API_KEY", raising=False)
     monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
     config_file = tmp_path / "partial.toml"
@@ -99,6 +104,8 @@ def test_load_global_config_missing_file_uses_no_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When config_file_path points to a non-existent file, no file is loaded."""
+    monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.delenv("SIMLAB_DAYTONA_API_KEY", raising=False)
     monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
     missing = tmp_path / "does-not-exist.toml"
@@ -108,8 +115,10 @@ def test_load_global_config_missing_file_uses_no_file(
     assert cfg.daytona_api_key is None
 
 
-def test_load_global_config_empty_file(tmp_path: Path) -> None:
+def test_load_global_config_empty_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Empty or invalid TOML file yields no file data (no crash)."""
+    monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     config_file = tmp_path / "empty.toml"
     config_file.write_text("")
     cfg = load_global_config(config_file_path=str(config_file), cli_overrides=None)
@@ -366,6 +375,7 @@ def test_load_global_config_precedence_order(
     assert cfg_no_cli.daytona_api_key == "from-env-daytona"
 
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.delenv("DAYTONA_API_KEY", raising=False)
     cfg_file_only = load_global_config(config_file_path=str(config_file), cli_overrides=None)
     assert cfg_file_only.collinear_api_key == "from-file"
@@ -407,6 +417,7 @@ def test_resolve_collinear_api_key_config_does_not_fall_back_to_default_config_f
     leaked_config.write_text('collinear_api_key = "leaked-key"\n')
     monkeypatch.setenv("SIMLAB_CONFIG", str(leaked_config))
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
 
     assert config_mod.resolve_collinear_api_key(config=GlobalConfig(collinear_api_key=None)) is None
 
@@ -502,6 +513,7 @@ def test_resolve_scenario_manager_api_url_config_does_not_fall_back_to_default_c
 def test_get_global_config_from_ctx_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """get_global_config_from_ctx(None) returns default config."""
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.delenv("SIMLAB_CONFIG", raising=False)
     monkeypatch.setattr(
         config_mod, "_config_file_path", lambda override=None, must_exist=True: None
@@ -516,6 +528,7 @@ def test_get_global_config_from_ctx_not_click_context(
 ) -> None:
     """get_global_config_from_ctx with non-Context returns default config."""
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.delenv("SIMLAB_CONFIG", raising=False)
     monkeypatch.setattr(
         config_mod, "_config_file_path", lambda override=None, must_exist=True: None
@@ -555,8 +568,12 @@ def test_get_global_config_from_ctx_walks_to_root(
     assert cfg.daytona_api_key == "file-only"
 
 
-def test_load_global_config_reads_collinear_api_key_from_file(tmp_path: Path) -> None:
+def test_load_global_config_reads_collinear_api_key_from_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """collinear_api_key in config.toml should load for Collinear auth."""
+    monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     config_file = tmp_path / "config.toml"
     config_file.write_text('collinear_api_key = "file-key"\n', encoding="utf-8")
 

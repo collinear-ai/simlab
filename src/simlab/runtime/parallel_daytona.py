@@ -19,31 +19,7 @@ from typing import Any
 
 import click
 
-from simlab.cli.progress import ParallelRolloutProgress
-from simlab.cli.tasks import _CALENDAR_DEFAULT_USERNAME
-from simlab.cli.tasks import ROLLOUT_FORMAT_ATIF
-from simlab.cli.tasks import ROLLOUT_FORMAT_DEFAULT
-from simlab.cli.tasks import _apply_verifier_env_overrides
-from simlab.cli.tasks import _build_mcp_clients
-from simlab.cli.tasks import _build_services_available_section
-from simlab.cli.tasks import _build_skills_guidance_section
-from simlab.cli.tasks import _collect_task_calendar_accounts
-from simlab.cli.tasks import _effective_tool_servers
-from simlab.cli.tasks import _ensure_task_calendar_accounts
-from simlab.cli.tasks import _get_local_verifier_file_path
-from simlab.cli.tasks import _load_skills_markdown
-from simlab.cli.tasks import _maybe_run_rubric_judge
-from simlab.cli.tasks import _require_mcp_tools_available
-from simlab.cli.tasks import _require_reachable_endpoints
-from simlab.cli.tasks import _restore_env
-from simlab.cli.tasks import _rewrite_tool_server_urls
-from simlab.cli.tasks import _seed_task_data
-from simlab.cli.tasks import _task_uses_calendar
-from simlab.cli.tasks import _verifier_tool_servers
-from simlab.cli.tasks import _wait_for_mcp_tools_available
-from simlab.cli.tasks import get_agent_runtime_helpers
-from simlab.cli.tasks import get_env_runtime_helpers
-from simlab.cli.tasks import get_verifier_runtime_helpers
+from simlab.cli.progress import ParallelRolloutProgressLike
 from simlab.composer.engine import ComposeEngine
 from simlab.composer.engine import get_mcp_gateway_host_port
 from simlab.mcp_config import get_mcp_command_servers
@@ -56,6 +32,30 @@ from simlab.runtime.daytona_runner import _get_daytona
 from simlab.runtime.daytona_runner import _run_profiled_services_in_sandbox
 from simlab.runtime.daytona_runner import setup_sandbox_environment
 from simlab.runtime.daytona_runner import teardown_sandbox
+from simlab.runtime.rollout_runner import CALENDAR_DEFAULT_USERNAME
+from simlab.runtime.rollout_runner import ROLLOUT_FORMAT_ATIF
+from simlab.runtime.rollout_runner import ROLLOUT_FORMAT_DEFAULT
+from simlab.runtime.rollout_runner import apply_verifier_env_overrides
+from simlab.runtime.rollout_runner import build_mcp_clients
+from simlab.runtime.rollout_runner import build_services_available_section
+from simlab.runtime.rollout_runner import build_skills_guidance_section
+from simlab.runtime.rollout_runner import collect_task_calendar_accounts
+from simlab.runtime.rollout_runner import effective_tool_servers
+from simlab.runtime.rollout_runner import ensure_task_calendar_accounts
+from simlab.runtime.rollout_runner import get_agent_runtime_helpers
+from simlab.runtime.rollout_runner import get_env_runtime_helpers
+from simlab.runtime.rollout_runner import get_local_verifier_file_path
+from simlab.runtime.rollout_runner import get_verifier_runtime_helpers
+from simlab.runtime.rollout_runner import load_skills_markdown
+from simlab.runtime.rollout_runner import maybe_run_rubric_judge
+from simlab.runtime.rollout_runner import require_mcp_tools_available
+from simlab.runtime.rollout_runner import require_reachable_endpoints
+from simlab.runtime.rollout_runner import restore_env
+from simlab.runtime.rollout_runner import rewrite_tool_server_urls
+from simlab.runtime.rollout_runner import seed_task_data
+from simlab.runtime.rollout_runner import task_uses_calendar
+from simlab.runtime.rollout_runner import verifier_tool_servers
+from simlab.runtime.rollout_runner import wait_for_mcp_tools_available
 
 # ---------------------------------------------------------------------------
 # Result dataclasses
@@ -241,11 +241,12 @@ class ParallelDaytonaOrchestrator:
         base_url_api: str,
         scenario_manager_api_key: str | None,
         rollout_format: str,
-        progress: ParallelRolloutProgress | None = None,
+        output_root: Path = Path("output"),
+        progress: ParallelRolloutProgressLike | None = None,
     ) -> ParallelRunSummary:
         """Execute all rollouts and return aggregated summary."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        run_dir = Path("output") / f"parallel_run_{task_id}_{ts}"
+        run_dir = output_root / f"parallel_run_{task_id}_{ts}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         self._state_file = compose_dir / "parallel-sandboxes.json"
@@ -361,7 +362,7 @@ class ParallelDaytonaOrchestrator:
     ) -> None:
         """Wait until the gateway-backed MCP namespaces expose tools."""
         if mcp_clients:
-            _wait_for_mcp_tools_available(
+            wait_for_mcp_tools_available(
                 mcp_clients,
                 timeout=timeout,
                 poll_interval=poll_interval,
@@ -402,7 +403,7 @@ class ParallelDaytonaOrchestrator:
         scenario_manager_api_key: str | None,
         rollout_format: str,
         run_dir: Path,
-        progress: ParallelRolloutProgress | None = None,
+        progress: ParallelRolloutProgressLike | None = None,
     ) -> RolloutResult:
         """Full lifecycle for one rollout: create -> setup -> seed -> run -> verify -> teardown."""
         tag = f"[rollout {rollout_idx + 1}/{self._rollout_count}]"
@@ -457,7 +458,7 @@ class ParallelDaytonaOrchestrator:
             if endpoints:
                 if progress is None:
                     click.echo(f"{tag} Waiting for tool servers...")
-                _require_reachable_endpoints(
+                require_reachable_endpoints(
                     endpoints=endpoints,
                     action="tool server readiness",
                     using_daytona=True,
@@ -472,7 +473,7 @@ class ParallelDaytonaOrchestrator:
                 self._check_cancelled(tag)
                 if seed_svc_names:
                     if progress is None:
-                        click.echo(f"{tag} Running environment seed services...")
+                        click.echo(f"{tag} Running seed services...")
                     _run_profiled_services_in_sandbox(
                         sandbox,
                         seed_svc_names,
@@ -505,7 +506,7 @@ class ParallelDaytonaOrchestrator:
 
             # 4. Build environment + run agent
             self._check_cancelled(tag)
-            mcp_clients = _build_mcp_clients(mcp_config, endpoints)
+            mcp_clients = build_mcp_clients(mcp_config, endpoints)
             gateway_url = endpoints.get(ComposeEngine.MCP_GATEWAY_SERVICE_NAME)
             if command_mcp_servers and gateway_url:
                 self._wait_for_mcp_gateway(
@@ -516,9 +517,9 @@ class ParallelDaytonaOrchestrator:
                     log_prefix=tag,
                     quiet=progress is not None,
                 )
-            _require_mcp_tools_available(mcp_clients)
-            rewritten = _rewrite_tool_server_urls(task_data, endpoints)
-            tool_namespace_endpoints = _effective_tool_servers(rewritten, endpoints)
+            require_mcp_tools_available(mcp_clients)
+            rewritten = rewrite_tool_server_urls(task_data, endpoints)
+            tool_namespace_endpoints = effective_tool_servers(rewritten, endpoints)
 
             # Auto-activate NPC chat tool if any NPC has chat personality fields.
             npc_session = NpcChatSession.from_task_data(
@@ -548,12 +549,12 @@ class ParallelDaytonaOrchestrator:
                 )
 
                 instruction = rewritten.get("task", "")
-                skills_section = _build_skills_guidance_section(
-                    _load_skills_markdown(config=config, bundle_dir=bundle_dir)
+                skills_section = build_skills_guidance_section(
+                    load_skills_markdown(config=config, bundle_dir=bundle_dir)
                 )
                 if skills_section:
                     instruction = f"{instruction}\n\n{skills_section}"
-                services_section = _build_services_available_section(
+                services_section = build_services_available_section(
                     config,
                     daytona=True,
                     config_path=config_path,
@@ -619,7 +620,7 @@ class ParallelDaytonaOrchestrator:
                 tag=tag,
                 task_data=task_data,
                 artifacts=artifacts,
-                tool_servers=_verifier_tool_servers(rewritten, endpoints, mcp_clients),
+                tool_servers=verifier_tool_servers(rewritten, endpoints, mcp_clients),
                 rollout_dir=rollout_dir,
                 bundle_dir=bundle_dir,
                 global_cfg=global_cfg,
@@ -709,13 +710,13 @@ class ParallelDaytonaOrchestrator:
         log: bool = True,
     ) -> None:
         """Provision CalDAV users and register calendar accounts in ephemeral sandbox."""
-        if not _task_uses_calendar(task_data):
+        if not task_uses_calendar(task_data):
             return
 
         accounts = [
             a
-            for a in _collect_task_calendar_accounts(task_data)
-            if a and a != _CALENDAR_DEFAULT_USERNAME
+            for a in collect_task_calendar_accounts(task_data)
+            if a and a != CALENDAR_DEFAULT_USERNAME
         ]
         if not accounts:
             return
@@ -761,7 +762,7 @@ class ParallelDaytonaOrchestrator:
 
         # Register accounts with the calendar tool server
         log_fn = None if log else (lambda _msg: None)
-        _ensure_task_calendar_accounts(task_data, profiles, endpoints, config, log=log_fn)
+        ensure_task_calendar_accounts(task_data, profiles, endpoints, config, log=log_fn)
 
     def _provision_group_channels(
         self,
@@ -872,7 +873,7 @@ class ParallelDaytonaOrchestrator:
         if log:
             click.echo(f"{tag} Seeding task data...")
         log_fn = None if log else (lambda _msg: None)
-        ok, fail = _seed_task_data(task_data, profiles, endpoints, log=log_fn)
+        ok, fail = seed_task_data(task_data, profiles, endpoints, log=log_fn)
         if log:
             if fail:
                 click.echo(click.style(f"{tag} Seeding had {fail} failure(s).", fg="yellow"))
@@ -917,7 +918,7 @@ class ParallelDaytonaOrchestrator:
             if log:
                 click.echo(f"{tag} Running verifiers...")
             with self._verifier_env_lock:
-                original_env, applied_env = _apply_verifier_env_overrides(global_cfg)
+                original_env, applied_env = apply_verifier_env_overrides(global_cfg)
                 try:
                     for _i, ev in enumerate(evaluators, 1):
                         if ev.get("func") != "python_module" or not ev.get("module"):
@@ -930,7 +931,7 @@ class ParallelDaytonaOrchestrator:
                             scenario_manager_base_url=base_url_api,
                             scenario_manager_api_key=scenario_manager_api_key,
                             local_verifier_path=(
-                                _get_local_verifier_file_path(bundle_dir, mod_path)
+                                get_local_verifier_file_path(bundle_dir, mod_path)
                                 if bundle_dir is not None
                                 else None
                             ),
@@ -945,17 +946,18 @@ class ParallelDaytonaOrchestrator:
                             }
                         )
                 finally:
-                    _restore_env(original_env, applied_env)
+                    restore_env(original_env, applied_env)
 
             all_passed = all(r["success"] for r in verifier_results)
             reward = 1.0 if all_passed else 0.0
 
             # Rubric judge (optional)
-            rubric_result_dict = _maybe_run_rubric_judge(
+            rubric_result_dict = maybe_run_rubric_judge(
                 task_data=task_data,
                 bundle_dir=bundle_dir,
                 messages=list(artifacts.messages),
                 global_cfg=global_cfg,
+                log=log,
             )
 
             # Write verifier output files

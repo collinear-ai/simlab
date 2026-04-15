@@ -61,6 +61,40 @@ def _compose_has_services(compose_file: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def get_profiled_service_names(
+    config: EnvConfig,
+    profile: str,
+    config_path: Path | None = None,
+    tool_names: list[str] | None = None,
+) -> list[str]:
+    """Return compose service names associated with a seed/preseed profile."""
+    return _get_profiled_service_names(
+        config,
+        profile=profile,
+        config_path=config_path,
+        tool_names=tool_names,
+    )
+
+
+def run_profiled_services_local(
+    out_dir: Path,
+    svc_names: list[str],
+    profile: str,
+    env_overrides: dict[str, str] | None = None,
+    quiet: bool = False,
+    step_ctx: object | None = None,
+) -> None:
+    """Run profiled containers locally via docker compose."""
+    _run_profiled_services_local(
+        out_dir,
+        svc_names,
+        profile,
+        env_overrides=env_overrides,
+        quiet=quiet,
+        step_ctx=step_ctx,
+    )
+
+
 def _get_seed_service_names(config: EnvConfig, config_path: Path | None = None) -> list[str]:
     """Get seed service names from the tool definitions in config."""
     return _get_profiled_service_names(config, profile="seed", config_path=config_path)
@@ -125,6 +159,7 @@ def _run_profiled_services_local(
         override_args: list[str] = []
         for key, value in (env_overrides or {}).items():
             override_args.extend(["-e", f"{key}={value}"])
+        tty_args = ["-T"] if quiet else []
         result = subprocess.run(
             [
                 "docker",
@@ -135,6 +170,7 @@ def _run_profiled_services_local(
                 profile,
                 "run",
                 "--rm",
+                *tty_args,
                 *override_args,
                 svc_name,
             ],
@@ -182,8 +218,10 @@ def _get_daytona_runner(daytona_api_key: str | None = None):  # noqa: ANN202
     except ModuleNotFoundError as exc:
         click.echo(
             click.style(
-                "Daytona support is unavailable in this installation. "
-                "Install simulationlab[daytona] or run without --daytona.",
+                "Daytona support is unavailable in this installation.\n"
+                "Source checkout: uv sync --extra daytona\n"
+                'Installed CLI: uv tool install --python 3.13 "simulationlab[daytona]"\n'
+                "Or run without --daytona.",
                 fg="red",
             ),
             err=True,
@@ -193,7 +231,7 @@ def _get_daytona_runner(daytona_api_key: str | None = None):  # noqa: ANN202
     return daytona_runner_module.DaytonaRunner(daytona_api_key=daytona_api_key)
 
 
-def _validate_daytona_coding_assets(config: EnvConfig, config_dir: Path) -> None:
+def validate_daytona_coding_assets(config: EnvConfig, config_dir: Path) -> None:
     """Fail early when Daytona-backed coding envs reference files outside the env dir."""
     external_asset_paths = ComposeEngine.get_external_coding_asset_paths(config, config_dir)
     if not external_asset_paths:
@@ -584,6 +622,8 @@ def _render_service_detail(
 
 def _clear_lines(n: int) -> None:
     """Move cursor up n lines and clear them."""
+    if not sys.stdout.isatty():
+        return
     for _ in range(n):
         sys.stdout.write("\033[A\033[2K")
     sys.stdout.flush()
@@ -592,8 +632,19 @@ def _clear_lines(n: int) -> None:
 def _poll_health(
     health_fetcher: Callable[[], dict[str, str]],
     timeout: int = 180,
+    *,
+    quiet: bool = False,
 ) -> None:
-    """Poll services with an animated status display."""
+    """Poll services with an animated status display.
+
+    When *quiet* is True, suppress the animated spinner and service table —
+    use this when a parent progress context already owns the terminal.
+    Failures and timeouts are always reported.
+
+    Also suppresses animated output when stdout is not a tty (pipes, CI).
+    """
+    interactive = sys.stdout.isatty()
+    suppress_animation = quiet or not interactive
     start = time.time()
     spinner = itertools.cycle(_SPINNER_FRAMES)
     lines_printed = 0
@@ -605,22 +656,23 @@ def _poll_health(
         services = health_fetcher()
         current_message = _health_wait_message(services)
 
-        if lines_printed > 0:
-            _clear_lines(lines_printed)
+        if not suppress_animation:
+            if lines_printed > 0:
+                _clear_lines(lines_printed)
 
-        frame = next(spinner)
-        status_line = _render_status_line(
-            services,
-            frame,
-            current_message,
-            elapsed,
-        )
-        detail_lines = _render_service_detail(services)
+            frame = next(spinner)
+            status_line = _render_status_line(
+                services,
+                frame,
+                current_message,
+                elapsed,
+            )
+            detail_lines = _render_service_detail(services)
 
-        output_lines = [status_line, "", *detail_lines, ""]
-        for line in output_lines:
-            click.echo(line)
-        lines_printed = len(output_lines)
+            output_lines = [status_line, "", *detail_lines, ""]
+            for line in output_lines:
+                click.echo(line)
+            lines_printed = len(output_lines)
 
         if services:
             healthy_or_running = sum(
@@ -630,7 +682,8 @@ def _poll_health(
             total = len(services)
 
             if failed:
-                _clear_lines(lines_printed)
+                if not suppress_animation and lines_printed > 0:
+                    _clear_lines(lines_printed)
                 click.echo(
                     click.style(
                         " ✗ One or more services failed during startup.",
@@ -650,12 +703,14 @@ def _poll_health(
                 consecutive_ready_polls = 0
 
             if consecutive_ready_polls >= 2:
-                _clear_lines(lines_printed)
-                click.echo(click.style(" ✓ All services are healthy!", fg="green", bold=True))
-                click.echo()
-                for line in _render_service_detail(services):
-                    click.echo(line)
-                click.echo()
+                if not suppress_animation and lines_printed > 0:
+                    _clear_lines(lines_printed)
+                if not suppress_animation:
+                    click.echo(click.style(" ✓ All services are healthy!", fg="green", bold=True))
+                    click.echo()
+                    for line in _render_service_detail(services):
+                        click.echo(line)
+                    click.echo()
                 return
 
         time.sleep(poll_interval)
@@ -676,13 +731,20 @@ def _run_compose_up_local(
     up_cmd: list[str],
     *,
     has_builds: bool,
+    quiet: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``docker compose up`` with an animated progress display."""
+    """Run ``docker compose up`` with an animated progress display.
+
+    When *quiet* is True, the built-in spinner is suppressed — use this
+    when a parent progress context (e.g. ``StepProgress``) already owns
+    the terminal display.
+    """
     start = time.time()
     spinner = itertools.cycle(_SPINNER_FRAMES)
     current_message = "Starting docker compose build..." if has_builds else "Starting services..."
     poll_interval = 0.2
     lines_printed = 0
+    interactive = sys.stdout.isatty()
 
     process = subprocess.Popen(
         up_cmd,
@@ -708,24 +770,29 @@ def _run_compose_up_local(
     for reader_thread in reader_threads:
         reader_thread.start()
 
+    if not interactive:
+        click.echo(current_message)
+        click.echo()
+
     while process.poll() is None:
         now = time.time()
         progress_message = _latest_compose_progress_message(progress_lines)
         if progress_message is not None:
             current_message = progress_message
 
-        if lines_printed > 0:
-            _clear_lines(lines_printed)
+        if not quiet and interactive:
+            if lines_printed > 0:
+                _clear_lines(lines_printed)
 
-        click.echo(_render_simple_status_line(next(spinner), current_message, now - start))
-        click.echo()
-        lines_printed = 2
+            click.echo(_render_simple_status_line(next(spinner), current_message, now - start))
+            click.echo()
+            lines_printed = 2
         time.sleep(poll_interval)
 
     process.wait()
     for reader_thread in reader_threads:
         reader_thread.join()
-    if lines_printed > 0:
+    if not quiet and lines_printed > 0:
         _clear_lines(lines_printed)
 
     return subprocess.CompletedProcess(
@@ -1108,6 +1175,8 @@ def ensure_env_started_local(
     env_dir: Path,
     config: EnvConfig,
     config_path: Path | None = None,
+    *,
+    quiet: bool = False,
 ) -> None:
     """Start local Docker services: preseed, compose up, health poll.
 
@@ -1115,20 +1184,81 @@ def ensure_env_started_local(
     function does NOT check for services itself — the caller must guard.
 
     Does NOT run seed-profile services; call ``run_env_seed_local`` separately.
+
+    When *quiet* is True, suppress the built-in compose-up spinner and
+    health-poll display — use this when a parent progress context (e.g.
+    ``StepProgress``) already owns the terminal.
     """
     compose_file = env_dir / "docker-compose.yml"
     has_builds = _compose_has_build_contexts(compose_file)
 
     preseed_svc_names = _get_preseed_service_names(config, config_path)
     if preseed_svc_names:
-        click.echo("  Running preseed services...")
+        if not quiet:
+            click.echo("  Running preseed services...")
         _run_profiled_services_local(env_dir, preseed_svc_names, profile="preseed", quiet=True)
 
     up_cmd = ["docker", "compose", "-f", str(compose_file), "up", "-d"]
     if has_builds:
         up_cmd.append("--build")
-    result = _run_compose_up_local(up_cmd, has_builds=has_builds)
+    result = _run_compose_up_local(up_cmd, has_builds=has_builds, quiet=quiet)
     if result.returncode != 0:
+        port_match = None
+        stderr = result.stderr or ""
+        if stderr:
+            port_conflict_patterns = (
+                r"Bind for 0\.0\.0\.0:(?P<port>\d+) failed: port is already allocated",
+                r"0\.0\.0\.0:(?P<port>\d+)/tcp: .*address already in use",
+                r"listen tcp\d* 0\.0\.0\.0:(?P<port>\d+): bind: address already in use",
+            )
+            for pattern in port_conflict_patterns:
+                port_match = re.search(pattern, stderr)
+                if port_match:
+                    break
+        if port_match:
+            port = port_match.group("port")
+            click.echo(
+                click.style(
+                    f"Failed to start services because port {port} is already in use.",
+                    fg="red",
+                ),
+                err=True,
+            )
+            try:
+                ps = subprocess.run(
+                    ["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception:
+                ps = None
+
+            offenders: list[str] = []
+            if ps is not None and ps.returncode == 0:
+                for line in ps.stdout.splitlines():
+                    if f":{port}->" not in line and f"::{port}->" not in line:
+                        continue
+                    offenders.append(line.split("\t", maxsplit=1)[0].strip())
+
+            if offenders:
+                click.echo(
+                    "Stop the container using this port and rerun. Containers using this port:",
+                    err=True,
+                )
+                for name in offenders:
+                    click.echo(f"  - {name}", err=True)
+                click.echo("Tip: docker stop <container>", err=True)
+            else:
+                click.echo(
+                    (
+                        f"Stop whatever is using port {port} and rerun. "
+                        f"Tip: ss -ltnp | rg ':{port}\\b'"
+                    ),
+                    err=True,
+                )
+            raise SystemExit(1)
+
         click.echo(
             click.style("Failed to start services:", fg="red"),
             err=True,
@@ -1137,10 +1267,12 @@ def ensure_env_started_local(
             click.echo(result.stderr.strip(), err=True)
         raise SystemExit(1)
 
-    click.echo()
+    if not quiet:
+        click.echo()
     _poll_health(
         _local_health_fetcher(compose_file),
         timeout=180,
+        quiet=quiet,
     )
 
 
@@ -1161,7 +1293,7 @@ def ensure_env_started_daytona(
 
     Returns the endpoints dict ``{tool_name: public_url}``.
     """
-    _validate_daytona_coding_assets(config, env_dir)
+    validate_daytona_coding_assets(config, env_dir)
 
     runner = _get_daytona_runner(daytona_api_key=daytona_api_key)
     tool_ports = _get_tool_ports(config, config_path)
@@ -1191,12 +1323,15 @@ def run_env_seed_local(
     env_dir: Path,
     config: EnvConfig,
     config_path: Path | None = None,
+    *,
+    quiet: bool = False,
 ) -> None:
     """Run seed-profile services locally and verify."""
     seed_svc_names = _get_seed_service_names(config, config_path)
     if not seed_svc_names:
         return
-    click.echo("  Running environment seed services...")
+    if not quiet:
+        click.echo("  Running environment seed services...")
     _run_profiled_services_local(env_dir, seed_svc_names, profile="seed", quiet=True)
     _verify_seed_local(config, config_path)
 
@@ -1213,7 +1348,7 @@ def run_env_seed_daytona(
     seed_svc_names = _get_seed_service_names(config, config_path)
     if not seed_svc_names:
         return
-    click.echo("  Running environment seed services...")
+    click.echo("  Running seed services...")
     runner = _get_daytona_runner(daytona_api_key=daytona_api_key)
     runner.seed(env_dir, seed_svc_names)
     if endpoints:
@@ -1243,7 +1378,7 @@ def env_down_local(env_dir: Path) -> None:
         click.echo(result.stderr, err=True)
         raise SystemExit(1)
 
-    click.echo(click.style("Environment stopped.", fg="green"))
+    click.echo(click.style("Services stopped.", fg="green"))
 
 
 def env_purge_docker_local(env_dir: Path) -> bool:

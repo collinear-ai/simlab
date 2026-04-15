@@ -168,6 +168,7 @@ def test_command_telemetry_skips_without_collinear_api_key(
 ) -> None:
     monkeypatch.setenv("SIMLAB_SCENARIO_MANAGER_API_URL", "https://rl-gym-api.collinear.ai")
     monkeypatch.delenv("SIMLAB_COLLINEAR_API_KEY", raising=False)
+    monkeypatch.delenv("COLLINEAR_API_KEY", raising=False)
     monkeypatch.setenv("SIMLAB_CONFIG", str(tmp_path / "nonexistent.toml"))
 
     runner = CliRunner()

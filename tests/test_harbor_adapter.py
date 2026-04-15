@@ -8,9 +8,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from click.testing import CliRunner
+from simlab.agents import loader as agents_loader
 from simlab.agents.base import ToolCall
 from simlab.agents.base import ToolCallResult
 from simlab.cli import tasks as tasks_cli
+from simlab.runtime import rollout_runner
 from simlab.runtime.adapters.harbor.prepare import parse_harbor_task
 from simlab.runtime.adapters.harbor.prepare import prepare_harbor_run
 from simlab.runtime.adapters.harbor.trajectory import build_atif_trajectory
@@ -413,7 +415,7 @@ def test_rewrite_mcp_config_for_runtime_local(tmp_path: Path) -> None:
     host_port = compose_service_host_port(compose, "mcp-server")
 
     rewritten = rewrite_mcp_config_for_runtime(
-        tasks_cli.load_mcp_servers_from_env_dir(prepared.env_dir),
+        rollout_runner.load_mcp_servers_from_env_dir(prepared.env_dir),
         env_dir=prepared.env_dir,
         using_daytona=False,
         daytona_client_factory=lambda **_kwargs: None,
@@ -449,7 +451,7 @@ def test_rewrite_mcp_config_for_runtime_daytona(tmp_path: Path) -> None:
             return FakeSandbox()
 
     rewritten = rewrite_mcp_config_for_runtime(
-        tasks_cli.load_mcp_servers_from_env_dir(prepared.env_dir),
+        rollout_runner.load_mcp_servers_from_env_dir(prepared.env_dir),
         env_dir=prepared.env_dir,
         using_daytona=True,
         daytona_client_factory=lambda **_kwargs: FakeDaytona(),
@@ -536,20 +538,21 @@ def test_tasks_run_harbor_uses_instruction_and_writes_reward_files(
         lambda *args, **kwargs: ("test-model", "openai", None, None),
     )
     monkeypatch.setattr(tasks_cli, "env_has_local_services", lambda _env_dir: False)
+    monkeypatch.setattr(agents_loader, "load_agent_class", lambda _path: None)
     monkeypatch.setattr(
-        tasks_cli,
-        "_resolve_endpoints",
+        rollout_runner,
+        "resolve_endpoints",
         lambda **_kwargs: ({"harbor-main": "http://localhost:18020"}, False),
     )
-    monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", lambda **_kwargs: None)
-    monkeypatch.setattr(tasks_cli, "_require_mcp_tools_available", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_reachable_endpoints", lambda **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_mcp_tools_available", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        tasks_cli,
+        rollout_runner,
         "get_agent_runtime_helpers",
         lambda: (FakeEnvironment, fake_run_with_agent_contract),
     )
     monkeypatch.setattr(
-        tasks_cli.harbor_verifier_runtime,
+        rollout_runner.harbor_verifier_runtime,
         "run_harbor_verifier",
         lambda **_kwargs: (
             True,
@@ -676,20 +679,21 @@ def test_tasks_run_harbor_keep_alive_retains_workspace(
         lambda *args, **kwargs: ("test-model", "openai", None, None),
     )
     monkeypatch.setattr(tasks_cli, "env_has_local_services", lambda _env_dir: False)
+    monkeypatch.setattr(agents_loader, "load_agent_class", lambda _path: None)
     monkeypatch.setattr(
-        tasks_cli,
-        "_resolve_endpoints",
+        rollout_runner,
+        "resolve_endpoints",
         lambda **_kwargs: ({"harbor-main": "http://localhost:18020"}, False),
     )
-    monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", lambda **_kwargs: None)
-    monkeypatch.setattr(tasks_cli, "_require_mcp_tools_available", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_reachable_endpoints", lambda **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_mcp_tools_available", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        tasks_cli,
+        rollout_runner,
         "get_agent_runtime_helpers",
         lambda: (FakeEnvironment, lambda **_kwargs: FakeArtifacts()),
     )
     monkeypatch.setattr(
-        tasks_cli.harbor_verifier_runtime,
+        rollout_runner.harbor_verifier_runtime,
         "run_harbor_verifier",
         lambda **_kwargs: (
             True,
@@ -777,20 +781,21 @@ def test_tasks_run_harbor_failed_verifier_still_prints_summary_card(
         lambda *args, **kwargs: ("test-model", "openai", None, None),
     )
     monkeypatch.setattr(tasks_cli, "env_has_local_services", lambda _env_dir: False)
+    monkeypatch.setattr(agents_loader, "load_agent_class", lambda _path: None)
     monkeypatch.setattr(
-        tasks_cli,
-        "_resolve_endpoints",
+        rollout_runner,
+        "resolve_endpoints",
         lambda **_kwargs: ({"harbor-main": "http://localhost:18020"}, False),
     )
-    monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", lambda **_kwargs: None)
-    monkeypatch.setattr(tasks_cli, "_require_mcp_tools_available", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_reachable_endpoints", lambda **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_mcp_tools_available", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        tasks_cli,
+        rollout_runner,
         "get_agent_runtime_helpers",
         lambda: (FakeEnvironment, lambda **_kwargs: FakeArtifacts()),
     )
     monkeypatch.setattr(
-        tasks_cli.harbor_verifier_runtime,
+        rollout_runner.harbor_verifier_runtime,
         "run_harbor_verifier",
         lambda **_kwargs: (
             False,
@@ -907,24 +912,26 @@ def test_tasks_run_harbor_cli_timeout_override_wins(
         lambda *args, **kwargs: ("test-model", "openai", None, None),
     )
     monkeypatch.setattr(tasks_cli, "env_has_local_services", lambda _env_dir: False)
+    monkeypatch.setattr(agents_loader, "load_agent_class", lambda _path: None)
     monkeypatch.setattr(
-        tasks_cli,
-        "_resolve_endpoints",
+        rollout_runner,
+        "resolve_endpoints",
         lambda **_kwargs: ({"harbor-main": "http://localhost:18020"}, False),
     )
-    monkeypatch.setattr(tasks_cli, "_require_reachable_endpoints", lambda **_kwargs: None)
-    monkeypatch.setattr(tasks_cli, "_require_mcp_tools_available", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_reachable_endpoints", lambda **_kwargs: None)
+    monkeypatch.setattr(rollout_runner, "require_mcp_tools_available", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        tasks_cli,
+        rollout_runner,
         "get_agent_runtime_helpers",
         lambda: (
             FakeEnvironment,
-            lambda **kwargs: captured.update({"timeout_seconds": kwargs["timeout_seconds"]})
-            or FakeArtifacts(),
+            lambda **kwargs: (
+                captured.update({"timeout_seconds": kwargs["timeout_seconds"]}) or FakeArtifacts()
+            ),
         ),
     )
     monkeypatch.setattr(
-        tasks_cli.harbor_verifier_runtime,
+        rollout_runner.harbor_verifier_runtime,
         "run_harbor_verifier",
         lambda **_kwargs: (
             True,
