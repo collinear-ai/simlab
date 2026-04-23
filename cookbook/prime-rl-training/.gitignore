@@ -1,0 +1,9 @@
+# Generated artifacts (re-create with run_pipeline.sh)
+output/
+dataset/
+dist/
+.prime/
+__pycache__/
+*.pyc
+taskgen/
+generated-tasks/

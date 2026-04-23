@@ -1,0 +1,21 @@
+[project]
+name = "simlab-tasks"
+description = "SimLab customer support task environment for prime-rl training. Uses pre-collected trajectories from SimLab rollouts as prompts with quality-based reward scoring."
+tags = ["simlab", "tool-use", "customer-support", "train", "eval"]
+version = "0.3.0"
+requires-python = ">=3.10"
+dependencies = [
+    "verifiers>=0.1.11",
+    "datasets",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["simlab_tasks.py", "pyproject.toml"]
+
+[tool.verifiers.eval]
+num_examples = 5
+rollouts_per_example = 3
