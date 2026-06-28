@@ -1,0 +1,39 @@
+# Prime-RL RL config for SimLab environment training
+# Usage: prime rl run configs/rl.toml
+#
+# This config runs hosted RL training on Prime Intellect's platform
+# using a SimLab verifiers environment for reward scoring.
+
+# Use the SFT-warmed model or start from a base instruct model
+model = "Qwen/Qwen3.5-4B"
+max_steps = 50
+
+# Training hyperparameters
+batch_size = 64
+rollouts_per_example = 4
+# learning_rate = 3e-6
+# lora_alpha = 16
+
+[sampling]
+max_tokens = 2048
+# temperature = 0.7
+
+# SimLab verifiers environment
+[[env]]
+id = "collinear-simlab/simlab-tasks"
+
+# Optional: W&B logging
+# [wandb]
+# project = "simlab-rl-training"
+
+# Optional: evaluation during training
+# [eval]
+# interval = 25
+# [[eval.env]]
+# id = "simlab-tasks"
+# args = { output_dir = "./output", min_reward = 0.5 }
+
+# Optional: checkpointing
+# [checkpoints]
+# interval = 50
+# keep_cloud = 3

@@ -1,0 +1,54 @@
+{
+  "meta": {
+    "version": "2.0",
+    "task_id": "4_enterprise_client_escalation_resolve_david_parks_api_rate_limiting_issue_and_pre_de0cff0d",
+    "display_name": "Enterprise Client Escalation: Resolve David Park's API Rate Limiting Issue and Prevent Service Interruption",
+    "category": "vip_enterprise_support",
+    "difficulty": "hard",
+    "idempotent": false
+  },
+  "task": "David Park at Park Industries has escalated a critical production API rate-limiting issue causing service interruptions. Search for or create a helpdesk ticket for this issue. Before responding to David, contact Marcus Chen in the engineering-support channel to get his technical assessment. After Marcus provides his findings, reach out to Robert Hayes via direct message to confirm the remediation messaging and any service credit or compensation. Once you have both assessments, email David with the findings, remediation steps, resolution timeline, and CC Robert Hayes for executive visibility.",
+  "tool_servers": [],
+  "apps": [
+    "Helpdesk",
+    "Chat",
+    "Email"
+  ],
+  "npcs": [
+    {
+      "id": "david_park"
+    },
+    {
+      "id": "marcus_chen"
+    },
+    {
+      "id": "robert_hayes"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "david_park",
+      "to_addr": "support@weaverenterprises.com",
+      "subject": "URGENT: Production API Integration Rate Limiting - Service Interruptions",
+      "body_text": "Hi,\n\nWe're experiencing critical issues with our production API integration. We're hitting unexpected rate limits that are causing service interruptions for our downstream clients. This is impacting our ability to serve our end users and is a significant operational problem.\n\nWe have an SLA in place for this account and need immediate investigation and resolution.\n\nPlease advise on the root cause and what remediation steps or timeline we should expect.\n\nThanks,\nDavid Park\nPark Industries",
+      "body_html": "<p>Hi,</p><p>We're experiencing critical issues with our production API integration. We're hitting unexpected rate limits that are causing service interruptions for our downstream clients. This is impacting our ability to serve our end users and is a significant operational problem.</p><p>We have an SLA in place for this account and need immediate investigation and resolution.</p><p>Please advise on the root cause and what remediation steps or timeline we should expect.</p><p>Thanks,<br>David Park<br>Park Industries</p>"
+    }
+  ],
+  "seed_group_channels": [
+    {
+      "channel_name": "engineering-support",
+      "member_profile_ids": [
+        "marcus_chen",
+        "priya_sharma",
+        "kevin_zhang",
+        "sandra_kim"
+      ],
+      "messages": [
+        {
+          "from_profile_id": "marcus_chen",
+          "text": "Channel for escalations and coordination between support and engineering teams on critical production issues."
+        }
+      ]
+    }
+  ]
+}

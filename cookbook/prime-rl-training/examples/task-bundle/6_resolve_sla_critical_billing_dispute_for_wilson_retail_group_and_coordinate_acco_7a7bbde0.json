@@ -1,0 +1,54 @@
+{
+  "meta": {
+    "version": "2.0",
+    "task_id": "6_resolve_sla_critical_billing_dispute_for_wilson_retail_group_and_coordinate_acco_7a7bbde0",
+    "display_name": "Resolve SLA-critical billing dispute for Wilson Retail Group and coordinate account review",
+    "category": "ticket_resolution",
+    "difficulty": "hard",
+    "idempotent": false
+  },
+  "task": "You're handling an urgent billing dispute from James Wilson at Wilson Retail Group regarding invoice #INV-2025-47500 for $47,500. He claims a 15% discount was promised during renewal but the invoice reflects the standard rate. With ~4 hours before SLA breach, contact Diana Walsh to confirm the current billing status and any documented discount in the system. Then contact Amanda Reeves to verify what discount was discussed and agreed to during the renewal conversation. Once you have confirmation the discount was promised, contact James Foster to request approval for the billing adjustment. Document your findings in the ticket and send James Wilson a clear resolution.",
+  "tool_servers": [],
+  "apps": [
+    "Helpdesk",
+    "Chat",
+    "Email"
+  ],
+  "npcs": [
+    {
+      "id": "james_wilson_wrg"
+    },
+    {
+      "id": "diana_walsh"
+    },
+    {
+      "id": "amanda_reeves"
+    },
+    {
+      "id": "james_foster"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "diana_walsh",
+      "to_addr": "hr@weaverenterprises.com",
+      "subject": "Invoice #INV-2025-47500 – Wilson Retail Group Enterprise Service Fees",
+      "body_text": "Hi,\n\nI'm looking into a dispute on invoice #INV-2025-47500 for $47,500 (enterprise service fees for Wilson Retail Group). The customer claims they were promised a 15% discount on renewal but the invoice shows the previous rate.\n\nCan you confirm:\n1. What was the renewal discussion and agreed discount (if any)?\n2. What contract terms are on file?\n\nThis is urgent—ticket SLA expires in ~4 hours.\n\nThanks,\nDiana Walsh\nBilling Specialist",
+      "body_html": "<p>Hi,</p><p>I'm looking into a dispute on invoice #INV-2025-47500 for $47,500 (enterprise service fees for Wilson Retail Group). The customer claims they were promised a 15% discount on renewal but the invoice shows the previous rate.</p><p>Can you confirm:</p><ol><li>What was the renewal discussion and agreed discount (if any)?</li><li>What contract terms are on file?</li></ol><p>This is urgent—ticket SLA expires in ~4 hours.</p><p>Thanks,<br>Diana Walsh<br>Billing Specialist</p>"
+    },
+    {
+      "from_profile_id": "amanda_reeves",
+      "to_addr": "hr@weaverenterprises.com",
+      "subject": "Wilson Retail Group Renewal – Discount Discussion",
+      "body_text": "Hi,\n\nJames Wilson from Wilson Retail Group has disputed the recent $47,500 invoice, claiming we promised a 15% discount during renewal. I need to verify what was actually discussed in our last renewal conversation.\n\nCan you pull details on:\n1. Date and participants of the last renewal meeting/call?\n2. What discount (if any) was offered or discussed?\n3. Any notes or email confirmation sent to the customer?\n\nUrgent—SLA deadline in ~4 hours.\n\nThanks,\nAmanda Reeves\nSenior Account Manager",
+      "body_html": "<p>Hi,</p><p>James Wilson from Wilson Retail Group has disputed the recent $47,500 invoice, claiming we promised a 15% discount during renewal. I need to verify what was actually discussed in our last renewal conversation.</p><p>Can you pull details on:</p><ol><li>Date and participants of the last renewal meeting/call?</li><li>What discount (if any) was offered or discussed?</li><li>Any notes or email confirmation sent to the customer?</li></ol><p>Urgent—SLA deadline in ~4 hours.</p><p>Thanks,<br>Amanda Reeves<br>Senior Account Manager</p>"
+    },
+    {
+      "from_profile_id": "james_foster",
+      "to_addr": "hr@weaverenterprises.com",
+      "subject": "Approval Needed – Wilson Retail Group Invoice Adjustment",
+      "body_text": "Hi,\n\nWilson Retail Group is disputing invoice #INV-2025-47500 ($47,500) for enterprise service fees. Customer claims a 15% discount was promised on renewal but not applied.\n\nIf the discount was indeed committed, I may need your approval to adjust the invoice. Can you confirm:\n1. Is a 15% discount justified based on renewal terms?\n2. If yes, do you have authority to approve the adjustment?\n\nSLA expires in ~4 hours.\n\nThanks,\nJames Foster\nBilling Manager",
+      "body_html": "<p>Hi,</p><p>Wilson Retail Group is disputing invoice #INV-2025-47500 ($47,500) for enterprise service fees. Customer claims a 15% discount was promised on renewal but not applied.</p><p>If the discount was indeed committed, I may need your approval to adjust the invoice. Can you confirm:</p><ol><li>Is a 15% discount justified based on renewal terms?</li><li>If yes, do you have authority to approve the adjustment?</li></ol><p>SLA expires in ~4 hours.</p><p>Thanks,<br>James Foster<br>Billing Manager</p>"
+    }
+  ]
+}

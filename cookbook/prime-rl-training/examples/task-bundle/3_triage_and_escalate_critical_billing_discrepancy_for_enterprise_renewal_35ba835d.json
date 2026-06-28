@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "version": "2.0",
+    "task_id": "3_triage_and_escalate_critical_billing_discrepancy_for_enterprise_renewal_35ba835d",
+    "display_name": "Triage and escalate critical billing discrepancy for enterprise renewal",
+    "category": "ticket_triage",
+    "difficulty": "hard",
+    "idempotent": false
+  },
+  "task": "You've received a billing dispute from Karen Mitchell regarding her enterprise renewal invoice. She reports a 40% increase with unexpected charges and is threatening to cancel by end of week. Contact Diana Walsh to obtain the specific billing details and charge breakdown from the invoice. Then contact Carlos Mendez to confirm what was discussed during the renewal process and any contract amendments. Once you have the facts from both, review the ticket details and determine whether this is a genuine billing error or a legitimate contract amendment issue. Provide Karen with a clear explanation of the charges and your recommended resolution path.",
+  "tool_servers": [],
+  "apps": [
+    "Helpdesk",
+    "Chat",
+    "Email"
+  ],
+  "npcs": [
+    {
+      "id": "karen_mitchell"
+    },
+    {
+      "id": "diana_walsh"
+    },
+    {
+      "id": "carlos_mendez"
+    }
+  ],
+  "seed_emails": [
+    {
+      "from_profile_id": "karen_mitchell",
+      "to_addr": "support@weaverenterprises.com",
+      "subject": "Fwd: Urgent: Billing Discrepancy on Enterprise Renewal Invoice",
+      "body_text": "---------- Forwarded message ---------\nFrom: Karen Mitchell <karen.mitchell@mitchellassociates.co>\n\nHi,\n\nI received our enterprise renewal invoice and noticed significant unexpected charges that weren't discussed during contract renewal. The invoice shows a 40% increase from our previous year, but our service scope and user count haven't changed.\n\nI need clarification on:\n1. Why the unit price increased\n2. What these additional line items represent\n3. Whether this reflects an undisclosed contract amendment\n\nI'm frustrated because we were led to believe our renewal would be flat or minimal increase. If this isn't resolved by end of this week, we will have to cancel and explore alternatives.\n\nPlease escalate this urgently.\n\nKaren Mitchell\nMitchell Associates",
+      "body_html": "<p>---------- Forwarded message ---------</p><p>From: Karen Mitchell &lt;karen.mitchell@mitchellassociates.co&gt;</p><p>Hi,</p><p>I received our enterprise renewal invoice and noticed significant unexpected charges that weren't discussed during contract renewal. The invoice shows a 40% increase from our previous year, but our service scope and user count haven't changed.</p><p>I need clarification on:</p><ul><li>Why the unit price increased</li><li>What these additional line items represent</li><li>Whether this reflects an undisclosed contract amendment</li></ul><p>I'm frustrated because we were led to believe our renewal would be flat or minimal increase. If this isn't resolved by end of this week, we will have to cancel and explore alternatives.</p><p>Please escalate this urgently.</p><p>Karen Mitchell<br>Mitchell Associates</p>"
+    }
+  ]
+}
