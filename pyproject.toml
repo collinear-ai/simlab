@@ -44,7 +44,7 @@ npc = [
     "uvicorn>=0.20.0",
 ]
 google-adk = [
-    "google-adk>=1.28.0",
+    "google-adk>=2.3.0",
 ]
 daytona = [
     "daytona>=0.149.0",
