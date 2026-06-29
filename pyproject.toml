@@ -10,7 +10,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.0",
-    "litellm==1.89.4",
+    "litellm==1.90.0",
     "openai>=1.0.0",
     "pydantic>=2.0",
     "pyyaml>=6.0",
